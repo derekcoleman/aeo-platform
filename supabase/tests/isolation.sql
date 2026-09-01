@@ -186,3 +186,84 @@ begin;
 commit;
 
 \echo 'isolation: audit assertions passed'
+
+-- ── 0004: demand mining + SERP tracking ─────────────────────────────────────
+insert into measure.questions (id, site_id, text, normalized, source, seed_term, locale, device, demand_score, is_tracked, tracking_tier) values
+  ('dddddddd-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001',
+   'What is SCIM provisioning?', 'what is scim provisioning', 'autocomplete', 'scim', 'us-en', 'desktop', 12, true, 'weekly'),
+  ('dddddddd-0000-0000-0000-000000000002', 'bbbbbbbb-0000-0000-0000-000000000002',
+   'Globex vs Initech pricing', 'globex vs initech pricing', 'paa', 'globex', 'us-en', 'desktop', 9, false, 'none')
+on conflict do nothing;
+insert into measure.serp_snapshots (id, site_id, question_id, provider, fetched_at, locale, device, aio_triggered, cost_usd) values
+  ('eeeeeeee-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001',
+   'dddddddd-0000-0000-0000-000000000001', 'serpapi', now(), 'us-en', 'desktop', true, 0.02)
+on conflict do nothing;
+insert into measure.serp_citations (site_id, serp_snapshot_id, surface, url, domain, position, is_owned) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-0000-0000-0000-000000000001',
+   'ai_overview', 'https://competitor.com/scim', 'competitor.com', 1, false);
+insert into measure.serp_cache (key, provider, method, query, locale, device, day, payload) values
+  ('serpapi|serp|us-en|desktop|2026-01-01|what is scim provisioning', 'serpapi', 'serp',
+   'what is scim provisioning', 'us-en', 'desktop', '2026-01-01', '{}'::jsonb)
+on conflict do nothing;
+grant usage on schema measure to app_user;
+grant select on all tables in schema measure to app_user;
+
+begin;
+  select pg_temp.expect('question org_id denormalised from site',
+    (select count(*) from measure.questions
+      where id = 'dddddddd-0000-0000-0000-000000000001'
+        and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+  select pg_temp.expect('snapshot org_id denormalised from site',
+    (select count(*) from measure.serp_snapshots
+      where id = 'eeeeeeee-0000-0000-0000-000000000001'
+        and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+  select pg_temp.expect('citation org_id denormalised from site',
+    (select count(*) from measure.serp_citations
+      where serp_snapshot_id = 'eeeeeeee-0000-0000-0000-000000000001'
+        and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('member sees only own questions', (select count(*) from measure.questions), 1);
+  select pg_temp.expect('member cannot see other org questions',
+    (select count(*) from measure.questions where site_id = 'bbbbbbbb-0000-0000-0000-000000000002'), 0);
+  select pg_temp.expect('member sees own snapshots', (select count(*) from measure.serp_snapshots), 1);
+  select pg_temp.expect('member sees own citations', (select count(*) from measure.serp_citations), 1);
+  select pg_temp.expect('member cannot read the shared serp cache', (select count(*) from measure.serp_cache), 0);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('other member sees only their questions',
+    (select count(*) from measure.questions where site_id = 'bbbbbbbb-0000-0000-0000-000000000002'), 1);
+  select pg_temp.expect('other member sees no Acme citations', (select count(*) from measure.serp_citations), 0);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees all questions', (select count(*) from measure.questions), 2);
+  select pg_temp.expect('staff reads the serp cache', (select count(*) from measure.serp_cache), 1);
+commit;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from measure.questions;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read measure.questions';
+    end if;
+    raise notice 'ok  renderer cannot read measure.questions';
+  end $$;
+commit;
+
+\echo 'isolation: demand/serp assertions passed'
