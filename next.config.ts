@@ -19,9 +19,7 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   skipTrailingSlashRedirect: true,
   assetPrefix: process.env.NEXT_PUBLIC_ASSET_PREFIX || undefined,
-  experimental: {
-    typedRoutes: true,
-  },
+  typedRoutes: true,
 };
 
 export default nextConfig;

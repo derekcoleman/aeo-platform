@@ -1,6 +1,6 @@
 import type { ProxyMode, SiteRoute, SlashMode } from "./types";
 import { normaliseHost } from "./urls";
-import { SiteResolver, type SiteStore } from "./resolve-site";
+import { SiteLookupError, SiteResolver, type SiteStore } from "./resolve-site";
 
 /**
  * Site lookup over PostgREST.
@@ -36,20 +36,34 @@ export class HttpSiteStore implements SiteStore {
     );
     url.searchParams.set("limit", "1");
 
-    const res = await this.fetchImpl(url, {
-      headers: {
-        apikey: this.apiKey,
-        authorization: `Bearer ${this.apiKey}`,
-        accept: "application/json",
-      },
-      // Site config changes rarely; SiteResolver holds the short-lived cache.
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        headers: {
+          apikey: this.apiKey,
+          authorization: `Bearer ${this.apiKey}`,
+          accept: "application/json",
+        },
+        // Site config changes rarely; SiteResolver holds the short-lived cache.
+        cache: "no-store",
+        signal: AbortSignal.timeout(2000),
+      });
+    } catch (cause) {
+      // Transport failure or timeout: we do not know whether this host is ours.
+      throw new SiteLookupError(cause);
+    }
 
-    const rows = (await res.json()) as SiteRow[];
-    const row = rows[0];
-    return row ? toSiteRoute(row) : null;
+    // 404 from PostgREST would be a routing problem on our side, not "no such
+    // site", so anything non-OK is an unknown rather than a definite miss.
+    if (!res.ok) throw new SiteLookupError(`status ${res.status}`);
+
+    try {
+      const rows = (await res.json()) as SiteRow[];
+      const row = rows[0];
+      return row ? toSiteRoute(row) : null;
+    } catch (cause) {
+      throw new SiteLookupError(cause);
+    }
   }
 }
 

@@ -79,6 +79,18 @@ JWT claim denies rather than grants and that the renderer role cannot reach
 `app.sites`. If one starts failing, fix the policy — don't adjust the
 expectation.
 
+### Verifying the proxy contract
+
+Unit tests cover the decision logic; `scripts/verify-proxy.sh` covers the wire.
+It asserts the invariants above against a running server — including that a
+forged `x-forwarded-host` cannot move the canonical, that cookies never reach a
+handler, and that no response contains our edge hostname.
+
+```bash
+npm run build && npx next start -p 3401 &
+./scripts/verify-proxy.sh http://localhost:3401
+```
+
 ### Reproducing the proxy locally
 
 ```bash

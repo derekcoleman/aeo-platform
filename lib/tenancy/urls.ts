@@ -93,6 +93,49 @@ export function isReservedPath(pathname: string): boolean {
 }
 
 /**
+ * Root-level paths we serve in addition to the site's own subtree.
+ *
+ * We ask customers for a second, tiny rewrite covering these. Root-level
+ * llms.txt is meaningfully more discoverable than one buried under a content
+ * prefix, and these paths are otherwise unused so the risk is close to zero.
+ *
+ * Note what is NOT here: the customer's root robots.txt. The blast radius of
+ * getting that wrong is their entire site, so onboarding asks them to add one
+ * `Sitemap:` line instead and the health check verifies it.
+ */
+export const ROOT_PATHS = ["/llms.txt", "/llms-full.txt", "/.well-known/llms.txt"] as const;
+
+export function isRootPath(pathname: string): boolean {
+  return (ROOT_PATHS as readonly string[]).includes(pathname);
+}
+
+/**
+ * Artifact filenames served from inside a site's subtree.
+ *
+ * These are dispatched by the catch-all handler rather than by their own route
+ * files, because the internal path carries the tenant's prefix — which varies
+ * per site — so `/render/{id}/resources/sitemap.xml` cannot match a static
+ * `/render/[siteId]/sitemap.xml` route. They are reserved slugs as a result.
+ */
+export const ARTIFACTS = {
+  sitemap: "sitemap.xml",
+  feed: "feed.xml",
+  llms: "llms.txt",
+  llmsFull: "llms-full.txt",
+  robots: "robots.txt",
+  health: "aeo-health",
+} as const;
+
+export type ArtifactKind = keyof typeof ARTIFACTS;
+
+export function artifactFor(segment: string): ArtifactKind | null {
+  for (const [kind, name] of Object.entries(ARTIFACTS)) {
+    if (segment === name) return kind as ArtifactKind;
+  }
+  return null;
+}
+
+/**
  * Map a public path onto the internal render route.
  *
  * `/resources/hello` -> `/render/<siteId>/resources/hello`

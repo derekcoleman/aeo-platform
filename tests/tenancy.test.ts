@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   EdgeHostnameLeakError,
+  SiteLookupError,
   SiteResolver,
   absoluteUrl,
   assertNoEdgeHostname,
@@ -182,5 +183,34 @@ describe("SiteResolver caching", () => {
   it("returns null for a missing host header rather than throwing", async () => {
     const r = new SiteResolver(store(() => site));
     expect(await r.resolve(null)).toBeNull();
+  });
+});
+
+describe("lookup failure is not a miss", () => {
+  it("propagates SiteLookupError rather than reporting 'not ours'", async () => {
+    // Answering "unknown host" on a transport blip would make a Worker refetch
+    // the customer's origin, serving THEIR 404 for an article that exists.
+    const store = {
+      byEdgeHostname: async () => {
+        throw new SiteLookupError("boom");
+      },
+    };
+    await expect(new SiteResolver(store).resolve("acme-8fj2.blogedge.aeo.app")).rejects.toBeInstanceOf(
+      SiteLookupError,
+    );
+  });
+
+  it("never caches a failed lookup", async () => {
+    let calls = 0;
+    const store = {
+      byEdgeHostname: async () => {
+        calls++;
+        throw new SiteLookupError("boom");
+      },
+    };
+    const r = new SiteResolver(store);
+    await r.resolve("x.blogedge.aeo.app").catch(() => {});
+    await r.resolve("x.blogedge.aeo.app").catch(() => {});
+    expect(calls).toBe(2);
   });
 });

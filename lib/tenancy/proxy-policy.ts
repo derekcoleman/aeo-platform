@@ -3,6 +3,7 @@ import type { SiteRoute } from "./types";
 import {
   isEdgeHost,
   isReservedPath,
+  isRootPath,
   isWithinPrefix,
   normaliseHost,
   normaliseTrailingSlash,
@@ -42,6 +43,16 @@ export const INTERNAL_HEADER = {
   locale: "x-aeo-internal-locale",
   indexable: "x-aeo-internal-indexable",
   trailingSlash: "x-aeo-internal-trailing-slash",
+  /**
+   * Root-relative Location for a trailing-slash normalisation.
+   *
+   * The redirect is emitted by the route handler rather than by middleware,
+   * because Next's middleware runtime parses the `Location` header as an
+   * absolute URL and throws on a relative one — and relative is exactly what we
+   * need, since an absolute Location would carry our edge hostname into a
+   * customer-visible response.
+   */
+  redirect: "x-aeo-internal-redirect",
 } as const;
 
 export interface ProxyInput {
@@ -65,9 +76,16 @@ export type ProxyAction =
   | { kind: "passthrough"; status: 404 }
   /** A misconfigured rewrite is bouncing the request back to us. */
   | { kind: "loop"; status: 508 }
-  /** Trailing-slash normalisation. Location MUST be root-relative. */
-  | { kind: "redirect"; status: 301; location: string }
-  /** Serve it. */
+  /**
+   * Serve it.
+   *
+   * `redirectTo`, when present, means the path needs trailing-slash
+   * normalisation and the handler should answer 301 with that ROOT-RELATIVE
+   * Location. The redirect is deliberately not emitted by middleware: Next's
+   * middleware runtime parses `Location` as an absolute URL and throws on a
+   * relative one — and relative is the whole point, because an absolute
+   * Location would carry our edge hostname into a customer-visible response.
+   */
   | {
       kind: "render";
       siteId: string;
@@ -75,6 +93,7 @@ export type ProxyAction =
       canonicalDomain: string;
       indexable: boolean;
       site: SiteRoute;
+      redirectTo?: string;
     };
 
 export function decideProxyAction(input: ProxyInput): ProxyAction {
@@ -85,11 +104,18 @@ export function decideProxyAction(input: ProxyInput): ProxyAction {
     return { kind: "loop", status: 508 };
   }
 
-  // Secondary loop guard. If the "original" host is one of ours, the customer
-  // pointed their rewrite at the edge hostname instead of their own domain, or
-  // orange-clouded a record that is also a Worker route. Either way, following
-  // it would spin.
-  if (input.forwardedHost && isEdgeHost(normaliseHost(input.forwardedHost))) {
+  // Secondary loop guard: the "original" host is one of OURS but not the host
+  // this request arrived on. That means a customer pointed their rewrite at an
+  // edge hostname instead of their own domain, or orange-clouded a record that
+  // is also a Worker route — following it would spin.
+  //
+  // Note the inequality. Servers (Next's included) populate x-forwarded-host
+  // from Host when nothing upstream set it, so forwardedHost === host is the
+  // ordinary shape of a DIRECT request to our edge — a health check or a
+  // scanner, not a loop. Those are handled below and simply render noindex.
+  const forwarded = input.forwardedHost ? normaliseHost(input.forwardedHost) : null;
+  const arrivedOn = input.host ? normaliseHost(input.host) : null;
+  if (forwarded && isEdgeHost(forwarded) && forwarded !== arrivedOn) {
     return { kind: "loop", status: 508 };
   }
 
@@ -104,9 +130,10 @@ export function decideProxyAction(input: ProxyInput): ProxyAction {
     return { kind: "passthrough", status: 404 };
   }
 
-  // Requests outside the site's subtree are not ours to answer. This is the
+  // Requests outside the site's subtree are not ours to answer, except for the
+  // handful of root paths customers rewrite to us on purpose. This is the
   // path-collision case, and passthrough is what makes it non-destructive.
-  if (!isWithinPrefix(input.pathname, input.site.pathPrefix)) {
+  if (!isWithinPrefix(input.pathname, input.site.pathPrefix) && !isRootPath(input.pathname)) {
     return { kind: "passthrough", status: 404 };
   }
 
@@ -115,17 +142,20 @@ export function decideProxyAction(input: ProxyInput): ProxyAction {
     input.site.trailingSlash,
     input.site.pathPrefix,
   );
-  if (redirectTo) {
-    // Root-relative on purpose: an absolute Location would carry our edge
-    // hostname into a customer-visible response.
-    return { kind: "redirect", status: 301, location: redirectTo };
-  }
 
-  const publicHost = resolvePublicHost(input.site, input.forwardedHost);
+  // A forwarded host equal to our own edge hostname carries no information
+  // about the public host, so treat it as absent: render, but never indexable.
+  const publicHost = resolvePublicHost(
+    input.site,
+    forwarded && isEdgeHost(forwarded) ? null : input.forwardedHost,
+  );
   return {
     kind: "render",
     siteId: input.site.id,
-    internalPath: toInternalPath(input.site.id, input.pathname),
+    // Rewrite to the normalised path so the handler resolves the right page
+    // even on the request that will be redirected.
+    internalPath: toInternalPath(input.site.id, redirectTo ?? input.pathname),
+    ...(redirectTo ? { redirectTo } : {}),
     canonicalDomain: publicHost.canonicalDomain,
     indexable: publicHost.indexable,
     site: input.site,

@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import {
   HEADER,
   INTERNAL_HEADER,
+  SiteLookupError,
   STRIPPED_REQUEST_HEADERS,
   decideProxyAction,
   siteResolver,
@@ -32,7 +33,23 @@ export async function middleware(req: NextRequest) {
   // Only requests arriving on a per-site edge hostname are public render
   // traffic. Anything else (our own domains, local dev) passes straight
   // through to the app.
-  const site = await siteResolver().resolve(host);
+  let site;
+  try {
+    site = await siteResolver().resolve(host);
+  } catch (err) {
+    if (!(err instanceof SiteLookupError)) throw err;
+    // We could not determine whether this host is ours. Answering 404 would
+    // make a Mode A Worker re-fetch the customer's origin, which would then
+    // serve THEIR 404 page for an article that exists. A 503 instead lets
+    // stale-if-error and the Worker's mirror fallback do their job, so a blip
+    // on our side is invisible on their domain.
+    console.error("[aeo] site lookup failed", { host, err });
+    return new NextResponse("Temporarily unavailable", {
+      status: 503,
+      headers: { "cache-control": "no-store", "retry-after": "5" },
+    });
+  }
+
   const forwardedHost = req.headers.get(HEADER.forwardedHost);
 
   const action = decideProxyAction({
@@ -60,14 +77,6 @@ export async function middleware(req: NextRequest) {
         headers: { [HEADER.passthrough]: "1", "cache-control": "public, max-age=10" },
       });
 
-    case "redirect":
-      // Root-relative Location. An absolute one would carry our edge hostname
-      // into a customer-visible response.
-      return new NextResponse(null, {
-        status: 301,
-        headers: { location: action.location, "cache-control": "public, max-age=3600" },
-      });
-
     case "render": {
       const headers = new Headers(req.headers);
 
@@ -84,6 +93,11 @@ export async function middleware(req: NextRequest) {
       headers.set(INTERNAL_HEADER.locale, action.site.locale);
       headers.set(INTERNAL_HEADER.trailingSlash, action.site.trailingSlash);
       headers.set(INTERNAL_HEADER.indexable, action.indexable ? "1" : "0");
+
+      if (action.redirectTo) {
+        // The handler emits the 301; see the note on ProxyAction.redirectTo.
+        headers.set(INTERNAL_HEADER.redirect, action.redirectTo);
+      }
 
       const url = req.nextUrl.clone();
       url.pathname = action.internalPath;

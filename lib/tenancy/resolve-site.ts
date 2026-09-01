@@ -21,7 +21,23 @@ import { normaliseHost } from "./urls";
  */
 
 export interface SiteStore {
+  /**
+   * Returns null when the host is genuinely not one of ours, and THROWS
+   * SiteLookupError when we could not find out. The distinction matters: an
+   * unknown host is a 404 passthrough (their origin serves it), while a failed
+   * lookup must be a 503 so their CDN's stale-if-error and our Worker's mirror
+   * fallback engage instead of showing their 404 page on their own domain.
+   */
   byEdgeHostname(host: string): Promise<SiteRoute | null>;
+}
+
+/** We could not determine whether this host is ours. Never cached. */
+export class SiteLookupError extends Error {
+  constructor(cause?: unknown) {
+    super("site lookup failed");
+    this.name = "SiteLookupError";
+    this.cause = cause;
+  }
 }
 
 interface CacheEntry {
