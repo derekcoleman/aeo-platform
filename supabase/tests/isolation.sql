@@ -267,3 +267,95 @@ begin;
 commit;
 
 \echo 'isolation: demand/serp assertions passed'
+
+-- ── 0005: connectors ────────────────────────────────────────────────────────
+insert into app.org_features (org_id, feature, enabled) values
+  ('11111111-1111-1111-1111-111111111111', 'connector:profound', true)
+on conflict do nothing;
+insert into context.context_connections (id, org_id, site_id, provider, status, config, scope, secret_ref, external_account_id, external_account_name) values
+  ('cccccccc-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', null,
+   'slack', 'active', '{"teamId":"T123","channels":[]}'::jsonb, '[]'::jsonb, 'vault:connection:cccccccc-0000-0000-0000-000000000001', 'T123', 'Acme HQ'),
+  ('cccccccc-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000002',
+   'google', 'pending', '{}'::jsonb, '[]'::jsonb, null, 'ops@globex.com', 'ops@globex.com')
+on conflict do nothing;
+-- org_id deliberately omitted: the trigger must denormalise it from the connection.
+insert into context.context_sync_runs (id, connection_id, kind, status, documents_ingested) values
+  ('cccccccc-1000-0000-0000-000000000001', 'cccccccc-0000-0000-0000-000000000001', 'backfill', 'succeeded', 1)
+on conflict do nothing;
+insert into context.context_documents (connection_id, provider, kind, external_id, text, content_sha256) values
+  ('cccccccc-0000-0000-0000-000000000001', 'slack', 'slack_message', 'C1:1700000000.000100', 'we shipped SCIM', repeat('a', 64))
+on conflict do nothing;
+insert into ops.webhook_events (provider, external_id, payload) values
+  ('slack', 'Ev0001', '{"type":"event_callback"}'::jsonb)
+on conflict do nothing;
+grant usage on schema context, ops to app_user;
+grant select on all tables in schema context, ops to app_user;
+
+select pg_temp.expect('sync run org_id denormalised from connection',
+  (select count(*) from context.context_sync_runs where id = 'cccccccc-1000-0000-0000-000000000001'
+     and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+select pg_temp.expect('document org_id denormalised from connection',
+  (select count(*) from context.context_documents where connection_id = 'cccccccc-0000-0000-0000-000000000001'
+     and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+
+do $$
+declare rejected boolean := false;
+begin
+  begin
+    insert into context.context_connections (org_id, provider, secret_ref)
+    values ('11111111-1111-1111-1111-111111111111', 'slack', 'xoxb-1234-5678-abcdef');
+  exception when check_violation then
+    rejected := true;
+  end;
+  if not rejected then
+    raise exception 'FAIL raw token accepted as secret_ref';
+  end if;
+  raise notice 'ok  raw token rejected as secret_ref';
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('member sees own connections only', (select count(*) from context.context_connections), 1);
+  select pg_temp.expect('member sees no Globex connection',
+    (select count(*) from context.context_connections where org_id = '22222222-2222-2222-2222-222222222222'), 0);
+  select pg_temp.expect('member sees own sync runs', (select count(*) from context.context_sync_runs), 1);
+  select pg_temp.expect('member sees own documents', (select count(*) from context.context_documents), 1);
+  select pg_temp.expect('member sees own feature flags', (select count(*) from app.org_features), 1);
+  select pg_temp.expect('member cannot read the webhook ledger', (select count(*) from ops.webhook_events), 0);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('other member sees only their connection',
+    (select count(*) from context.context_connections where org_id = '22222222-2222-2222-2222-222222222222'), 1);
+  select pg_temp.expect('other member sees no Acme sync runs', (select count(*) from context.context_sync_runs), 0);
+  select pg_temp.expect('other member sees no Acme documents', (select count(*) from context.context_documents), 0);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees all connections', (select count(*) from context.context_connections), 2);
+  select pg_temp.expect('staff reads the webhook ledger', (select count(*) from ops.webhook_events), 1);
+commit;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from context.context_connections;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read context.context_connections';
+    end if;
+    raise notice 'ok  renderer cannot read context.context_connections';
+  end $$;
+commit;
+
+\echo 'isolation: connector assertions passed'

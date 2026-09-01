@@ -245,5 +245,5 @@ export function clusterQuestions(items: ScoredQuestion[], threshold: number): Qu
     }
     q.clusterIndex = best ? best.index : clusters.length - 1;
   }
-  return clusters.map(({ sum: _sum, ...c }) => c);
+  return clusters.map((c) => ({ index: c.index, name: c.name, members: c.members, centroid: c.centroid }));
 }

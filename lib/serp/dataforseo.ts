@@ -4,7 +4,6 @@ import {
   SerpProviderError,
   type AiOverview,
   type AioReference,
-  type AutocompleteResult,
   type FeaturedSnippet,
   type OrganicResult,
   type PaaItem,

@@ -1,6 +1,6 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
-import type { SerpResult } from "@/lib/serp";
+import type { SerpProviderName, SerpResult } from "@/lib/serp";
 import type { QuestionGraph } from "./question-graph";
 
 /**
@@ -144,10 +144,13 @@ export async function listTrackedQuestions(tier: TrackedQuestion["tracking_tier"
  * surfaces. `is_owned` and `content_id` are computed here — the snapshot is
  * the record of what Google showed, the citation rows are the join to us.
  */
+/** A SERP result from our providers, or a Profound record shaped like one (provider 'profound'). */
+export type SnapshotInput = Omit<SerpResult, "provider"> & { provider: SerpProviderName | "profound"; cached?: boolean };
+
 export async function recordSnapshot(
   own: SiteOwnership,
   questionId: string,
-  result: SerpResult & { cached?: boolean },
+  result: SnapshotInput,
   sql: postgres.Sql = appDb(),
 ): Promise<{ snapshotId: string; citations: number; ownedCitations: number; aioTriggered: boolean | null }> {
   const aio = result.aiOverview;
@@ -210,12 +213,25 @@ export interface CitationGap {
  * Overview triggers, someone else is cited, and we are not — from the latest
  * snapshot per question.
  */
-export async function citationGaps(siteId: string, limit = 50, sql: postgres.Sql = appDb()): Promise<CitationGap[]> {
+/**
+ * Our own SERP providers. Profound-sourced rows are enrichment and are only
+ * read when asked for explicitly, so every native metric computes with the
+ * connector off and the UI can attribute each number to its source.
+ */
+export const NATIVE_PROVIDERS = ["dataforseo", "serpapi"] as const;
+export type SnapshotProvider = SerpProviderName | "profound";
+
+export async function citationGaps(
+  siteId: string,
+  limit = 50,
+  sql: postgres.Sql = appDb(),
+  providers: readonly SnapshotProvider[] = NATIVE_PROVIDERS,
+): Promise<CitationGap[]> {
   return sql<CitationGap[]>`
     with latest as (
       select distinct on (question_id) id, question_id, fetched_at, provider
       from measure.serp_snapshots
-      where site_id = ${siteId} and aio_triggered is true
+      where site_id = ${siteId} and aio_triggered is true and provider = any (${[...providers]}::measure.serp_provider[])
       order by question_id, fetched_at desc
     )
     select q.id as question_id, q.text, q.demand_score::float as demand_score,
@@ -242,11 +258,15 @@ export interface VisibilitySummary {
 }
 
 /** Share of AI Overview citations across the latest snapshot of every tracked question. */
-export async function visibilitySummary(siteId: string, sql: postgres.Sql = appDb()): Promise<VisibilitySummary> {
+export async function visibilitySummary(
+  siteId: string,
+  sql: postgres.Sql = appDb(),
+  providers: readonly SnapshotProvider[] = NATIVE_PROVIDERS,
+): Promise<VisibilitySummary> {
   const [row] = await sql<{ questions_tracked: number; aio_triggered: number; aio_cited: number; featured_snippets_owned: number }[]>`
     with latest as (
       select distinct on (question_id) id, aio_triggered
-      from measure.serp_snapshots where site_id = ${siteId}
+      from measure.serp_snapshots where site_id = ${siteId} and provider = any (${[...providers]}::measure.serp_provider[])
       order by question_id, fetched_at desc
     )
     select count(*)::int as questions_tracked,
@@ -261,7 +281,8 @@ export async function visibilitySummary(siteId: string, sql: postgres.Sql = appD
   const top = await sql<{ domain: string; citations: number }[]>`
     with latest as (
       select distinct on (question_id) id from measure.serp_snapshots
-      where site_id = ${siteId} order by question_id, fetched_at desc
+      where site_id = ${siteId} and provider = any (${[...providers]}::measure.serp_provider[])
+      order by question_id, fetched_at desc
     )
     select c.domain, count(*)::int as citations
     from measure.serp_citations c join latest on latest.id = c.serp_snapshot_id

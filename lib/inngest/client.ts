@@ -8,30 +8,30 @@ import { z } from "zod";
  */
 export const auditRequested = eventType("audit/requested", {
   schema: z.object({
-    auditRunId: z.string().uuid(),
+    auditRunId: z.guid(),
     targetUrl: z.string().url(),
     kind: z.enum(["public", "preflight", "monitored"]),
-    orgId: z.string().uuid().nullable().optional(),
-    siteId: z.string().uuid().nullable().optional(),
+    orgId: z.guid().nullable().optional(),
+    siteId: z.guid().nullable().optional(),
     contentPrefix: z.string().nullable().optional(),
   }),
 });
 
 export const auditCompleted = eventType("audit/completed", {
   schema: z.object({
-    auditRunId: z.string().uuid(),
+    auditRunId: z.guid(),
     domain: z.string(),
     geoScore: z.number(),
-    orgId: z.string().uuid().nullable().optional(),
-    siteId: z.string().uuid().nullable().optional(),
+    orgId: z.guid().nullable().optional(),
+    siteId: z.guid().nullable().optional(),
   }),
 });
 
 export const auditFailed = eventType("audit/failed", {
   schema: z.object({
-    auditRunId: z.string().uuid(),
+    auditRunId: z.guid(),
     error: z.string(),
-    orgId: z.string().uuid().nullable().optional(),
+    orgId: z.guid().nullable().optional(),
   }),
 });
 
@@ -42,8 +42,8 @@ const localeSchema = z.object({ country: z.string().length(2), language: z.strin
 /** Mine a question graph for a site from a seed list (brand-brain terms, competitors, ICP pains). */
 export const demandMineRequested = eventType("demand/mine.requested", {
   schema: z.object({
-    siteId: z.string().uuid(),
-    orgId: z.string().uuid(),
+    siteId: z.guid(),
+    orgId: z.guid(),
     seeds: z.array(z.string().min(2)).min(1).max(50),
     locale: localeSchema,
     device: z.enum(["desktop", "mobile"]).optional(),
@@ -57,8 +57,8 @@ export const demandMineRequested = eventType("demand/mine.requested", {
 
 export const demandMineCompleted = eventType("demand/mine.completed", {
   schema: z.object({
-    siteId: z.string().uuid(),
-    orgId: z.string().uuid(),
+    siteId: z.guid(),
+    orgId: z.guid(),
     inserted: z.number(),
     updated: z.number(),
     queriesIssued: z.number(),
@@ -69,19 +69,69 @@ export const demandMineCompleted = eventType("demand/mine.completed", {
 /** Snapshot the SERP (AI Overview, featured snippet, organic, PAA) for a set of questions. */
 export const serpTrackRequested = eventType("serp/track.requested", {
   schema: z.object({
-    siteId: z.string().uuid(),
-    orgId: z.string().uuid(),
-    questionIds: z.array(z.string().uuid()).min(1).max(200),
+    siteId: z.guid(),
+    orgId: z.guid(),
+    questionIds: z.array(z.guid()).min(1).max(200),
   }),
 });
 
 export const serpTrackCompleted = eventType("serp/track.completed", {
   schema: z.object({
-    siteId: z.string().uuid(),
-    orgId: z.string().uuid(),
+    siteId: z.guid(),
+    orgId: z.guid(),
     snapshots: z.number(),
     aioTriggered: z.number(),
     ownedCitations: z.number(),
     costUsd: z.number(),
+  }),
+});
+
+// ── connectors ──────────────────────────────────────────────────────────────
+
+const syncKindSchema = z.enum(["backfill", "incremental", "webhook", "upload"]);
+
+/** Run one sync for one connection. `payload` carries the webhook event or upload body. */
+export const connectorSyncRequested = eventType("connector/sync.requested", {
+  schema: z.object({
+    connectionId: z.guid(),
+    orgId: z.guid(),
+    kind: syncKindSchema,
+    payload: z.unknown().optional(),
+  }),
+});
+
+export const connectorSyncCompleted = eventType("connector/sync.completed", {
+  schema: z.object({
+    connectionId: z.guid(),
+    orgId: z.guid(),
+    provider: z.enum(["slack", "google", "profound"]),
+    kind: syncKindSchema,
+    ok: z.boolean(),
+    documentsIngested: z.number().int(),
+    metricsIngested: z.number().int(),
+    error: z.string().nullable().optional(),
+  }),
+});
+
+/** A verified, deduped inbound webhook. The route wrote ops.webhook_events and returned 200 already. */
+export const connectorWebhookReceived = eventType("connector/webhook.received", {
+  schema: z.object({
+    provider: z.enum(["slack", "google", "profound"]),
+    externalId: z.string().min(1),
+    connectionId: z.guid().nullable().optional(),
+    orgId: z.guid().nullable().optional(),
+    payload: z.unknown(),
+  }),
+});
+
+/** A human decided on a brief/draft — from Slack Block Kit, the app, or ops. Resolves the pipeline's waitForEvent gate. */
+export const approvalDecided = eventType("approval/decided", {
+  schema: z.object({
+    approvalId: z.guid(),
+    decision: z.enum(["approve", "changes", "regenerate"]),
+    by: z.object({ userId: z.string().nullable().optional(), name: z.string().nullable().optional() }),
+    source: z.enum(["slack", "app", "ops"]),
+    note: z.string().nullable().optional(),
+    orgId: z.guid().nullable().optional(),
   }),
 });
