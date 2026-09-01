@@ -1,0 +1,145 @@
+import type postgres from "postgres";
+import type { TextModel } from "@/lib/ai/model";
+import { appDb } from "@/lib/db/app";
+import { runJsonTask } from "./model";
+import { briefSpecSchema, type BriefSpec, type ModelRun } from "./types";
+
+/**
+ * Stage 2: the brief. Structured, not prose, and the 40–60 word target answer
+ * is written first because it is what gets cited. In the managed tier this is
+ * the primary human gate — 90 seconds that determine most of the output.
+ *
+ * The brand-brain retrieval (`retrieveContext`) is a later slice; for now the
+ * brief is grounded in the opportunity's evidence, the site's own pages and
+ * the related questions the demand miner already found.
+ */
+
+export const BRIEF_PROMPT_VERSION = "brief.v1";
+
+export interface BriefContext {
+  opportunity: { title: string; targetQuery: string; source: string; evidence: Record<string, unknown> };
+  site: { domain: string; pathPrefix: string; organizationName: string };
+  /** Real buyer questions (PAA / autocomplete children) for the outline and FAQ. */
+  relatedQuestions: string[];
+  /** Already-published pages to link to, including money pages. */
+  existingPages: { url: string; title: string }[];
+  /** A reviewer's note when regenerating. */
+  note?: string | null;
+  previous?: BriefSpec | null;
+}
+
+export function briefSystemPrompt(): string {
+  return [
+    "You are the editor-in-chief for a B2B software company's resources section, planning one article that should be cited by AI answer engines (Google AI Overviews, ChatGPT, Perplexity).",
+    "You write briefs as strict JSON matching the schema the user gives you. No prose outside the JSON.",
+    "Rules:",
+    "- targetAnswer: a 40–60 word, self-contained, directly quotable answer to headQuestion. Write it first. No marketing language.",
+    "- outline: 4–8 sections; EVERY heading is a real question a buyer would type, taken from the related questions where they fit. Never invent jargon questions.",
+    "- sources: only include a source if you are certain the URL exists AND the quote is verbatim from that page. An unverifiable source is worse than none — the draft is fact-checked mechanically and a failed quote check rejects it. Leave the list empty if unsure.",
+    "- internalLinks: only from the existing pages provided.",
+    "- bannedClaims: things this article must not assert (unverifiable superlatives, competitor claims without evidence, customer names).",
+    "- pov: one paragraph on what this company can say that a generic competitor could not, based on the evidence given.",
+  ].join("\n");
+}
+
+export function briefPrompt(ctx: BriefContext): string {
+  const schema = {
+    headQuestion: "string (5–300 chars)",
+    targetAnswer: "string (40–60 words)",
+    intent: "comparative | informational | howto | unknown",
+    title: "string (5–120 chars, question-form or benefit-led, no clickbait)",
+    description: "string (20–320 chars; the meta description)",
+    outline: [{ heading: "string (question form)", goal: "string (what the reader learns)", sourceKeys: ["string"] }],
+    faq: ["string (question)"],
+    entities: ["string"],
+    internalLinks: [{ url: "string (from existing pages)", anchor: "string" }],
+    pov: "string",
+    bannedClaims: ["string"],
+    sources: [{ key: "string (kebab-case, e.g. gartner-2026)", url: "string", publisher: "string", title: "string", quote: "string (verbatim, 8–600 chars)" }],
+  };
+  const parts = [
+    `Company: ${ctx.site.organizationName} (${ctx.site.domain}${ctx.site.pathPrefix})`,
+    `Opportunity (${ctx.opportunity.source}): ${ctx.opportunity.title}`,
+    `Target query: ${ctx.opportunity.targetQuery}`,
+    `Evidence: ${JSON.stringify(ctx.opportunity.evidence)}`,
+    ctx.relatedQuestions.length ? `Related buyer questions:\n${ctx.relatedQuestions.map((q) => `- ${q}`).join("\n")}` : "Related buyer questions: none found.",
+    ctx.existingPages.length ? `Existing pages to link to:\n${ctx.existingPages.map((p) => `- ${p.title} — ${p.url}`).join("\n")}` : "Existing pages: none yet.",
+  ];
+  if (ctx.previous) parts.push(`Previous brief (revise it, do not start over):\n${JSON.stringify(ctx.previous)}`);
+  if (ctx.note) parts.push(`Reviewer note — this takes priority over everything above:\n${ctx.note}`);
+  parts.push(`Return JSON with exactly this shape:\n${JSON.stringify(schema, null, 2)}`);
+  return parts.join("\n\n");
+}
+
+export async function generateBrief(
+  model: TextModel,
+  ctx: BriefContext,
+  scope: { orgId: string; siteId: string },
+  sql: postgres.Sql = appDb(),
+): Promise<{ spec: BriefSpec; run: ModelRun }> {
+  const { value, run } = await runJsonTask("pipeline.brief", model, { system: briefSystemPrompt(), prompt: briefPrompt(ctx), promptVersion: BRIEF_PROMPT_VERSION, temperature: 0.4 }, briefSpecSchema, scope, sql);
+  return { spec: value, run };
+}
+
+export async function loadBriefContext(
+  opportunity: { site_id: string; question_id: string | null; title: string; target_query: string; source: string; evidence: Record<string, unknown> },
+  sql: postgres.Sql = appDb(),
+): Promise<BriefContext> {
+  const [site] = await sql<{ canonical_domain: string; path_prefix: string; organization: { name?: string } | null }[]>`
+    select s.canonical_domain, s.path_prefix, c.organization
+    from app.sites s left join content.site_render_config c on c.site_id = s.id
+    where s.id = ${opportunity.site_id}`;
+  if (!site) throw new Error(`site ${opportunity.site_id} not found`);
+  const related = opportunity.question_id
+    ? await sql<{ text: string }[]>`
+        select text from measure.questions
+        where site_id = ${opportunity.site_id}
+          and (parent_question_id = ${opportunity.question_id}
+               or cluster_id = (select cluster_id from measure.questions where id = ${opportunity.question_id} and cluster_id is not null))
+          and id <> ${opportunity.question_id}
+        order by demand_score desc limit 12`
+    : [];
+  const pages = await sql<{ url: string; title: string }[]>`
+    select coalesce(i.canonical_url, p.path) as url, coalesce(i.title, p.head->>'title', p.path) as title
+    from content.published_pages p left join content.content_items i on i.id = p.content_item_id
+    where p.site_id = ${opportunity.site_id}
+    order by p.updated_at desc limit 25`;
+  return {
+    opportunity: { title: opportunity.title, targetQuery: opportunity.target_query, source: opportunity.source, evidence: opportunity.evidence },
+    site: { domain: site.canonical_domain, pathPrefix: site.path_prefix, organizationName: site.organization?.name ?? site.canonical_domain },
+    relatedQuestions: related.map((r) => r.text),
+    existingPages: pages,
+  };
+}
+
+export interface BriefRow {
+  id: string;
+  org_id: string;
+  site_id: string;
+  opportunity_id: string | null;
+  version: number;
+  status: "drafted" | "pending_approval" | "approved" | "changes_requested" | "superseded";
+  spec: BriefSpec;
+  target_answer: string;
+}
+
+export async function insertBrief(
+  input: { siteId: string; opportunityId: string | null; version: number; spec: BriefSpec; run: ModelRun },
+  sql: postgres.Sql = appDb(),
+): Promise<{ id: string }> {
+  const [row] = await sql<{ id: string }[]>`
+    insert into content.briefs (site_id, opportunity_id, version, status, spec, target_answer, model_run)
+    values (${input.siteId}, ${input.opportunityId}, ${input.version}, 'drafted', ${sql.json(input.spec as never)}, ${input.spec.targetAnswer}, ${sql.json(input.run as never)})
+    returning id`;
+  if (!row) throw new Error("brief insert returned no row");
+  return row;
+}
+
+export async function setBriefStatus(id: string, status: BriefRow["status"], sql: postgres.Sql = appDb()): Promise<void> {
+  await sql`update content.briefs set status = ${status}, updated_at = now() where id = ${id}`;
+}
+
+export async function loadBrief(id: string, sql: postgres.Sql = appDb()): Promise<BriefRow | null> {
+  const [row] = await sql<BriefRow[]>`select id, org_id, site_id, opportunity_id, version, status, spec, target_answer from content.briefs where id = ${id}`;
+  return row ? { ...row, spec: briefSpecSchema.parse(row.spec) } : null;
+}

@@ -67,7 +67,7 @@ export class HttpSiteStore implements SiteStore {
   }
 }
 
-interface SiteRow {
+export interface SiteRow {
   id: string;
   org_id: string;
   canonical_domain: string;

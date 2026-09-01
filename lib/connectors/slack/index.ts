@@ -25,6 +25,8 @@ export interface SlackConfig {
   backfillDays?: number;
   /** Slack messages are retained this long; the default matches the brand-brain recency half-life × 2. */
   retentionDays?: number;
+  /** Channel id that receives brief/draft approval messages. Unset = approvals stay in the app. */
+  approvalsChannel?: string;
 }
 
 export type SlackCursor = Record<string, string>; // channelId -> latest ts ingested
@@ -88,7 +90,7 @@ async function fetchReplies(api: SlackApi, channelId: string, threadTs: string):
   return api.paginate<HistoryResponse, SlackMessage>("conversations.replies", { channel: channelId, ts: threadTs, limit: HISTORY_PAGE }, (p) => p.messages ?? [], 10);
 }
 
-async function tokenFor(conn: ConnectionRef, ctx: ConnectorContext): Promise<string> {
+export async function slackTokenFor(conn: ConnectionRef, ctx: ConnectorContext): Promise<string> {
   if (!conn.secret_ref) throw new ConnectorError("slack", "no_token", "slack connection has no secret_ref");
   const token = await ctx.secrets.get(conn.secret_ref);
   if (!token) throw new ConnectorError("slack", "no_token", "slack token missing from vault");
@@ -113,7 +115,7 @@ export const slackConnector: Connector<SlackConfig> = {
 
   async validate(conn, ctx) {
     if (conn.scope.length === 0) return; // default-nothing is valid; it just syncs nothing
-    const api = slackClientFor(conn, await tokenFor(conn, ctx), ctx);
+    const api = slackClientFor(conn, await slackTokenFor(conn, ctx), ctx);
     for (const channelId of conn.scope) {
       const info = await api.call<ConversationInfoResponse>("conversations.info", { channel: channelId });
       if (info.channel?.is_archived) throw new ConnectorError("slack", "channel_archived", `channel ${channelId} is archived`);
@@ -135,7 +137,7 @@ export const slackConnector: Connector<SlackConfig> = {
     if (kind === "webhook") {
       const ev = input.payload as SlackMessageEvent | undefined;
       if (!ev || !conn.scope.includes(ev.channel)) return { documentsIngested: 0, metricsIngested: 0, cursor, detail: { skipped: "out of scope" } };
-      const api = slackClientFor(conn, await tokenFor(conn, ctx), ctx);
+      const api = slackClientFor(conn, await slackTokenFor(conn, ctx), ctx);
       const channel = { id: ev.channel, name: names.get(ev.channel) ?? ev.channel };
       // A reply re-materialises its parent thread document; a top-level message is its own.
       const rootTs = ev.thread_ts ?? ev.ts;
@@ -149,7 +151,7 @@ export const slackConnector: Connector<SlackConfig> = {
 
     if (conn.scope.length === 0) return { documentsIngested: 0, metricsIngested: 0, cursor, detail: { skipped: "no channels in scope" } };
 
-    const api = slackClientFor(conn, await tokenFor(conn, ctx), ctx);
+    const api = slackClientFor(conn, await slackTokenFor(conn, ctx), ctx);
     const backfillOldest = String(Math.floor((ctx.now().getTime() - (conn.config.backfillDays ?? SLACK_DEFAULT_BACKFILL_DAYS) * 86_400_000) / 1000));
     let documents = 0;
     const perChannel: Record<string, number> = {};

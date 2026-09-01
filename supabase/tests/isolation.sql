@@ -359,3 +359,135 @@ begin;
 commit;
 
 \echo 'isolation: connector assertions passed'
+
+-- ── 0006: pipeline ──────────────────────────────────────────────────────────
+-- org_id deliberately omitted on every child row: the before-insert triggers
+-- must denormalise it from the site / item / version.
+insert into content.authors (id, site_id, name, job_title, is_default) values
+  ('dddddddd-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'Jane Acme', 'Head of Product', true),
+  ('dddddddd-0000-0000-0000-000000000002', 'bbbbbbbb-0000-0000-0000-000000000002', 'Gus Globex', null, true)
+on conflict do nothing;
+insert into content.opportunities (id, site_id, source, title, target_query, dedupe_key, score) values
+  ('dddddddd-1000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'citation_gap',
+   'okta vs entra for mid-market', 'okta vs entra for mid-market', 'q:okta-vs-entra', 72.5),
+  ('dddddddd-1000-0000-0000-000000000002', 'bbbbbbbb-0000-0000-0000-000000000002', 'manual',
+   'globex widgets', 'globex widgets', 'q:globex-widgets', 10)
+on conflict do nothing;
+insert into content.briefs (id, site_id, opportunity_id, spec, target_answer) values
+  ('dddddddd-2000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'dddddddd-1000-0000-0000-000000000001',
+   '{"headQuestion":"okta vs entra for mid-market"}'::jsonb, 'Okta and Entra both cover SSO; the difference is directory ownership.')
+on conflict do nothing;
+insert into content.content_items (id, org_id, site_id, slug, title, brief_id, author_id, opportunity_id) values
+  ('dddddddd-3000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001',
+   'okta-vs-entra', 'Okta vs Entra for mid-market', 'dddddddd-2000-0000-0000-000000000001',
+   'dddddddd-0000-0000-0000-000000000001', 'dddddddd-1000-0000-0000-000000000001'),
+  ('dddddddd-3000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000002',
+   'globex-widgets', 'Globex widgets', null, 'dddddddd-0000-0000-0000-000000000002', null)
+on conflict do nothing;
+insert into content.content_versions (id, content_item_id, version_no, title, body_md, body_html, word_count) values
+  ('dddddddd-4000-0000-0000-000000000001', 'dddddddd-3000-0000-0000-000000000001', 1, 'Okta vs Entra', '# Okta vs Entra', '<h1>Okta vs Entra</h1>', 3),
+  ('dddddddd-4000-0000-0000-000000000002', 'dddddddd-3000-0000-0000-000000000002', 1, 'Globex widgets', '# Widgets', '<h1>Widgets</h1>', 1)
+on conflict do nothing;
+update content.content_items set current_version_id = 'dddddddd-4000-0000-0000-000000000001' where id = 'dddddddd-3000-0000-0000-000000000001';
+insert into content.content_sources (content_version_id, key, url, publisher, quote) values
+  ('dddddddd-4000-0000-0000-000000000001', 'gartner-2026', 'https://www.gartner.com/x', 'Gartner', '61% of mid-market buyers')
+on conflict do nothing;
+insert into content.qa_results (content_version_id, gate, passed, detail) values
+  ('dddddddd-4000-0000-0000-000000000001', 'structure', true, '{"normalized":0.8}'::jsonb)
+on conflict do nothing;
+insert into content.approvals (id, site_id, kind, brief_id, expires_at) values
+  ('dddddddd-5000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'brief', 'dddddddd-2000-0000-0000-000000000001', now() + interval '7 days')
+on conflict do nothing;
+insert into ops.llm_calls (org_id, site_id, task_key, model, input_tokens, output_tokens, cost_usd) values
+  ('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001', 'pipeline.brief', 'test-model', 10, 20, 0.001);
+grant select on all tables in schema content, ops to app_user;
+
+select pg_temp.expect('author org_id denormalised from site',
+  (select count(*) from content.authors where id = 'dddddddd-0000-0000-0000-000000000001'
+     and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+select pg_temp.expect('opportunity org_id denormalised from site',
+  (select count(*) from content.opportunities where id = 'dddddddd-1000-0000-0000-000000000002'
+     and org_id = '22222222-2222-2222-2222-222222222222'), 1);
+select pg_temp.expect('brief org_id denormalised from site',
+  (select count(*) from content.briefs where id = 'dddddddd-2000-0000-0000-000000000001'
+     and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+select pg_temp.expect('version org_id denormalised from item',
+  (select count(*) from content.content_versions where id = 'dddddddd-4000-0000-0000-000000000002'
+     and org_id = '22222222-2222-2222-2222-222222222222'), 1);
+select pg_temp.expect('source org_id denormalised from version',
+  (select count(*) from content.content_sources where org_id = '11111111-1111-1111-1111-111111111111'), 1);
+select pg_temp.expect('qa result org_id denormalised from version',
+  (select count(*) from content.qa_results where org_id = '11111111-1111-1111-1111-111111111111'), 1);
+select pg_temp.expect('approval org_id denormalised from site',
+  (select count(*) from content.approvals where id = 'dddddddd-5000-0000-0000-000000000001'
+     and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+
+do $$
+declare rejected boolean := false;
+begin
+  begin
+    insert into content.approvals (site_id, kind, brief_id, content_version_id)
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'draft', 'dddddddd-2000-0000-0000-000000000001', null);
+  exception when check_violation then
+    rejected := true;
+  end;
+  if not rejected then
+    raise exception 'FAIL draft approval accepted without a content version';
+  end if;
+  raise notice 'ok  approval target shape enforced';
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('member sees own authors only', (select count(*) from content.authors), 1);
+  select pg_temp.expect('member sees own opportunities only', (select count(*) from content.opportunities), 1);
+  select pg_temp.expect('member sees own briefs', (select count(*) from content.briefs), 1);
+  select pg_temp.expect('member sees own versions only', (select count(*) from content.content_versions), 1);
+  select pg_temp.expect('member sees own sources', (select count(*) from content.content_sources), 1);
+  select pg_temp.expect('member sees own qa results', (select count(*) from content.qa_results), 1);
+  select pg_temp.expect('member sees own approvals', (select count(*) from content.approvals), 1);
+  select pg_temp.expect('member cannot read the llm ledger', (select count(*) from ops.llm_calls), 0);
+  select pg_temp.expect('member sees no Globex version',
+    (select count(*) from content.content_versions where org_id = '22222222-2222-2222-2222-222222222222'), 0);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('other member sees only their author', (select count(*) from content.authors), 1);
+  select pg_temp.expect('other member sees only their opportunity',
+    (select count(*) from content.opportunities where org_id = '22222222-2222-2222-2222-222222222222'), 1);
+  select pg_temp.expect('other member sees no Acme briefs', (select count(*) from content.briefs), 0);
+  select pg_temp.expect('other member sees no Acme sources', (select count(*) from content.content_sources), 0);
+  select pg_temp.expect('other member sees no Acme approvals', (select count(*) from content.approvals), 0);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees all opportunities', (select count(*) from content.opportunities), 2);
+  select pg_temp.expect('staff sees all versions', (select count(*) from content.content_versions), 2);
+  select pg_temp.expect('staff reads the llm ledger', (select count(*) from ops.llm_calls), 1);
+commit;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from content.content_versions;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read content.content_versions';
+    end if;
+    raise notice 'ok  renderer cannot read content.content_versions';
+  end $$;
+  select pg_temp.expect('renderer still reads published_pages',
+    (select count(*) from content.published_pages), 2);
+commit;
+
+\echo 'isolation: pipeline assertions passed'

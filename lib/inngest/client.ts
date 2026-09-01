@@ -135,3 +135,52 @@ export const approvalDecided = eventType("approval/decided", {
     orgId: z.guid().nullable().optional(),
   }),
 });
+
+// ── content pipeline ────────────────────────────────────────────────────────
+
+/** Run one opportunity through brief → (gate) → draft → QA → (gate) → publish → post-publish loop. */
+export const contentPipelineRequested = eventType("content/pipeline.requested", {
+  schema: z.object({
+    opportunityId: z.guid(),
+    siteId: z.guid(),
+    orgId: z.guid(),
+    /** An operator's steer, carried into the brief prompt. */
+    note: z.string().max(2000).nullable().optional(),
+  }),
+});
+
+export const contentPublished = eventType("content/published", {
+  schema: z.object({
+    contentItemId: z.guid(),
+    versionId: z.guid(),
+    siteId: z.guid(),
+    orgId: z.guid(),
+    path: z.string(),
+    canonicalUrl: z.string().url(),
+  }),
+});
+
+export const contentPipelineFailed = eventType("content/pipeline.failed", {
+  schema: z.object({
+    opportunityId: z.guid(),
+    siteId: z.guid(),
+    orgId: z.guid(),
+    stage: z.enum(["brief", "brief_gate", "draft", "qa", "draft_gate", "publish"]),
+    error: z.string(),
+  }),
+});
+
+/** A human gate opened; the app UI and Slack both render from this. */
+export const approvalRequested = eventType("approval/requested", {
+  schema: z.object({
+    approvalId: z.guid(),
+    kind: z.enum(["brief", "draft"]),
+    siteId: z.guid(),
+    orgId: z.guid(),
+  }),
+});
+
+/** Re-derive the opportunity queue for a site from citation gaps. */
+export const opportunitiesScanRequested = eventType("content/opportunities.scan.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
+});
