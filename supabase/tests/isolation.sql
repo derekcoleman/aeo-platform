@@ -145,3 +145,44 @@ begin
 end $$;
 
 \echo 'render config: all assertions passed'
+
+-- ── 0003: audit runs ────────────────────────────────────────────────────────
+insert into app.audit_runs (id, org_id, target_url, domain, kind, status) values
+  ('cccccccc-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111',
+   'https://acme.com', 'acme.com', 'monitored', 'completed'),
+  ('cccccccc-0000-0000-0000-000000000002', null,
+   'https://example.com', 'example.com', 'public', 'completed')
+on conflict do nothing;
+insert into app.audit_findings (audit_run_id, rule_key, category, priority) values
+  ('cccccccc-0000-0000-0000-000000000001', 'crawler.gptbot_blocked', 'crawler_access', 'critical'),
+  ('cccccccc-0000-0000-0000-000000000002', 'crawler.gptbot_blocked', 'crawler_access', 'critical');
+insert into app.public_audits (id, audit_run_id, domain) values
+  ('abc12345', 'cccccccc-0000-0000-0000-000000000002', 'example.com')
+on conflict do nothing;
+grant select on all tables in schema app to app_user;
+
+begin;
+  select pg_temp.expect('finding org_id denormalised from run',
+    (select count(*) from app.audit_findings
+      where audit_run_id = 'cccccccc-0000-0000-0000-000000000001'
+        and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('member sees own audit runs', (select count(*) from app.audit_runs), 1);
+  select pg_temp.expect('member sees own findings', (select count(*) from app.audit_findings), 1);
+  select pg_temp.expect('member cannot see public (null-org) audits via RLS',
+    (select count(*) from app.audit_runs where org_id is null), 0);
+  select pg_temp.expect('member cannot enumerate share links',
+    (select count(*) from app.public_audits), 0);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees all audit runs', (select count(*) from app.audit_runs), 2);
+commit;
+
+\echo 'isolation: audit assertions passed'
