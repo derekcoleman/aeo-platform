@@ -106,3 +106,42 @@ begin;
 commit;
 
 \echo 'isolation: all assertions passed'
+
+-- ── 0002: render config materialisation ─────────────────────────────────────
+begin;
+  select pg_temp.expect('render config materialised on site insert',
+    (select count(*) from content.site_render_config
+      where site_id = 'aaaaaaaa-0000-0000-0000-000000000001'), 1);
+commit;
+
+begin;
+  update app.sites set path_prefix = '/guides'
+    where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  select pg_temp.expect('render config follows a site update',
+    (select count(*) from content.site_render_config
+      where site_id = 'aaaaaaaa-0000-0000-0000-000000000001' and path_prefix = '/guides'), 1);
+rollback;
+
+begin;
+  set local role renderer;
+  select pg_temp.expect('renderer reads render config',
+    (select count(*) from content.site_render_config), 2);
+commit;
+
+-- A site must not be able to claim our internal rewrite target as its prefix.
+do $$
+declare blocked boolean := false;
+begin
+  begin
+    update app.sites set path_prefix = '/render'
+      where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  exception when check_violation then
+    blocked := true;
+  end;
+  if not blocked then
+    raise exception 'FAIL a site must not claim the reserved /render prefix';
+  end if;
+  raise notice 'ok  reserved prefix rejected';
+end $$;
+
+\echo 'render config: all assertions passed'

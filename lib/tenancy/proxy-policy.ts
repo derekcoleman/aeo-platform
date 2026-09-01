@@ -1,6 +1,13 @@
 import { resolvePublicHost } from "./resolve-site";
 import type { SiteRoute } from "./types";
-import { isEdgeHost, isWithinPrefix, normaliseHost, normaliseTrailingSlash, toInternalPath } from "./urls";
+import {
+  isEdgeHost,
+  isReservedPath,
+  isWithinPrefix,
+  normaliseHost,
+  normaliseTrailingSlash,
+  toInternalPath,
+} from "./urls";
 
 /**
  * The proxy contract, as a pure function.
@@ -18,6 +25,23 @@ export const HEADER = {
   site: "x-aeo-site",
   passthrough: "x-aeo-passthrough",
   forwardedHost: "x-forwarded-host",
+} as const;
+
+/**
+ * Internal request headers middleware attaches for the render handler.
+ *
+ * The renderer connects as a least-privilege role that can read exactly one
+ * table, so it cannot look site config up for itself. Passing the resolved
+ * values forward keeps that restriction intact and avoids a second round trip
+ * on every page view. These are request-only and never echoed to a client.
+ */
+export const INTERNAL_HEADER = {
+  siteId: "x-aeo-internal-site-id",
+  canonicalDomain: "x-aeo-internal-canonical-domain",
+  pathPrefix: "x-aeo-internal-path-prefix",
+  locale: "x-aeo-internal-locale",
+  indexable: "x-aeo-internal-indexable",
+  trailingSlash: "x-aeo-internal-trailing-slash",
 } as const;
 
 export interface ProxyInput {
@@ -50,6 +74,7 @@ export type ProxyAction =
       internalPath: string;
       canonicalDomain: string;
       indexable: boolean;
+      site: SiteRoute;
     };
 
 export function decideProxyAction(input: ProxyInput): ProxyAction {
@@ -66,6 +91,13 @@ export function decideProxyAction(input: ProxyInput): ProxyAction {
   // it would spin.
   if (input.forwardedHost && isEdgeHost(normaliseHost(input.forwardedHost))) {
     return { kind: "loop", status: 508 };
+  }
+
+  // Our internal rewrite target is a real route, so a request that arrives at
+  // it from the outside must never be served directly — that would bypass host
+  // validation and let anyone render any site by guessing an id.
+  if (isReservedPath(input.pathname)) {
+    return { kind: "passthrough", status: 404 };
   }
 
   if (!input.site) {
@@ -96,6 +128,7 @@ export function decideProxyAction(input: ProxyInput): ProxyAction {
     internalPath: toInternalPath(input.site.id, input.pathname),
     canonicalDomain: publicHost.canonicalDomain,
     indexable: publicHost.indexable,
+    site: input.site,
   };
 }
 

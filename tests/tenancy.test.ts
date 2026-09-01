@@ -66,7 +66,7 @@ describe("path prefix", () => {
 describe("internal path mapping", () => {
   it("round-trips, keeping the public prefix in the public url", () => {
     const internal = toInternalPath(site.id, "/resources/hello");
-    expect(internal).toBe(`/_sites/${site.id}/resources/hello`);
+    expect(internal).toBe(`/render/${site.id}/resources/hello`);
     expect(toPublicPath(site.id, internal)).toBe("/resources/hello");
   });
 });

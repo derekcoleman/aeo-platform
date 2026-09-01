@@ -72,21 +72,42 @@ export function isWithinPrefix(pathname: string, pathPrefix: string): boolean {
 }
 
 /**
+ * Internal route prefix the public path is rewritten onto.
+ *
+ * Not underscore-prefixed: Next treats a leading `_` on a folder as "private"
+ * and opts it out of routing entirely, so `/_sites/...` would never resolve.
+ * Because this IS a real route, requests arriving at it from outside are
+ * rejected — see RESERVED_PREFIXES.
+ */
+export const INTERNAL_ROUTE_PREFIX = "/render";
+
+/**
+ * Path prefixes a site may not claim, and which we refuse to serve from public
+ * traffic. A customer whose content lived at `/render` would otherwise collide
+ * with our own rewrite target.
+ */
+export const RESERVED_PREFIXES = [INTERNAL_ROUTE_PREFIX] as const;
+
+export function isReservedPath(pathname: string): boolean {
+  return RESERVED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
+
+/**
  * Map a public path onto the internal render route.
  *
- * `/resources/hello` -> `/_sites/<siteId>/resources/hello`
+ * `/resources/hello` -> `/render/<siteId>/resources/hello`
  *
  * Putting the tenant id in the internal path means Next's Full Route Cache and
  * Data Cache are keyed on something tenant-scoped, so a misbehaving host-based
  * cache layer still cannot serve tenant A's page for tenant B.
  */
 export function toInternalPath(siteId: string, publicPath: string): string {
-  return `/_sites/${siteId}${publicPath}`;
+  return `${INTERNAL_ROUTE_PREFIX}/${siteId}${publicPath}`;
 }
 
 /** Inverse of `toInternalPath`. */
 export function toPublicPath(siteId: string, internalPath: string): string {
-  const marker = `/_sites/${siteId}`;
+  const marker = `${INTERNAL_ROUTE_PREFIX}/${siteId}`;
   return internalPath.startsWith(marker) ? internalPath.slice(marker.length) || "/" : internalPath;
 }
 

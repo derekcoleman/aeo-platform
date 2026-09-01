@@ -84,7 +84,7 @@ describe("render", () => {
     expect(a).toMatchObject({
       kind: "render",
       siteId: "site-1",
-      internalPath: "/_sites/site-1/resources/hello",
+      internalPath: "/render/site-1/resources/hello",
       canonicalDomain: "acme.com",
       indexable: true,
     });

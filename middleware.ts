@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import {
   HEADER,
+  INTERNAL_HEADER,
   STRIPPED_REQUEST_HEADERS,
   decideProxyAction,
   siteResolver,
@@ -74,6 +75,15 @@ export async function middleware(req: NextRequest) {
       // THEIR session cookies here. Drop them before any handler — or any log
       // sink — can see them. We also never set a cookie on their domain.
       for (const h of STRIPPED_REQUEST_HEADERS) headers.delete(h);
+
+      // Site config the render handler needs. It runs as a role that can read
+      // only content.published_pages, so it cannot resolve these itself.
+      headers.set(INTERNAL_HEADER.siteId, action.siteId);
+      headers.set(INTERNAL_HEADER.canonicalDomain, action.canonicalDomain);
+      headers.set(INTERNAL_HEADER.pathPrefix, action.site.pathPrefix);
+      headers.set(INTERNAL_HEADER.locale, action.site.locale);
+      headers.set(INTERNAL_HEADER.trailingSlash, action.site.trailingSlash);
+      headers.set(INTERNAL_HEADER.indexable, action.indexable ? "1" : "0");
 
       const url = req.nextUrl.clone();
       url.pathname = action.internalPath;
