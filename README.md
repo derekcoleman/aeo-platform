@@ -69,9 +69,11 @@ npm run check                  # typecheck + lint + unit tests
 ### Database
 
 ```bash
-# apply migrations in order, then the isolation assertions
+# apply migrations in order, then the isolation assertions, then fixtures
 for f in supabase/migrations/*.sql; do psql -d "$DB" -v ON_ERROR_STOP=1 -f "$f"; done
 psql -d "$DB" -v ON_ERROR_STOP=1 -f supabase/tests/isolation.sql
+psql -d "$DB" -v ON_ERROR_STOP=1 -f supabase/seed.sql
+psql -d "$DB" -c "alter role renderer login password 'renderpw'"
 ```
 
 `supabase/tests/isolation.sql` asserts, among other things, that a malformed
@@ -87,9 +89,14 @@ forged `x-forwarded-host` cannot move the canonical, that cookies never reach a
 handler, and that no response contains our edge hostname.
 
 ```bash
+node tests/fixtures/site-api.mjs 9999 &   # stands in for PostgREST site lookup
 npm run build && npx next start -p 3401 &
 ./scripts/verify-proxy.sh http://localhost:3401
 ```
+
+CI runs all three layers on every pull request (`.github/workflows/ci.yml`):
+typecheck/lint/unit tests, migrations plus the isolation assertions against a
+real Postgres, and the proxy contract against a live server.
 
 ### Reproducing the proxy locally
 
