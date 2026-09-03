@@ -209,3 +209,29 @@ export const contextFactsExtractCompleted = eventType("context/facts.extract.com
 export const contextSignalsScanRequested = eventType("context/signals.scan.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
 });
+
+// ── proxy onboarding + health ───────────────────────────────────────────────
+
+/** Check one site's proxy through the customer's edge. `verification` flips a passing site to active. */
+export const siteHealthCheckRequested = eventType("site/health.check.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid(), kind: z.enum(["monitor", "verification"]) }),
+});
+
+/** Health state changed (ok ↔ failing) — the app banner and any digest key off this, not off every tick. */
+export const siteHealthChanged = eventType("site/health.changed", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid(), ok: z.boolean(), failures: z.number().int(), failed: z.array(z.string()) }),
+});
+
+/** Run the onboarding preflight (or a standalone AI Crawler Access Report) for a site. */
+export const sitePreflightRequested = eventType("site/preflight.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid(), kind: z.enum(["preflight", "crawler_report"]), preflightId: z.guid().nullable().optional() }),
+});
+
+export const sitePreflightCompleted = eventType("site/preflight.completed", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid(), preflightId: z.guid(), kind: z.enum(["preflight", "crawler_report"]), ok: z.boolean(), blocking: z.array(z.string()) }),
+});
+
+/** The proxy passed verification through the customer's edge; the site is active. */
+export const siteVerified = eventType("site/verified", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
+});

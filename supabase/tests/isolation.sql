@@ -666,3 +666,62 @@ begin;
 commit;
 
 \echo 'isolation: brand brain assertions passed'
+
+-- ── 0008: site ops ──────────────────────────────────────────────────────────
+-- org_id deliberately omitted: the trigger must denormalise it from the site.
+insert into app.site_preflights (id, site_id, kind, status, ok, result) values
+  ('ffffffff-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'preflight', 'completed', true, '{"blocking":[]}'::jsonb),
+  ('ffffffff-0000-0000-0000-000000000002', 'bbbbbbbb-0000-0000-0000-000000000002', 'crawler_report', 'completed', false, '{}'::jsonb)
+on conflict do nothing;
+insert into app.site_health_checks (org_id, site_id, kind, ok, ttfb_ms, failed) values
+  ('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001', 'monitor', false, 812, '{"health_endpoint"}'),
+  ('22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000002', 'verification', true, 120, '{}');
+update app.sites set health_failures = 2, last_health_ok = false where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+grant select on all tables in schema app to app_user;
+
+select pg_temp.expect('preflight org_id denormalised from site',
+  (select count(*) from app.site_preflights where id = 'ffffffff-0000-0000-0000-000000000002'
+     and org_id = '22222222-2222-2222-2222-222222222222'), 1);
+select pg_temp.expect('failed health checks are indexable by site',
+  (select count(*) from app.site_health_checks where site_id = 'aaaaaaaa-0000-0000-0000-000000000001' and not ok and 'health_endpoint' = any(failed)), 1);
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('member sees own preflights only',    (select count(*) from app.site_preflights), 1);
+  select pg_temp.expect('member sees own health checks only', (select count(*) from app.site_health_checks), 1);
+  select pg_temp.expect('member sees own site health state',
+    (select count(*) from app.sites where id = 'aaaaaaaa-0000-0000-0000-000000000001' and health_failures = 2 and last_health_ok = false), 1);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('other member cannot see Acme preflights',
+    (select count(*) from app.site_preflights where id = 'ffffffff-0000-0000-0000-000000000001'), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every preflight', (select count(*) from app.site_preflights), 2);
+commit;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from app.site_preflights;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read app.site_preflights';
+    end if;
+    raise notice 'ok  renderer cannot read preflights';
+  end $$;
+commit;
+
+\echo 'isolation: site ops assertions passed'
