@@ -42,6 +42,13 @@ describe("HttpSiteStore", () => {
     expect(call.headers["accept-profile"]).toBe("app");
   });
 
+  it("an unconfigured base URL is a lookup error (503 upstream), never a thrown TypeError", async () => {
+    let called = false;
+    const fetchImpl = (async () => { called = true; return new Response("[]"); }) as unknown as typeof fetch;
+    await expect(new HttpSiteStore("", "k", fetchImpl).byEdgeHostname("acme-8fj2.blogedge.aeo.app")).rejects.toBeInstanceOf(SiteLookupError);
+    expect(called).toBe(false);
+  });
+
   it("an empty result is a miss; a non-OK response is a lookup error, never a miss", async () => {
     expect(await new HttpSiteStore("https://x.supabase.co", "k", fetchWith(200, []).fetchImpl).byEdgeHostname("nope.blogedge.aeo.app")).toBeNull();
     await expect(new HttpSiteStore("https://x.supabase.co", "k", fetchWith(404, { message: "schema not exposed" }).fetchImpl).byEdgeHostname("acme-8fj2.blogedge.aeo.app")).rejects.toBeInstanceOf(SiteLookupError);

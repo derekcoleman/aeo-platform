@@ -5,6 +5,7 @@ import {
   SiteLookupError,
   STRIPPED_REQUEST_HEADERS,
   decideProxyAction,
+  isEdgeHost,
   siteResolver,
 } from "@/lib/tenancy";
 
@@ -32,7 +33,10 @@ export async function middleware(req: NextRequest) {
 
   // Only requests arriving on a per-site edge hostname are public render
   // traffic. Anything else (our own domains, local dev) passes straight
-  // through to the app.
+  // through to the app without touching the site store — so the app keeps
+  // serving even when the store is unreachable or not yet configured.
+  if (!host || !isEdgeHost(host)) return NextResponse.next();
+
   let site;
   try {
     site = await siteResolver().resolve(host);
