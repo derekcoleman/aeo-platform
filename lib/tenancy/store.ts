@@ -1,3 +1,4 @@
+import { supabasePublishableKey, supabaseServiceRoleKey, supabaseUrl } from "@/lib/db/env";
 import type { ProxyMode, SiteRoute, SlashMode } from "./types";
 import { normaliseHost } from "./urls";
 import { SiteLookupError, SiteResolver, type SiteStore } from "./resolve-site";
@@ -108,9 +109,8 @@ let shared: SiteResolver | null = null;
 /** Process-wide resolver, so the cache survives across requests on an instance. */
 export function siteResolver(): SiteResolver {
   if (shared) return shared;
-  const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
-  const apiKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "";
+  const baseUrl = supabaseUrl() ?? "";
+  const apiKey = supabaseServiceRoleKey() ?? supabasePublishableKey() ?? "";
   shared = new SiteResolver(new HttpSiteStore(baseUrl, apiKey));
   return shared;
 }
