@@ -43,6 +43,9 @@ export class HttpSiteStore implements SiteStore {
           apikey: this.apiKey,
           authorization: `Bearer ${this.apiKey}`,
           accept: "application/json",
+          // sites lives in the `app` schema, not PostgREST's default profile.
+          // The schema must also be in the project's exposed list.
+          "accept-profile": "app",
         },
         // Site config changes rarely; SiteResolver holds the short-lived cache.
         cache: "no-store",
