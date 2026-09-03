@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push supersedes an in-flight run on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: typecheck · lint · unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  database:
+    name: migrations · tenant isolation
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports: [5432:5432]
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: aeo_ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create database
+        run: psql -d postgres -c 'create database aeo_ci'
+      - name: Apply migrations in order
+        run: |
+          for f in supabase/migrations/*.sql; do
+            echo "── $f"
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+      # Asserts that a malformed JWT claim denies rather than grants, and that
+      # the renderer role cannot reach app.sites. If one of these starts
+      # failing, the policy is wrong — never the expectation.
+      - name: Tenant isolation assertions
+        run: psql -v ON_ERROR_STOP=1 -q -f supabase/tests/isolation.sql
+
+  proxy:
+    name: reverse-proxy invariants
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports: [5432:5432]
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: aeo_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Prepare database
+        run: |
+          psql -d postgres -c 'create database aeo_ci'
+          for f in supabase/migrations/*.sql; do psql -v ON_ERROR_STOP=1 -q -f "$f"; done
+          psql -v ON_ERROR_STOP=1 -q -f supabase/seed.sql
+          # The renderer role is created NOLOGIN by the migration; give it a
+          # password here so the app can connect as it. Production issues this
+          # credential out of band — the role's grants are what matter.
+          psql -c "alter role renderer login password 'renderpw'"
+
+      - name: Build
+        env:
+          AEO_EDGE_DOMAIN: blogedge.aeo.app
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:9999
+          SUPABASE_SERVICE_ROLE_KEY: ci
+        run: npm run build
+
+      - name: Start site-resolution fixture and server
+        env:
+          RENDERER_DATABASE_URL: postgres://renderer:renderpw@127.0.0.1:5432/aeo_ci
+          AEO_EDGE_DOMAIN: blogedge.aeo.app
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:9999
+          SUPABASE_SERVICE_ROLE_KEY: ci
+        run: |
+          node tests/fixtures/site-api.mjs 9999 &
+          npx next start -p 3401 &
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null "http://localhost:3401/" && break
+            sleep 1
+          done
+
+      # The six invariants, asserted on the wire rather than in isolation:
+      # no edge hostname in any response, an unverified forwarded host is never
+      # indexable, cookies never reach a handler, zero client JS, and the proxy
+      # failure modes (loop, collision, unknown host).
+      - name: Verify the reverse-proxy contract
+        run: ./scripts/verify-proxy.sh http://localhost:3401
