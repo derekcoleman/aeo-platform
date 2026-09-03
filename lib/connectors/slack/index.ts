@@ -27,6 +27,8 @@ export interface SlackConfig {
   retentionDays?: number;
   /** Channel id that receives brief/draft approval messages. Unset = approvals stay in the app. */
   approvalsChannel?: string;
+  /** Channel id that receives proxy-health alerts (failure after two consecutive checks, and recovery). */
+  alertsChannel?: string;
 }
 
 export type SlackCursor = Record<string, string>; // channelId -> latest ts ingested

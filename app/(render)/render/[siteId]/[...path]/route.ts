@@ -31,7 +31,7 @@ import { routeContext, textResponse, type RouteContext } from "@/lib/render/rout
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ siteId: string; path: string[] }> },
 ) {
   const { siteId, path } = await params;
@@ -56,7 +56,7 @@ export async function GET(
   const last = segments[segments.length - 1] ?? "";
 
   const artifact = artifactFor(last);
-  if (artifact) return renderArtifact(artifact, siteId, ctx, h.get(INTERNAL_HEADER.indexable) === "1", siteId);
+  if (artifact) return renderArtifact(artifact, siteId, ctx, h.get(INTERNAL_HEADER.indexable) === "1", siteId, new URL(req.url).searchParams.get("nonce"));
 
   // The root-level llms paths customers rewrite to us separately.
   if (last === "llms.txt" || last === "llms-full.txt") {
@@ -103,6 +103,7 @@ async function renderArtifact(
   ctx: RouteContext,
   indexable: boolean,
   siteIdForHeader: string,
+  nonce: string | null = null,
 ): Promise<Response> {
   switch (kind) {
     case "sitemap":
@@ -138,7 +139,7 @@ async function renderArtifact(
       return renderRobots(ctx, indexable);
 
     case "health":
-      return renderHealth(ctx, siteIdForHeader);
+      return renderHealth(ctx, siteIdForHeader, nonce);
   }
 }
 
@@ -171,12 +172,15 @@ function renderRobots(ctx: RouteContext, indexable: boolean): Response {
  * common failure is a customer changing their own edge config months later and
  * nobody noticing for weeks.
  */
-async function renderHealth(ctx: RouteContext, siteId: string): Promise<Response> {
+async function renderHealth(ctx: RouteContext, siteId: string, nonce: string | null): Promise<Response> {
   const h = await headers();
   return Response.json(
     {
       ok: true,
       siteId,
+      // Echoed verbatim (bounded) so the monitor can tell a live answer from a
+      // cached one — the health path is no-store, but a customer edge may not honour that.
+      nonce: nonce ? nonce.slice(0, 64) : null,
       canonicalDomain: ctx.config.canonicalDomain,
       pathPrefix: ctx.config.pathPrefix,
       received: {

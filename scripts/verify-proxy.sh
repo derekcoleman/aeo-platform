@@ -54,6 +54,8 @@ check "Cookie stripped" '"sawCookie":false' \
   "$(body "$PREFIX/aeo-health" "${E[@]}" "${F[@]}" -H 'Cookie: session=secret' | grep -o '"sawCookie":[a-z]*')"
 check "Authorization stripped" '"sawAuthorization":false' \
   "$(body "$PREFIX/aeo-health" "${E[@]}" "${F[@]}" -H 'Authorization: Bearer x' | grep -o '"sawAuthorization":[a-z]*')"
+check "health echoes the monitor nonce" '"nonce":"n0nce"' \
+  "$(body "$PREFIX/aeo-health?nonce=n0nce" "${E[@]}" "${F[@]}" | grep -o '"nonce":"[a-z0-9]*"')"
 check "we never set a cookie on their domain" 0 \
   "$(curl -s -D- -o /dev/null "$BASE$PREFIX/$SLUG" "${E[@]}" "${F[@]}" | grep -ci 'set-cookie')"
 
