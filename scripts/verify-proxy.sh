@@ -34,6 +34,10 @@ for p in "$PREFIX/$SLUG" "$PREFIX/$SLUG.md" "$PREFIX/sitemap.xml" "$PREFIX/llms.
   check "200 $p" 200 "$(code "$p" "${E[@]}" "${F[@]}")"
 done
 
+echo "own hostname — bypasses site resolution entirely"
+check "a request on a non-edge host reaches the app, never the site store" 0 \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/" -H 'Host: app.example.test' | grep -c '^50[03]$')"
+
 echo "invariant 1 — no rendered byte contains our edge hostname"
 for p in "$PREFIX/$SLUG" "$PREFIX/sitemap.xml" "$PREFIX/llms.txt" "$PREFIX/feed.xml" "/llms.txt"; do
   check "clean $p" 0 "$(body "$p" "${E[@]}" "${F[@]}" | grep -c "blogedge")"

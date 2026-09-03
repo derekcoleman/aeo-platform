@@ -18,7 +18,14 @@ export class HttpSiteStore implements SiteStore {
   ) {}
 
   async byEdgeHostname(host: string): Promise<SiteRoute | null> {
-    const url = new URL(`${this.baseUrl}/rest/v1/sites`);
+    // A missing or malformed Supabase URL is a lookup failure (503 upstream),
+    // not a crash: middleware must never throw on a customer's request.
+    let url: URL;
+    try {
+      url = new URL(`${this.baseUrl}/rest/v1/sites`);
+    } catch (cause) {
+      throw new SiteLookupError(cause);
+    }
     url.searchParams.set("edge_hostname", `eq.${normaliseHost(host)}`);
     url.searchParams.set(
       "select",
