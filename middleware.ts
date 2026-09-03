@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { refreshSession } from "@/lib/auth/supabase";
 import {
   HEADER,
   INTERNAL_HEADER,
@@ -23,10 +24,13 @@ import {
  *           -> here: Host -> site, then rewrite to /_sites/<siteId>/resources/...
  */
 export const config = {
-  // Everything except our own app surfaces and Next internals. The public
-  // render path is the default; app/ops/api are the exceptions.
-  matcher: ["/((?!_next/|api/|app/|ops/|favicon.ico|robots.txt$).*)"],
+  // Everything except Next internals, static files and API routes. Edge
+  // hosts take the render path below; every other host is our own app, where
+  // the only job is refreshing the auth session cookie.
+  matcher: ["/((?!_next/|api/|favicon.ico|robots.txt$|.*\\.(?:png|jpg|svg|ico|txt|xml)$).*)"],
 };
+
+const PROTECTED = ["/app", "/ops", "/settings"];
 
 export async function middleware(req: NextRequest) {
   const host = req.headers.get("host");
@@ -35,7 +39,27 @@ export async function middleware(req: NextRequest) {
   // traffic. Anything else (our own domains, local dev) passes straight
   // through to the app without touching the site store — so the app keeps
   // serving even when the store is unreachable or not yet configured.
-  if (!host || !isEdgeHost(host)) return NextResponse.next();
+  if (!host || !isEdgeHost(host)) {
+    // Our own domain: refresh the Supabase session (rotated cookies land on
+    // this response) and gate the authenticated surfaces. This branch never
+    // runs for a customer's domain, so we never set a cookie there.
+    const res = NextResponse.next();
+    const { pathname } = req.nextUrl;
+    const protectedPath = PROTECTED.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+    try {
+      const { userId } = await refreshSession(req, res);
+      if (protectedPath && !userId) {
+        const login = req.nextUrl.clone();
+        login.pathname = "/login";
+        login.search = `?next=${encodeURIComponent(pathname)}`;
+        return NextResponse.redirect(login);
+      }
+    } catch (err) {
+      // Auth not configured yet: pages render their own "not configured" state.
+      console.warn("[aeo] session refresh skipped", { err: err instanceof Error ? err.message : String(err) });
+    }
+    return res;
+  }
 
   let site;
   try {

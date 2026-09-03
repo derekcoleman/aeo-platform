@@ -725,3 +725,46 @@ begin;
 commit;
 
 \echo 'isolation: site ops assertions passed'
+
+-- ── 0009: app auth ──────────────────────────────────────────────────────────
+insert into app.users (id, email, name) values
+  ('99999999-0000-0000-0000-000000000001', 'jane@acme.com', 'Jane Acme'),
+  ('99999999-0000-0000-0000-000000000002', 'ops@aeo.app', 'Ops')
+on conflict do nothing;
+insert into app.memberships (user_id, org_id, role) values
+  ('99999999-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'owner')
+on conflict do nothing;
+insert into app.internal_staff (user_id, level) values ('99999999-0000-0000-0000-000000000002', 'admin') on conflict do nothing;
+insert into app.staff_bootstrap (email) values ('founder@aeo.app') on conflict do nothing;
+grant select on all tables in schema app to app_user;
+
+-- The JWT hook injects org_ids and is_staff from memberships / internal_staff.
+select pg_temp.expect('access token hook lists the member''s orgs',
+  (select jsonb_array_length((app.custom_access_token_hook(jsonb_build_object('user_id', '99999999-0000-0000-0000-000000000001', 'claims', '{}'::jsonb)) -> 'claims' -> 'org_ids'))), 1);
+select pg_temp.expect('access token hook marks staff',
+  (select count(*) from (select 1 where (app.custom_access_token_hook(jsonb_build_object('user_id', '99999999-0000-0000-0000-000000000002', 'claims', '{}'::jsonb)) -> 'claims' ->> 'is_staff') = 'true') x), 1);
+select pg_temp.expect('access token hook marks a non-staff member false',
+  (select count(*) from (select 1 where (app.custom_access_token_hook(jsonb_build_object('user_id', '99999999-0000-0000-0000-000000000001', 'claims', '{}'::jsonb)) -> 'claims' ->> 'is_staff') = 'false') x), 1);
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"sub":"99999999-0000-0000-0000-000000000001","org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('user reads own mirror row only', (select count(*) from app.users), 1);
+  select pg_temp.expect('member cannot read the staff table for others', (select count(*) from app.internal_staff), 0);
+  select pg_temp.expect('member cannot read staff bootstrap', (select count(*) from app.staff_bootstrap), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"sub":"99999999-0000-0000-0000-000000000002","org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff reads every user', (select count(*) from app.users), 2);
+  select pg_temp.expect('staff reads bootstrap', (select count(*) from app.staff_bootstrap), 1);
+commit;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = 'not json';
+  select pg_temp.expect('malformed claims deny the users table', (select count(*) from app.users), 0);
+rollback;
+
+\echo 'isolation: app auth assertions passed'
