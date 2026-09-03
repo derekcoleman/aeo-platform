@@ -1,4 +1,5 @@
 import type postgres from "postgres";
+import { vectorLiteral } from "@/lib/ai/embed";
 import { appDb } from "@/lib/db/app";
 import type { SerpProviderName, SerpResult } from "@/lib/serp";
 import type { QuestionGraph } from "./question-graph";
@@ -118,9 +119,7 @@ export async function upsertQuestionGraph(
   return { inserted, updated, ids };
 }
 
-export function vectorLiteral(v: number[]): string {
-  return `[${v.map((x) => (Number.isFinite(x) ? x.toFixed(7) : "0")).join(",")}]`;
-}
+export { vectorLiteral };
 
 export interface TrackedQuestion {
   id: string;

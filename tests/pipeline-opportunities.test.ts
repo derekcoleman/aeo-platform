@@ -49,7 +49,7 @@ describe("upsertOpportunities", () => {
     expect(sql.queries).toHaveLength(3);
     expect(sql.queries[0]!.text).toContain("where content.opportunities.status = 'open'");
     expect(sql.queries[0]!.values[0]).toBe(SITE_ID);
-    expect(sql.queries[0]!.values[9]).toBe(`question:${Q1}`);
+    expect(sql.queries[0]!.values[10]).toBe(`question:${Q1}`);
   });
 
   it("scanSite runs the gap query then upserts", async () => {
@@ -69,7 +69,7 @@ describe("refresh + status", () => {
     expect(q.values[1]).toBe("refresh");
     expect(q.values[2]).toBe("Refresh: SSO vs SCIM");
     expect(q.values[5]).toBe("item-1");
-    expect(q.values[9]).toBe("refresh:item-1:30d");
+    expect(q.values[10]).toBe("refresh:item-1:30d");
   });
 
   it("markOpportunity keeps an earlier dismissed_reason when none is given; loadOpportunity returns null for a miss", async () => {

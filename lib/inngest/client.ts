@@ -184,3 +184,28 @@ export const approvalRequested = eventType("approval/requested", {
 export const opportunitiesScanRequested = eventType("content/opportunities.scan.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
 });
+
+// ── brand brain ─────────────────────────────────────────────────────────────
+
+/** Redact → chunk → embed every document whose chunks are missing or stale. Also fires off connector/sync.completed. */
+export const contextIngestRequested = eventType("context/ingest.requested", {
+  schema: z.object({ orgId: z.guid(), connectionId: z.guid().nullable().optional() }),
+});
+
+export const contextIngestCompleted = eventType("context/ingest.completed", {
+  schema: z.object({ orgId: z.guid(), documents: z.number().int(), chunks: z.number().int(), embedded: z.number().int(), remaining: z.number().int() }),
+});
+
+/** Extract candidate facts from redacted, chunked documents that have none yet. */
+export const contextFactsExtractRequested = eventType("context/facts.extract.requested", {
+  schema: z.object({ orgId: z.guid(), siteId: z.guid().nullable().optional(), maxDocuments: z.number().int().min(1).max(500).optional() }),
+});
+
+export const contextFactsExtractCompleted = eventType("context/facts.extract.completed", {
+  schema: z.object({ orgId: z.guid(), documents: z.number().int(), candidates: z.number().int(), remaining: z.number().int() }),
+});
+
+/** Run the deterministic newsworthiness detectors for one site and bridge what they find. */
+export const contextSignalsScanRequested = eventType("context/signals.scan.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
+});

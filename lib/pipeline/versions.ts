@@ -1,7 +1,7 @@
 import { appDb } from "@/lib/db/app";
 import type postgres from "postgres";
 import type { SourceVerification } from "./qa";
-import type { Intent, ModelRun, QaGateResult, SourceSpec } from "./types";
+import type { BriefFact, Intent, ModelRun, QaGateResult, SourceSpec } from "./types";
 
 /**
  * Content items + versions + the citation ledger + QA rows. Versions are
@@ -63,6 +63,8 @@ export interface VersionInput {
   structureScore: unknown | null;
   wordCount: number;
   run: ModelRun;
+  /** The manifesto this version was generated under, for reproducibility. */
+  manifestVersionId?: string | null;
 }
 
 export interface VersionRow {
@@ -82,13 +84,14 @@ export interface VersionRow {
 export async function insertVersion(input: VersionInput, sql: postgres.Sql = appDb()): Promise<{ id: string; versionNo: number }> {
   const [row] = await sql<{ id: string; version_no: number }[]>`
     insert into content.content_versions
-      (content_item_id, version_no, title, description, body_md, body_html, frontmatter, schema_jsonld, structure_score, word_count, model_run)
+      (content_item_id, version_no, title, description, body_md, body_html, frontmatter, schema_jsonld, structure_score, word_count, model_run, manifest_version_id)
     values (
       ${input.contentItemId},
       (select coalesce(max(version_no), 0) + 1 from content.content_versions where content_item_id = ${input.contentItemId}),
       ${input.title}, ${input.description}, ${input.bodyMd}, ${input.bodyHtml},
       ${sql.json(input.frontmatter as never)}, ${input.schemaJsonLd == null ? null : sql.json(input.schemaJsonLd as never)},
-      ${input.structureScore == null ? null : sql.json(input.structureScore as never)}, ${input.wordCount}, ${sql.json(input.run as never)})
+      ${input.structureScore == null ? null : sql.json(input.structureScore as never)}, ${input.wordCount}, ${sql.json(input.run as never)},
+      ${input.manifestVersionId ?? null})
     returning id, version_no`;
   if (!row) throw new Error("version insert returned no row");
   return { id: row.id, versionNo: row.version_no };
@@ -129,6 +132,23 @@ export async function insertQaResults(versionId: string, gates: QaGateResult[], 
       insert into content.qa_results (content_version_id, gate, passed, detail)
       values (${versionId}, ${g.gate}, ${g.passed}, ${sql.json(g.detail as never)})`;
   }
+}
+
+/** The fact half of the ledger: every `{{fact:key}}` the body cited, with the brand_facts id it resolved to. */
+export async function insertContentFacts(versionId: string, facts: BriefFact[], sql: postgres.Sql = appDb()): Promise<number> {
+  let n = 0;
+  for (const f of facts) {
+    await sql`
+      insert into content.content_facts (content_version_id, key, fact_id, text)
+      values (${versionId}, ${f.key}, ${f.factId}, ${f.text})
+      on conflict (content_version_id, key) do nothing`;
+    n++;
+  }
+  return n;
+}
+
+export async function loadContentFacts(versionId: string, sql: postgres.Sql = appDb()): Promise<{ key: string; fact_id: string | null; text: string }[]> {
+  return sql<{ key: string; fact_id: string | null; text: string }[]>`select key, fact_id, text from content.content_facts where content_version_id = ${versionId} order by created_at, key`;
 }
 
 export async function loadSources(versionId: string, sql: postgres.Sql = appDb()): Promise<SourceSpec[]> {

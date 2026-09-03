@@ -2,8 +2,8 @@ import { runPageRules, type StructureScore } from "@/lib/aeo/rules";
 import { htmlToMarkdown, parseHtml } from "@/lib/audit/html";
 import { validateArticleJsonLd } from "@/lib/render/jsonld";
 import { assertNoEdgeHostname } from "@/lib/tenancy/urls";
-import { MARKER_RE, markerKeys, resolveMarkers } from "./markdown";
-import type { Intent, QaGateResult, QaReport, SourceSpec } from "./types";
+import { ANY_MARKER_RE, factMarkerKeys, markerKeys, resolveMarkers, stripFactMarkers } from "./markdown";
+import type { BriefFact, Intent, QaGateResult, QaReport, SourceSpec } from "./types";
 
 /**
  * QA gates. Deterministic wherever possible; each gate writes one row to
@@ -13,13 +13,18 @@ import type { Intent, QaGateResult, QaReport, SourceSpec } from "./types";
  * statistic without a `{{src:key}}` marker is a hard failure, every marker
  * must resolve to a ledger row, and (when a fetcher is supplied) the recorded
  * verbatim quote must appear at the URL. A string assertion, not a judgment.
+ *
+ * The grounding gate is its twin for the company's own claims: every
+ * `{{fact:key}}` must be a fact the brief offered, still verified, currently
+ * effective and public — and when the brain offered enough public facts, a
+ * draft that cites none of them is generic by construction and fails.
  */
 
 // Numbers that are claims. Deliberately narrower than the audit's STAT_RE:
 // a bare year in prose is not a statistic that needs a citation.
 export const NUMERIC_CLAIM_RE = /(\d+(\.\d+)?\s?%|\$\s?\d[\d,.]*\s?(k|m|b|million|billion)?\b|\b\d{1,3}(,\d{3})+\b|\b\d+(\.\d+)?x\b|\b\d+(\.\d+)?\s?(million|billion|percent)\b)/i;
 
-const PLACEHOLDER_RE = /\{\{(?!\s*src:)[^}]*\}\}|\[(?:citation needed|todo|tbd|insert[^\]]*|placeholder)\]|\bTODO\b|\bTBD\b|lorem ipsum|\bXX+\b/i;
+const PLACEHOLDER_RE = /\{\{(?!\s*(?:src|fact):)[^}]*\}\}|\[(?:citation needed|todo|tbd|insert[^\]]*|placeholder)\]|\bTODO\b|\bTBD\b|lorem ipsum|\bXX+\b/i;
 
 export const BANNED_PHRASES = [
   "delve into", "delves into", "in today's fast-paced", "in the ever-evolving", "ever-changing landscape", "game-changer", "game changer",
@@ -38,9 +43,18 @@ export interface QaInput {
   /** Body HTML after marker resolution and rendering (what will be published). */
   bodyHtml: string;
   sources: SourceSpec[];
+  /** Verified facts the brief offered the draft (may be empty: no brain, or none verified yet). */
+  facts?: BriefFact[];
   intent: Intent;
   jsonLd?: unknown;
   now?: Date;
+}
+
+export interface FactCheck {
+  id: string;
+  status: string;
+  visibility: string;
+  effective: boolean;
 }
 
 export interface QaOptions {
@@ -49,6 +63,10 @@ export interface QaOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  /** Live check of cited fact ids (exists, verified, effective). Omit to trust the brief's snapshot (tests). */
+  loadFacts?: (ids: string[]) => Promise<FactCheck[]>;
+  /** Public facts the brief must offer before "cites none of them" is a failure. */
+  minOrgFacts?: number;
 }
 
 // ── structure ──────────────────────────────────────────────────────────────
@@ -80,11 +98,11 @@ export function unmarkedStatistics(bodyMd: string): UnmarkedStatistic[] {
   paragraphs.forEach((para, i) => {
     const p = para.trim();
     if (!p || p.startsWith("#") || p.startsWith("```") || p.startsWith("|")) return; // headings, code, tables are handled by their own rules
-    if (MARKER_RE.test(p)) {
-      MARKER_RE.lastIndex = 0;
+    if (ANY_MARKER_RE.test(p)) {
+      ANY_MARKER_RE.lastIndex = 0;
       return;
     }
-    MARKER_RE.lastIndex = 0;
+    ANY_MARKER_RE.lastIndex = 0;
     for (const sentence of p.replace(/\s+/g, " ").split(/(?<=[.!?])\s+/)) {
       if (NUMERIC_CLAIM_RE.test(sentence)) out.push({ paragraph: i, sentence: sentence.slice(0, 200) });
     }
@@ -158,11 +176,55 @@ export async function sourcesGate(input: QaInput, opts: QaOptions): Promise<QaGa
   };
 }
 
+// ── grounding ──────────────────────────────────────────────────────────────
+
+export const MIN_ORG_FACTS_DEFAULT = 2;
+
+export interface GroundingDetail {
+  cited: string[];
+  unknown: string[];
+  stale: { key: string; reason: string }[];
+  nonPublic: string[];
+  offeredPublic: number;
+  required: number;
+  citedFacts: BriefFact[];
+}
+
+/**
+ * Every `{{fact:key}}` resolves to an offered, public fact that is (still)
+ * verified and effective. Originality: when the brain offered at least
+ * `minOrgFacts` public facts, the draft must cite at least one — otherwise
+ * it would read the same under a competitor's byline.
+ */
+export async function groundingGate(input: QaInput, opts: QaOptions = {}): Promise<QaGateResult & { detail: GroundingDetail }> {
+  const offered = input.facts ?? [];
+  const byKey = new Map(offered.map((f) => [f.key, f]));
+  const cited = factMarkerKeys(input.bodyMd);
+  const unknown = cited.filter((k) => !byKey.has(k));
+  const known = cited.filter((k) => byKey.has(k)).map((k) => byKey.get(k)!);
+  const nonPublic = known.filter((f) => f.visibility !== "public").map((f) => f.key);
+  const stale: GroundingDetail["stale"] = [];
+  if (opts.loadFacts && known.length) {
+    const checks = new Map((await opts.loadFacts(known.map((f) => f.factId))).map((c) => [c.id, c]));
+    for (const f of known) {
+      const c = checks.get(f.factId);
+      if (!c) stale.push({ key: f.key, reason: "fact no longer exists" });
+      else if (c.status !== "verified") stale.push({ key: f.key, reason: `fact is ${c.status}` });
+      else if (!c.effective) stale.push({ key: f.key, reason: "fact is not currently effective" });
+    }
+  }
+  const offeredPublic = offered.filter((f) => f.visibility === "public").length;
+  const required = offeredPublic >= (opts.minOrgFacts ?? MIN_ORG_FACTS_DEFAULT) ? 1 : 0;
+  const citedFacts = known.filter((f) => f.visibility === "public" && !stale.some((s) => s.key === f.key));
+  const passed = unknown.length === 0 && nonPublic.length === 0 && stale.length === 0 && citedFacts.length >= required;
+  return { gate: "grounding", passed, detail: { cited, unknown, stale, nonPublic, offeredPublic, required, citedFacts } };
+}
+
 // ── mechanics ──────────────────────────────────────────────────────────────
 
 export function mechanicsGate(input: QaInput): QaGateResult {
   const problems: string[] = [];
-  const placeholder = input.bodyMd.match(PLACEHOLDER_RE);
+  const placeholder = stripFactMarkers(input.bodyMd).match(PLACEHOLDER_RE);
   if (placeholder) problems.push(`placeholder text: "${placeholder[0]}"`);
   try {
     assertNoEdgeHostname(input.bodyHtml, "article body");
@@ -220,23 +282,34 @@ export function structureMinFrom(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isFinite(n) && n > 0 ? n : 65;
 }
 
-export async function runQaGates(input: QaInput, opts: QaOptions = {}): Promise<QaReport & { structure: StructureScore; verifications: SourceVerification[] }> {
+export async function runQaGates(
+  input: QaInput,
+  opts: QaOptions = {},
+): Promise<QaReport & { structure: StructureScore; verifications: SourceVerification[]; citedFacts: BriefFact[] }> {
   const min = opts.structureMin ?? structureMinFrom(opts.env);
   const structure = structureGate(input, min);
   const sources = await sourcesGate(input, opts);
+  const grounding = await groundingGate(input, opts);
   const mechanics = mechanicsGate(input);
   const slop = slopGate(input);
-  const gates: QaGateResult[] = [structure, sources, mechanics, slop].map(({ gate, passed, detail }) => ({ gate, passed, detail }));
-  const feedback = feedbackFor({ structure, sources, mechanics, slop });
+  const gates: QaGateResult[] = [structure, sources, grounding, mechanics, slop].map(({ gate, passed, detail }) => ({ gate, passed, detail }));
+  const feedback = feedbackFor({ structure, sources, grounding, mechanics, slop });
   const passed = gates.every((g) => g.passed);
   // A draft with numbers and a brief that supplied nothing to cite is the
-  // brief's failure, not the drafter's.
+  // brief's failure, not the drafter's; so is a fact that went stale under it.
   const briefLacksSources = !sources.passed && input.sources.length === 0 && (sources.detail.unmarkedStatistics as unknown[]).length > 0;
-  const routeTo: QaReport["routeTo"] = passed ? null : briefLacksSources ? "brief" : "draft";
-  return { passed, gates, routeTo, feedback, structure: structure.structure, verifications: sources.verifications };
+  const briefIsStale = grounding.detail.stale.length > 0;
+  const routeTo: QaReport["routeTo"] = passed ? null : briefLacksSources || briefIsStale ? "brief" : "draft";
+  return { passed, gates, routeTo, feedback, structure: structure.structure, verifications: sources.verifications, citedFacts: grounding.detail.citedFacts };
 }
 
-function feedbackFor(g: { structure: ReturnType<typeof structureGate>; sources: Awaited<ReturnType<typeof sourcesGate>>; mechanics: QaGateResult; slop: QaGateResult }): string[] {
+function feedbackFor(g: {
+  structure: ReturnType<typeof structureGate>;
+  sources: Awaited<ReturnType<typeof sourcesGate>>;
+  grounding: Awaited<ReturnType<typeof groundingGate>>;
+  mechanics: QaGateResult;
+  slop: QaGateResult;
+}): string[] {
   const out: string[] = [];
   if (!g.structure.passed) {
     out.push(`Structure score ${g.structure.detail.normalized} is below ${g.structure.detail.min}.`);
@@ -246,6 +319,11 @@ function feedbackFor(g: { structure: ReturnType<typeof structureGate>; sources: 
   for (const k of d.unresolved as string[]) out.push(`Marker {{src:${k}}} does not match any provided source; only cite the sources you were given.`);
   for (const u of d.unmarkedStatistics as UnmarkedStatistic[]) out.push(`Statistic without a citation marker — cite a provided source or remove the number: "${u.sentence}"`);
   for (const v of d.failedVerification as SourceVerification[]) out.push(`Source ${v.key} could not be verified at ${v.url} (${v.reason}); do not cite it.`);
+  const gr = g.grounding.detail;
+  for (const k of gr.unknown) out.push(`Marker {{fact:${k}}} is not one of the verified brand facts you were given; only cite the fact keys provided.`);
+  for (const k of gr.nonPublic) out.push(`Fact {{fact:${k}}} is internal and cannot be stated in a published article; remove the claim.`);
+  for (const s of gr.stale) out.push(`Fact {{fact:${s.key}}} can no longer be cited (${s.reason}).`);
+  if (gr.citedFacts.length < gr.required) out.push(`The article states nothing specific to the company. Ground it in at least one of the verified brand facts provided, marked with {{fact:key}}.`);
   for (const p of g.mechanics.detail.problems as string[]) out.push(`Mechanics: ${p}`);
   const banned = g.slop.detail.bannedPhrases as string[];
   if (banned.length) out.push(`Remove these phrases: ${banned.map((b) => `"${b}"`).join(", ")}.`);

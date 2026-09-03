@@ -1,5 +1,5 @@
 import type { SiteRoute } from "@/lib/tenancy/types";
-import { faqMarkdown, MARKER_RE, renderMarkdown, resolveMarkers, stripLeadingH1 } from "./markdown";
+import { ANY_MARKER_RE, factMarkerKeys, faqMarkdown, renderMarkdown, resolveMarkers, stripFactMarkers, stripLeadingH1 } from "./markdown";
 import { buildPublishedPage, type BuiltPage, type PublishInputs } from "./publish";
 import type { BriefSpec, DraftOutput, SourceSpec } from "./types";
 import type { AuthorRow } from "./versions";
@@ -31,19 +31,21 @@ export interface Composed {
   /** Sources actually cited, first-citation order. */
   cited: SourceSpec[];
   unresolved: string[];
+  /** `{{fact:key}}` keys the body cites, first-citation order. */
+  factKeys: string[];
   /** FAQ with markers stripped — JSON-LD text, not prose with footnotes. */
   faq: { question: string; answer: string }[];
   page: BuiltPage;
 }
 
 export function stripMarkers(text: string): string {
-  return text.replace(MARKER_RE, "").replace(/[ \t]+([.,;:!?])/g, "$1").replace(/[ \t]{2,}/g, " ").trim();
+  return text.replace(ANY_MARKER_RE, "").replace(/[ \t]+([.,;:!?])/g, "$1").replace(/[ \t]{2,}/g, " ").trim();
 }
 
 export function composeVersion(input: ComposeInput): Composed {
   const body = stripLeadingH1(input.draft.bodyMd).trim();
   const bodyMd = [body, faqMarkdown(input.draft.faq)].filter(Boolean).join("\n\n");
-  const resolved = resolveMarkers(bodyMd, input.brief.sources);
+  const resolved = resolveMarkers(stripFactMarkers(bodyMd), input.brief.sources);
   const { html, wordCount } = renderMarkdown(resolved.markdown);
   const faq = input.draft.faq.map((f) => ({ question: f.question.trim(), answer: stripMarkers(f.answer) }));
   const page = buildPublishedPage({
@@ -60,5 +62,5 @@ export function composeVersion(input: ComposeInput): Composed {
     datePublished: input.datePublished,
     dateModified: input.dateModified,
   });
-  return { bodyMd, bodyHtml: html, wordCount, cited: resolved.cited, unresolved: resolved.unresolved, faq, page };
+  return { bodyMd, bodyHtml: html, wordCount, cited: resolved.cited, unresolved: resolved.unresolved, factKeys: factMarkerKeys(bodyMd), faq, page };
 }

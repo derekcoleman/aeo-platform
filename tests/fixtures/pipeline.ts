@@ -1,5 +1,5 @@
 import type { SiteRoute } from "@/lib/tenancy/types";
-import type { BriefSpec, DraftOutput, SourceSpec } from "@/lib/pipeline/types";
+import type { BriefFact, BriefSpec, DraftOutput, SourceSpec } from "@/lib/pipeline/types";
 import type { AuthorRow } from "@/lib/pipeline/versions";
 
 /** Shared pipeline fixtures: the Acme lighthouse site, one verifiable source, a brief and a draft that cites it. */
@@ -30,6 +30,14 @@ export const gartnerSource: SourceSpec = {
   quote: "62% of mid-market buyers require SCIM provisioning before purchase",
 };
 
+export const MANIFEST_ID = "eeeeeeee-4000-0000-0000-000000000001";
+
+/** Two public verified facts and one internal, as the brain would offer them. */
+export const scimFact: BriefFact = { key: "product-capability-supports-eeee", factId: "eeeeeeee-3000-0000-0000-000000000001", type: "product_capability", text: "Acme supports SCIM provisioning on every plan", visibility: "public" };
+export const soc2Fact: BriefFact = { key: "launch-completed-eeef", factId: "eeeeeeee-3000-0000-0000-000000000004", type: "launch", text: "Acme completed SOC 2 Type II in 2026 (since 2026-03-01)", visibility: "public" };
+export const internalFact: BriefFact = { key: "objection-buyers-ask-about-eee2", factId: "eeeeeeee-3000-0000-0000-000000000002", type: "objection", text: "Acme buyers ask about SOC 2 status", visibility: "internal" };
+export const offeredFacts: BriefFact[] = [scimFact, soc2Fact, internalFact];
+
 export const brief: BriefSpec = {
   headQuestion: "What is the difference between SSO and SCIM?",
   targetAnswer:
@@ -48,7 +56,13 @@ export const brief: BriefSpec = {
   pov: "Acme ships SCIM on every plan, so provisioning is not an enterprise upsell.",
   bannedClaims: ["Acme is the only vendor with SCIM"],
   sources: [gartnerSource],
+  factKeys: [],
+  facts: [],
+  manifestVersionId: null,
 };
+
+/** The same brief with the brain attached: two public facts the draft may cite. */
+export const groundedBrief: BriefSpec = { ...brief, factKeys: [scimFact.key, soc2Fact.key], facts: [scimFact, soc2Fact], manifestVersionId: MANIFEST_ID };
 
 export const draft: DraftOutput = {
   title: "SSO vs SCIM: what mid-market security teams need",
@@ -63,7 +77,7 @@ export const draft: DraftOutput = {
     "| Capability | SSO | SCIM |\n|---|---|---|\n| Sign in once | Yes | No |\n| Create accounts automatically | No | Yes |\n| Remove access on offboarding | No | Yes |",
     "## Which should a mid-market team implement first?",
     "Implement SSO first, because it removes password sprawl immediately and SCIM depends on the same identity provider connection. Add SCIM as soon as headcount changes outpace manual admin work. Most teams reach that point long before they expect to.",
-    "See [Acme pricing](https://acme.com/pricing) for which plans include SCIM. Every plan does.",
+    "See [Acme pricing](https://acme.com/pricing) for which plans include SCIM. Every plan does {{fact:product-capability-supports-eeee}}.",
   ].join("\n\n"),
   faq: [
     { question: "Does SCIM require SSO?", answer: "Not strictly, but in practice both run through the same identity provider, so teams almost always deploy SSO first and add SCIM afterwards." },

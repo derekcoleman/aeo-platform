@@ -12,18 +12,24 @@ import type { ModelRun } from "./types";
  * in ops.llm_calls with its task key so cost per article is a query today.
  */
 
-export type TaskKey = "pipeline.brief" | "pipeline.draft" | "pipeline.qa.judge";
+export type TaskKey = "pipeline.brief" | "pipeline.draft" | "pipeline.qa.judge" | "context.facts.extract" | "context.manifest.draft";
 
 const TASK_ENV: Record<TaskKey, string> = {
   "pipeline.brief": "AEO_MODEL_BRIEF",
   "pipeline.draft": "AEO_MODEL_DRAFT",
   "pipeline.qa.judge": "AEO_MODEL_QA_JUDGE",
+  "context.facts.extract": "AEO_MODEL_FACTS_EXTRACT",
+  "context.manifest.draft": "AEO_MODEL_MANIFEST_DRAFT",
 };
 
+// Extraction is a classification job at volume: small model, strict schema.
+// The manifesto is editorial: mid model, a human edits it anyway.
 const DEFAULTS: Record<TaskKey, string> = {
   "pipeline.brief": "claude-opus-5",
   "pipeline.draft": "claude-opus-5",
   "pipeline.qa.judge": "claude-sonnet-5",
+  "context.facts.extract": "claude-haiku-4-5-20251001",
+  "context.manifest.draft": "claude-sonnet-5",
 };
 
 export function modelIdFor(task: TaskKey, env: NodeJS.ProcessEnv = process.env): string {

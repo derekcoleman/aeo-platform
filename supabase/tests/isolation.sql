@@ -491,3 +491,178 @@ begin;
 commit;
 
 \echo 'isolation: pipeline assertions passed'
+
+-- ── 0007: brand brain ───────────────────────────────────────────────────────
+-- Globex needs a document of its own so cross-org chunk counts mean something.
+insert into context.context_documents (id, connection_id, provider, kind, external_id, text, content_sha256) values
+  ('eeeeeeee-0000-0000-0000-000000000002', 'cccccccc-0000-0000-0000-000000000002', 'google', 'gsc_note', 'globex:doc:1', 'globex widgets ship weekly', repeat('b', 64))
+on conflict do nothing;
+-- org_id deliberately omitted on chunks and content_facts: the triggers must
+-- denormalise it from the document / the version.
+insert into context.context_chunks (id, document_id, ordinal, text, token_estimate, embedding, embedding_model) values
+  ('eeeeeeee-1000-0000-0000-000000000001',
+   (select id from context.context_documents where external_id = 'C1:1700000000.000100'), 0, 'we shipped SCIM', 4,
+   ('[' || repeat('0,', 1535) || '1]')::vector, 'hash-bow'),
+  ('eeeeeeee-1000-0000-0000-000000000002', 'eeeeeeee-0000-0000-0000-000000000002', 0, 'globex widgets ship weekly', 5, null, null)
+on conflict do nothing;
+insert into context.entities (id, org_id, type, name, aliases) values
+  ('eeeeeeee-2000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'brand', 'Acme', '{"acme.com"}'),
+  ('eeeeeeee-2000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'competitor', 'Okta', '{}'),
+  ('eeeeeeee-2000-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222', 'brand', 'Globex', '{}')
+on conflict do nothing;
+insert into context.brand_facts (id, org_id, site_id, type, subject_entity_id, subject_text, predicate, object_text, status, visibility, verified_at, dedupe_key) values
+  ('eeeeeeee-3000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001',
+   'product_capability', 'eeeeeeee-2000-0000-0000-000000000001', 'Acme', 'supports', 'SCIM provisioning on every plan', 'verified', 'public', now(),
+   'product_capability|acme|supports'),
+  ('eeeeeeee-3000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', null,
+   'objection', 'eeeeeeee-2000-0000-0000-000000000001', 'Acme', 'buyers ask about', 'SOC 2 status', 'candidate', 'internal', null,
+   'objection|acme|buyers-ask-about'),
+  ('eeeeeeee-3000-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222', null,
+   'positioning', 'eeeeeeee-2000-0000-0000-000000000003', 'Globex', 'is', 'the widget company', 'verified', 'public', now(),
+   'positioning|globex|is')
+on conflict do nothing;
+insert into context.brand_manifests (id, org_id, site_id, version, status, doc, activated_at) values
+  ('eeeeeeee-4000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', null, 1, 'active', '{"brand":{"name":"Acme"}}'::jsonb, now()),
+  ('eeeeeeee-4000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', null, 1, 'draft', '{"brand":{"name":"Globex"}}'::jsonb, null)
+on conflict do nothing;
+insert into context.signals (id, org_id, site_id, kind, title, evidence, score) values
+  ('eeeeeeee-5000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001', 'term_spike', 'scim', '{"n7":9,"n30":12}'::jsonb, 42),
+  ('eeeeeeee-5000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000002', 'unanswered_question', 'how fast do widgets ship', '{}'::jsonb, 30)
+on conflict do nothing;
+update content.opportunities set signal_id = 'eeeeeeee-5000-0000-0000-000000000001' where id = 'dddddddd-1000-0000-0000-000000000001';
+update content.briefs set manifest_version_id = 'eeeeeeee-4000-0000-0000-000000000001' where id = 'dddddddd-2000-0000-0000-000000000001';
+insert into content.content_facts (content_version_id, key, fact_id, text) values
+  ('dddddddd-4000-0000-0000-000000000001', 'product-capability-supports-eeee', 'eeeeeeee-3000-0000-0000-000000000001', 'Acme supports SCIM provisioning on every plan'),
+  ('dddddddd-4000-0000-0000-000000000002', 'positioning-is-eeee', 'eeeeeeee-3000-0000-0000-000000000003', 'Globex is the widget company')
+on conflict do nothing;
+grant select on all tables in schema context, content to app_user;
+grant update on context.brand_facts to app_user;
+
+select pg_temp.expect('chunk org_id denormalised from document',
+  (select count(*) from context.context_chunks where id = 'eeeeeeee-1000-0000-0000-000000000002'
+     and org_id = '22222222-2222-2222-2222-222222222222'), 1);
+select pg_temp.expect('content fact org_id denormalised from version',
+  (select count(*) from content.content_facts where org_id = '11111111-1111-1111-1111-111111111111'), 1);
+select pg_temp.expect('chunk tsvector is generated with the english config',
+  (select count(*) from context.context_chunks where tsv @@ to_tsquery('english', 'ship') and org_id = '22222222-2222-2222-2222-222222222222'), 1);
+select pg_temp.expect('serp_citations.entity_id is a real FK now',
+  (select count(*) from pg_constraint where conname = 'serp_citations_entity_fk'), 1);
+select pg_temp.expect('opportunity → signal lineage',
+  (select count(*) from content.opportunities o join context.signals s on s.id = o.signal_id where o.id = 'dddddddd-1000-0000-0000-000000000001'), 1);
+
+do $$
+declare rejected boolean := false;
+begin
+  begin
+    insert into context.brand_facts (org_id, type, subject_text, predicate, object_text, status, verified_at, dedupe_key)
+    values ('11111111-1111-1111-1111-111111111111', 'product_capability', 'Acme', 'supports', 'SCIM again', 'verified', now(), 'product_capability|acme|supports');
+  exception when unique_violation then
+    rejected := true;
+  end;
+  if not rejected then
+    raise exception 'FAIL second verified fact accepted for the same dedupe key';
+  end if;
+  raise notice 'ok  one verified fact per (org, dedupe_key)';
+end $$;
+
+do $$
+declare rejected boolean := false;
+begin
+  begin
+    insert into context.brand_manifests (org_id, site_id, version, status, doc, activated_at)
+    values ('11111111-1111-1111-1111-111111111111', null, 2, 'active', '{}'::jsonb, now());
+  exception when unique_violation then
+    rejected := true;
+  end;
+  if not rejected then
+    raise exception 'FAIL second active org-wide manifest accepted';
+  end if;
+  raise notice 'ok  one active manifest per org/site';
+end $$;
+
+do $$
+declare rejected boolean := false;
+begin
+  begin
+    insert into context.context_chunks (document_id, ordinal, text, embedding)
+    values ('eeeeeeee-0000-0000-0000-000000000002', 9, 'no model', ('[' || repeat('0,', 1535) || '1]')::vector);
+  exception when check_violation then
+    rejected := true;
+  end;
+  if not rejected then
+    raise exception 'FAIL embedding accepted without embedding_model';
+  end if;
+  raise notice 'ok  embedding and embedding_model travel together';
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('member sees own chunks only',        (select count(*) from context.context_chunks), 1);
+  select pg_temp.expect('member sees own entities only',      (select count(*) from context.entities), 2);
+  select pg_temp.expect('member sees own facts only',         (select count(*) from context.brand_facts), 2);
+  select pg_temp.expect('member sees own manifests only',     (select count(*) from context.brand_manifests), 1);
+  select pg_temp.expect('member sees own signals only',       (select count(*) from context.signals), 1);
+  select pg_temp.expect('member sees own content facts only', (select count(*) from content.content_facts), 1);
+  select pg_temp.expect('member cannot see the other org''s verified fact',
+    (select count(*) from context.brand_facts where id = 'eeeeeeee-3000-0000-0000-000000000003'), 0);
+  -- tenant_write: a member can verify their own candidate, not another org's.
+  update context.brand_facts set status = 'verified', verified_at = now() where id = 'eeeeeeee-3000-0000-0000-000000000002';
+  select pg_temp.expect('member verified own candidate fact',
+    (select count(*) from context.brand_facts where id = 'eeeeeeee-3000-0000-0000-000000000002' and status = 'verified'), 1);
+  update context.brand_facts set status = 'rejected' where id = 'eeeeeeee-3000-0000-0000-000000000003';
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('other member sees only its own chunks',   (select count(*) from context.context_chunks), 1);
+  select pg_temp.expect('other member sees only its own facts',    (select count(*) from context.brand_facts), 1);
+  select pg_temp.expect('other member sees only its own signals',  (select count(*) from context.signals), 1);
+  do $$
+  declare n int;
+  begin
+    update context.brand_facts set status = 'rejected' where id = 'eeeeeeee-3000-0000-0000-000000000001';
+    get diagnostics n = row_count;
+    if n <> 0 then
+      raise exception 'FAIL other member updated an Acme fact';
+    end if;
+    raise notice 'ok  other member cannot touch Acme facts';
+  end $$;
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every chunk',    (select count(*) from context.context_chunks), 2);
+  select pg_temp.expect('staff sees every fact',     (select count(*) from context.brand_facts), 3);
+  select pg_temp.expect('staff sees every manifest', (select count(*) from context.brand_manifests), 2);
+commit;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform count(*) from context.context_chunks;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer can read context.context_chunks';
+    end if;
+    begin
+      denied := false;
+      perform count(*) from context.brand_facts;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer can read context.brand_facts';
+    end if;
+    raise notice 'ok  renderer cannot read the brand brain';
+  end $$;
+commit;
+
+\echo 'isolation: brand brain assertions passed'

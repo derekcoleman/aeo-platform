@@ -17,6 +17,16 @@ export const sourceSchema = z.object({
 });
 export type SourceSpec = z.infer<typeof sourceSchema>;
 
+/** A verified brand fact offered to the draft; cited as `{{fact:key}}` and checked at the grounding gate. */
+export const briefFactSchema = z.object({
+  key: z.string().regex(/^[a-z0-9][a-z0-9-]{1,63}$/),
+  factId: z.guid(),
+  type: z.string().min(1).max(40),
+  text: z.string().min(1).max(800),
+  visibility: z.enum(["public", "internal"]),
+});
+export type BriefFact = z.infer<typeof briefFactSchema>;
+
 export const intentSchema = z.enum(["comparative", "informational", "howto", "unknown"]);
 export type Intent = z.infer<typeof intentSchema>;
 
@@ -48,6 +58,11 @@ export const briefSpecSchema = z.object({
   pov: z.string().max(600).default(""),
   bannedClaims: z.array(z.string().max(200)).max(20).default([]),
   sources: z.array(sourceSchema).max(20).default([]),
+  /** Keys the model picked from the verified facts it was offered; resolved into `facts` by code, never by the model. */
+  factKeys: z.array(z.string()).max(20).default([]),
+  /** The facts the draft may cite, materialised from factKeys + the offered list. */
+  facts: z.array(briefFactSchema).max(20).default([]),
+  manifestVersionId: z.guid().nullable().default(null),
 });
 export type BriefSpec = z.infer<typeof briefSpecSchema>;
 
@@ -73,7 +88,7 @@ export type ApprovalDecision = "approve" | "changes" | "regenerate";
 export type ApprovalPolicy = "auto_publish" | "approve_brief" | "approve_post" | "approve_both";
 
 export interface QaGateResult {
-  gate: "structure" | "sources" | "mechanics" | "slop";
+  gate: "structure" | "sources" | "grounding" | "mechanics" | "slop";
   passed: boolean;
   detail: Record<string, unknown>;
 }

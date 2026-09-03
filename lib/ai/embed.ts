@@ -84,6 +84,16 @@ export function cosine(a: number[], b: number[]): number {
   return na && nb ? dot / Math.sqrt(na * nb) : 0;
 }
 
+/** pgvector input literal. Non-finite values become 0 so a NaN never reaches the index. */
+export function vectorLiteral(v: number[]): string {
+  return `[${v.map((x) => (Number.isFinite(x) ? x.toFixed(7) : "0")).join(",")}]`;
+}
+
+/**
+ * The production embedder, or the hash fallback sized to the column. Every
+ * `vector(1536)` column rejects any other width, so the fallback must match
+ * EMBEDDING_DIMENSIONS or the degraded path fails on the first insert.
+ */
 export function defaultEmbedder(): Embedder {
-  return process.env.OPENAI_API_KEY ? openAiEmbedder() : hashEmbedder();
+  return process.env.OPENAI_API_KEY ? openAiEmbedder() : hashEmbedder(EMBEDDING_DIMENSIONS);
 }

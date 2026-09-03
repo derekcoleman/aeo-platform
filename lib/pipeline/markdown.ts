@@ -10,6 +10,9 @@ import type { SourceSpec } from "./types";
  */
 
 export const MARKER_RE = /\{\{\s*src:([a-z0-9][a-z0-9-]{1,63})\s*\}\}/g;
+/** `{{fact:key}}` — a verified brand fact. Stays in the stored markdown as provenance; stripped from HTML (facts are ours, not footnotes). */
+export const FACT_MARKER_RE = /\{\{\s*fact:([a-z0-9][a-z0-9-]{1,63})\s*\}\}/g;
+export const ANY_MARKER_RE = /\{\{\s*(?:src|fact):[a-z0-9][a-z0-9-]{1,63}\s*\}\}/g;
 
 /** The model is told not to emit a title; if it does anyway, drop it rather than render two H1s. */
 export function stripLeadingH1(md: string): string {
@@ -20,6 +23,17 @@ export function markerKeys(md: string): string[] {
   const keys = new Set<string>();
   for (const m of md.matchAll(MARKER_RE)) keys.add(m[1]!);
   return [...keys];
+}
+
+export function factMarkerKeys(md: string): string[] {
+  const keys = new Set<string>();
+  for (const m of md.matchAll(FACT_MARKER_RE)) keys.add(m[1]!);
+  return [...keys];
+}
+
+/** Remove fact markers (tidying the whitespace they leave) before rendering; the markdown keeps them. */
+export function stripFactMarkers(md: string): string {
+  return md.replace(FACT_MARKER_RE, "").replace(/[ \t]+([.,;:!?])/g, "$1").replace(/(?<=\S)[ \t]{2,}(?=\S)/g, " ");
 }
 
 export interface ResolvedMarkers {

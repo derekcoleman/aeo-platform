@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { composeVersion } from "@/lib/pipeline/compose";
 import { mechanicsGate, runQaGates, sentenceLengthCv, slopGate, unmarkedStatistics, verifySources } from "@/lib/pipeline/qa";
-import { author, brief, draft, gartnerSource, site } from "./fixtures/pipeline";
+import { author, brief, draft, gartnerSource, scimFact, site } from "./fixtures/pipeline";
 
 const NOW = new Date("2026-09-01T12:00:00Z");
 
@@ -11,7 +11,7 @@ function compose(body = draft.bodyMd) {
 
 function qaInput(body = draft.bodyMd, sources = brief.sources) {
   const c = compose(body);
-  return { title: draft.title, bodyMd: c.bodyMd, bodyHtml: c.bodyHtml, sources, intent: brief.intent, jsonLd: c.page.jsonLd, now: NOW };
+  return { title: draft.title, bodyMd: c.bodyMd, bodyHtml: c.bodyHtml, sources, facts: [scimFact], intent: brief.intent, jsonLd: c.page.jsonLd, now: NOW };
 }
 
 function fakeFetch(pages: Record<string, string | number>): typeof fetch {
@@ -63,7 +63,7 @@ describe("runQaGates", () => {
   it("passes a grounded draft whose only statistic is cited and verifiable", async () => {
     const fetchImpl = fakeFetch({ [gartnerSource.url]: `<p>${gartnerSource.quote}.</p>` });
     const report = await runQaGates(qaInput(), { fetchImpl, structureMin: 0 });
-    expect(report.gates.map((g) => [g.gate, g.passed])).toEqual([["structure", true], ["sources", true], ["mechanics", true], ["slop", true]]);
+    expect(report.gates.map((g) => [g.gate, g.passed])).toEqual([["structure", true], ["sources", true], ["grounding", true], ["mechanics", true], ["slop", true]]);
     expect(report.passed).toBe(true);
     expect(report.routeTo).toBeNull();
     expect(report.verifications).toEqual([expect.objectContaining({ key: "gartner-2026", verified: true })]);
@@ -86,7 +86,7 @@ describe("runQaGates", () => {
   });
 
   it("rejects an unresolved marker and a failed live verification", async () => {
-    const body = draft.bodyMd.replace("Every plan does.", "Every plan does {{src:nope}}.");
+    const body = draft.bodyMd.replace("Every plan does {{fact:product-capability-supports-eeee}}.", "Every plan does {{src:nope}}.");
     const fetchImpl = fakeFetch({ [gartnerSource.url]: "<p>The quote is not here.</p>" });
     const report = await runQaGates(qaInput(body), { fetchImpl, structureMin: 0 });
     const sources = report.gates.find((g) => g.gate === "sources")!;

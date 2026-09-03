@@ -12,6 +12,8 @@ import {
   type ApprovalKind,
   type ApprovalNotice,
 } from "@/lib/pipeline/approvals";
+import { loadFactStatuses } from "@/lib/context/facts";
+import { loadManifest, manifestPromptBlock } from "@/lib/context/manifest";
 import { generateBrief, insertBrief, loadBrief, loadBriefContext, setBriefStatus } from "@/lib/pipeline/briefs";
 import { composeVersion } from "@/lib/pipeline/compose";
 import { generateDraft, slugify } from "@/lib/pipeline/draft";
@@ -24,6 +26,7 @@ import type { BriefSpec, DraftOutput } from "@/lib/pipeline/types";
 import {
   createContentItem,
   defaultAuthor,
+  insertContentFacts,
   insertQaResults,
   insertSources,
   insertVersion,
@@ -167,6 +170,7 @@ export const contentPipelineFunction = inngest.createFunction(
               { label: "Head question", value: brief.spec.headQuestion },
               { label: "Sections", value: String(brief.spec.outline.length) },
               { label: "Sources", value: String(brief.spec.sources.length) },
+              { label: "Brand facts", value: String(brief.spec.facts.length) },
             ],
           },
         });
@@ -198,6 +202,13 @@ export const contentPipelineFunction = inngest.createFunction(
         return { id, slug, refresh: false };
       });
 
+      // The manifesto the brief was written under is the one the draft is written under.
+      const manifest = await step.run("load-manifest", async () => {
+        if (!approvedBrief.manifestVersionId) return null;
+        const row = await loadManifest(orgId, approvedBrief.manifestVersionId);
+        return row ? manifestPromptBlock(row.doc) : null;
+      });
+
       // ── draft → QA → (gate) ───────────────────────────────────────────
       let versionId: string | null = null;
       let reviewNote: string | null = null;
@@ -218,6 +229,7 @@ export const contentPipelineFunction = inngest.createFunction(
                 brief: approvedBrief,
                 author: site.author ? { name: site.author.name, jobTitle: site.author.job_title } : { name: organizationName },
                 site: { organizationName, domain: site.route.canonicalDomain },
+                manifest,
                 feedback,
                 note: reviewNote,
                 previous: previousDraft,
@@ -227,8 +239,8 @@ export const contentPipelineFunction = inngest.createFunction(
             );
             const composed = composeVersion({ draft, brief: approvedBrief, site: site.route, organization: site.organization, author: site.author, slug: item.slug, datePublished: now });
             const report = await runQaGates(
-              { title: draft.title, bodyMd: composed.bodyMd, bodyHtml: composed.bodyHtml, sources: approvedBrief.sources, intent: approvedBrief.intent, jsonLd: composed.page.jsonLd, now },
-              { fetchImpl: fetch },
+              { title: draft.title, bodyMd: composed.bodyMd, bodyHtml: composed.bodyHtml, sources: approvedBrief.sources, facts: approvedBrief.facts, intent: approvedBrief.intent, jsonLd: composed.page.jsonLd, now },
+              { fetchImpl: fetch, loadFacts: (ids) => loadFactStatuses(orgId, ids, sql, now) },
             );
             const version = await insertVersion(
               {
@@ -242,10 +254,12 @@ export const contentPipelineFunction = inngest.createFunction(
                 structureScore: report.structure,
                 wordCount: composed.wordCount,
                 run,
+                manifestVersionId: approvedBrief.manifestVersionId,
               },
               sql,
             );
             await insertSources(version.id, composed.cited, report.verifications, sql, now);
+            await insertContentFacts(version.id, report.citedFacts, sql);
             await insertQaResults(version.id, report.gates, sql);
             return { versionId: version.id, versionNo: version.versionNo, draft, passed: report.passed, routeTo: report.routeTo, feedback: report.feedback, wordCount: composed.wordCount, structure: report.structure.normalized };
           });

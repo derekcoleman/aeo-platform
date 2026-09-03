@@ -59,6 +59,8 @@ export interface OpportunityInput {
   targetQuery: string;
   questionId?: string | null;
   contentItemId?: string | null;
+  /** The context.signals row that raised this, for lineage back to the evidence. */
+  signalId?: string | null;
   score: number;
   scoreBreakdown: Record<string, unknown>;
   evidence: Record<string, unknown>;
@@ -98,11 +100,12 @@ export async function upsertOpportunities(siteId: string, rows: OpportunityInput
   let updated = 0;
   for (const r of rows) {
     const [row] = await sql<{ inserted: boolean }[]>`
-      insert into content.opportunities (site_id, source, title, target_query, question_id, content_item_id, score, score_breakdown, evidence, dedupe_key)
-      values (${siteId}, ${r.source}, ${r.title}, ${r.targetQuery}, ${r.questionId ?? null}, ${r.contentItemId ?? null},
+      insert into content.opportunities (site_id, source, title, target_query, question_id, content_item_id, signal_id, score, score_breakdown, evidence, dedupe_key)
+      values (${siteId}, ${r.source}, ${r.title}, ${r.targetQuery}, ${r.questionId ?? null}, ${r.contentItemId ?? null}, ${r.signalId ?? null},
               ${r.score}, ${sql.json(r.scoreBreakdown as never)}, ${sql.json(r.evidence as never)}, ${r.dedupeKey})
       on conflict (site_id, dedupe_key) do update
-        set score = excluded.score, score_breakdown = excluded.score_breakdown, evidence = excluded.evidence, updated_at = now()
+        set score = excluded.score, score_breakdown = excluded.score_breakdown, evidence = excluded.evidence,
+            signal_id = coalesce(excluded.signal_id, content.opportunities.signal_id), updated_at = now()
         where content.opportunities.status = 'open'
       returning (xmax = 0) as inserted`;
     if (!row) continue;
