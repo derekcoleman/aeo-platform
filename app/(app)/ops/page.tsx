@@ -46,7 +46,7 @@ export default async function OpsPage() {
                 <TableBody>
                   {sites.map((s) => (
                     <TableRow key={s.id}>
-                      <TableCell><Link className="font-medium underline-offset-2 hover:underline" href={`/app/sites/${s.id}` as Route}>{s.name}</Link><p className="text-muted-foreground font-mono text-xs">{s.canonical_domain}{s.path_prefix}</p></TableCell>
+                      <TableCell><Link className="font-medium underline-offset-2 hover:underline" href={`/app/sites/${s.id}` as Route}>{s.name}</Link><p className="text-muted-foreground font-mono text-xs">{s.canonical_domain}{s.path_prefix} · <Link className="underline-offset-2 hover:underline" href={`/ops/sites/${s.id}/theme` as Route}>theme</Link></p></TableCell>
                       <TableCell>{s.org_name}</TableCell>
                       <TableCell className="text-xs">{s.proxy_mode}</TableCell>
                       <TableCell><SiteStatusBadge status={s.status} /></TableCell>
