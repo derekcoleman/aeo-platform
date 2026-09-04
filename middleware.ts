@@ -24,10 +24,12 @@ import {
  *           -> here: Host -> site, then rewrite to /_sites/<siteId>/resources/...
  */
 export const config = {
-  // Everything except Next internals, static files and API routes. Edge
-  // hosts take the render path below; every other host is our own app, where
-  // the only job is refreshing the auth session cookie.
-  matcher: ["/((?!_next/|api/|favicon.ico|robots.txt$|.*\\.(?:png|jpg|svg|ico|txt|xml)$).*)"],
+  // Everything except Next internals, API routes and the app's own root
+  // files. Edge hosts take the render path below; every other host is our own
+  // app, where the only job is refreshing the auth session cookie. Do NOT
+  // exclude by file extension here: proxied sitemap.xml / llms.txt /
+  // feed.xml / robots.txt must reach the site resolver or they 404.
+  matcher: ["/((?!_next/|api/|favicon.ico|robots.txt$).*)"],
 };
 
 const PROTECTED = ["/app", "/ops", "/settings"];
