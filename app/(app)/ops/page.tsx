@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
 import { opsFailedSyncs, opsLlmSpend, opsOrganizations, opsSites, opsStaff } from "@/lib/app/queries";
+import { auditLog } from "@/lib/app/org";
 import { requireStaff } from "@/lib/auth/session";
 import { StaffForm } from "./staff-form";
 
@@ -18,7 +19,7 @@ export const dynamic = "force-dynamic";
 /** Staff-only. Every action here is audited; nothing runs as a raw service client from the browser. */
 export default async function OpsPage() {
   const user = await requireStaff();
-  const [orgs, sites, failed, spend, staff] = await Promise.all([opsOrganizations(), opsSites(), opsFailedSyncs(), opsLlmSpend(), opsStaff()]);
+  const [orgs, sites, failed, spend, staff, audit] = await Promise.all([opsOrganizations(), opsSites(), opsFailedSyncs(), opsLlmSpend(), opsStaff(), auditLog(null, 200)]);
   const failingSites = sites.filter((s) => s.last_health_ok === false).length;
   return (
     <AppShell user={user} active="ops">
@@ -36,6 +37,7 @@ export default async function OpsPage() {
           <TabsTrigger value="health">Connector health</TabsTrigger>
           <TabsTrigger value="spend">LLM spend</TabsTrigger>
           <TabsTrigger value="staff">Staff</TabsTrigger>
+          <TabsTrigger value="audit">Audit log</TabsTrigger>
         </TabsList>
 
         <TabsContent value="sites" className="pt-4">
@@ -134,6 +136,30 @@ export default async function OpsPage() {
                 </TableBody>
               </Table>
               <StaffForm />
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="audit" className="pt-4">
+          <Card>
+            <CardHeader><CardTitle>Audit log</CardTitle><CardDescription>Every staff and owner action on any organisation, newest first. Billing webhooks land here too.</CardDescription></CardHeader>
+            <CardContent>
+              {audit.length === 0 ? <p className="text-muted-foreground text-sm">Nothing recorded yet.</p> : (
+                <Table>
+                  <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Org</TableHead><TableHead>Actor</TableHead><TableHead>Action</TableHead><TableHead>Target</TableHead><TableHead>Detail</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    {audit.map((a) => (
+                      <TableRow key={a.id}>
+                        <TableCell className="whitespace-nowrap">{when(a.at)}</TableCell>
+                        <TableCell>{a.org_name ?? "—"}</TableCell>
+                        <TableCell className="text-xs">{a.actor_email ?? "system"}</TableCell>
+                        <TableCell className="font-mono text-xs">{a.action}</TableCell>
+                        <TableCell className="text-muted-foreground text-xs">{a.target_type}{a.target_id ? ` ${a.target_id.slice(0, 8)}` : ""}</TableCell>
+                        <TableCell className="text-muted-foreground max-w-xs truncate text-xs">{a.after ? JSON.stringify(a.after).slice(0, 120) : ""}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

@@ -33,7 +33,8 @@ import { connectorFunctions } from "./connectors";
 import { contextFunctions } from "./context";
 import { demandFunctions } from "./demand";
 import { pipelineFunctions } from "./pipeline";
+import { retentionFunctions } from "./retention";
 import { siteFunctions } from "./site";
 
 /** Every function served from /api/inngest. Add new jobs here. */
-export const functions = [auditFunction, ...demandFunctions, ...connectorFunctions, ...pipelineFunctions, ...contextFunctions, ...siteFunctions, ...analyticsFunctions];
+export const functions = [auditFunction, ...demandFunctions, ...connectorFunctions, ...pipelineFunctions, ...contextFunctions, ...siteFunctions, ...analyticsFunctions, ...retentionFunctions];

@@ -843,3 +843,66 @@ begin;
 rollback;
 
 \echo 'isolation: crawl telemetry assertions passed'
+
+-- ── 0011: org admin ─────────────────────────────────────────────────────────
+grant select on all tables in schema app to app_user;
+
+insert into app.org_invites (org_id, email, role, invited_by) values
+  ('11111111-1111-1111-1111-111111111111', 'new@acme.com', 'editor', '99999999-0000-0000-0000-000000000001'),
+  ('22222222-2222-2222-2222-222222222222', 'new@globex.com', 'viewer', null);
+
+do $$ begin
+  begin
+    insert into app.org_invites (org_id, email, role) values ('11111111-1111-1111-1111-111111111111', 'NEW@acme.com', 'viewer');
+    raise exception 'FAIL duplicate pending invite must be rejected';
+  exception when unique_violation then null;
+  end;
+  begin
+    insert into app.org_invites (org_id, email, role) values ('11111111-1111-1111-1111-111111111111', 'x@acme.com', 'owner');
+    raise exception 'FAIL an invite may not grant owner';
+  exception when check_violation then null;
+  end;
+  if (select count(*) from app.organizations where retention_days = 365 and plan_status = 'trialing') <> (select count(*) from app.organizations) then
+    raise exception 'FAIL organization defaults';
+  end if;
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member sees own invites only', (select count(*) from app.org_invites), 1);
+rollback;
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every invite', (select count(*) from app.org_invites), 2);
+rollback;
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from app.org_invites;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read app.org_invites';
+    end if;
+  end $$;
+rollback;
+
+\echo 'isolation: org admin assertions passed'
+
+-- Members may read memberships without tripping the (former) self-referential policy,
+-- and an admin's write predicate resolves through the security-definer function.
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"sub":"99999999-0000-0000-0000-000000000001","org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme owner reads own memberships without recursion', (select count(*) from app.memberships where org_id = '11111111-1111-1111-1111-111111111111'), 1);
+  select pg_temp.expect('acme owner is org admin', (select case when app.auth_is_org_admin('11111111-1111-1111-1111-111111111111') then 1 else 0 end)::bigint, 1);
+  select pg_temp.expect('acme owner is not globex admin', (select case when app.auth_is_org_admin('22222222-2222-2222-2222-222222222222') then 1 else 0 end)::bigint, 0);
+rollback;
+
+\echo 'isolation: org admin policy assertions passed'
