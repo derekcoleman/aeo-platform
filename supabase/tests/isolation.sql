@@ -906,3 +906,78 @@ begin;
 rollback;
 
 \echo 'isolation: org admin policy assertions passed'
+
+-- ── 0012: topics, competitor pages, publish targets ─────────────────────────
+grant select on all tables in schema measure, content to app_user;
+grant update on measure.topics to app_user;
+
+insert into measure.topics (id, site_id, name, slug, priority, cadence_per_month, formats, seed_terms, competitor_domains) values
+  ('eeeeeeee-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'SCIM provisioning', 'scim-provisioning', 5, 4, '{comparison,guide}', '{scim,provisioning}', '{okta.com}'),
+  ('eeeeeeee-0000-0000-0000-000000000002', 'bbbbbbbb-0000-0000-0000-000000000002', 'Widgets', 'widgets', 2, 1, '{howto}', '{widget}', '{}');
+update measure.questions set topic_id = 'eeeeeeee-0000-0000-0000-000000000001', pinned = true where id = 'dddddddd-0000-0000-0000-000000000001';
+insert into measure.competitor_pages (site_id, topic_id, url, domain, title, content_type, word_count, citations_30d) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-0000-0000-0000-000000000001', 'https://okta.com/blog/scim', 'okta.com', 'SCIM explained', 'guide', 1800, 4),
+  ('bbbbbbbb-0000-0000-0000-000000000002', null, 'https://initech.com/widgets', 'initech.com', 'Widgets', 'product', 300, 1);
+insert into content.publish_targets (id, site_id, kind, name, config) values
+  ('eeeeeeee-1000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'webflow', 'Acme blog', '{"collectionId":"c1","fieldMap":{"name":"name","slug":"slug","body":"post-body"},"publishLive":true,"canonicalMode":"proxy","autoPush":true}'),
+  ('eeeeeeee-1000-0000-0000-000000000002', 'bbbbbbbb-0000-0000-0000-000000000002', 'proxy', 'Globex proxy', '{}');
+insert into content.external_publications (site_id, content_item_id, target_id, status, external_id) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'dddddddd-3000-0000-0000-000000000001', 'eeeeeeee-1000-0000-0000-000000000001', 'published', 'wf_1'),
+  ('bbbbbbbb-0000-0000-0000-000000000002', 'dddddddd-3000-0000-0000-000000000002', 'eeeeeeee-1000-0000-0000-000000000002', 'pending', null);
+
+do $$ begin
+  if exists (select 1 from measure.topics where org_id is null) then raise exception 'FAIL topics org trigger'; end if;
+  if exists (select 1 from measure.competitor_pages where org_id is null) then raise exception 'FAIL competitor_pages org trigger'; end if;
+  if exists (select 1 from content.publish_targets where org_id is null) then raise exception 'FAIL publish_targets org trigger'; end if;
+  if exists (select 1 from content.external_publications where org_id is null) then raise exception 'FAIL external_publications org trigger'; end if;
+  if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid where t.typname = 'connector_provider' and e.enumlabel = 'webflow') then raise exception 'FAIL webflow provider missing'; end if;
+  begin
+    insert into measure.topics (site_id, name, slug) values ('aaaaaaaa-0000-0000-0000-000000000001', 'Dup', 'scim-provisioning');
+    raise exception 'FAIL duplicate topic slug must be rejected';
+  exception when unique_violation then null;
+  end;
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"sub":"99999999-0000-0000-0000-000000000001","org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member sees own topics', (select count(*) from measure.topics), 1);
+  select pg_temp.expect('acme member sees own competitor pages', (select count(*) from measure.competitor_pages), 1);
+  select pg_temp.expect('acme member sees own publish targets', (select count(*) from content.publish_targets), 1);
+  select pg_temp.expect('acme member sees own external publications', (select count(*) from content.external_publications), 1);
+  update measure.topics set priority = 4 where site_id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  select pg_temp.expect('tenant_write on topics touches own row only', (select count(*) from measure.topics where priority = 4), 1);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('globex member never sees acme topics', (select count(*) from measure.topics where org_id = '11111111-1111-1111-1111-111111111111'), 0);
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from measure.topics;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read measure.topics';
+    end if;
+    denied := false;
+    begin
+      perform 1 from content.publish_targets;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read content.publish_targets';
+    end if;
+  end $$;
+rollback;
+
+\echo 'isolation: topics and publishing assertions passed'

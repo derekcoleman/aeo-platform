@@ -14,7 +14,7 @@ import { ConnectorError, type ConnectorProvider } from "./types";
  */
 export type OAuthStartInput = Pick<OAuthState, "orgId" | "siteId" | "userId" | "returnTo">;
 
-export function authorizeUrlFor(provider: Exclude<ConnectorProvider, "profound">, input: OAuthStartInput, env: NodeJS.ProcessEnv, now: Date = new Date()): string {
+export function authorizeUrlFor(provider: Exclude<ConnectorProvider, "profound" | "webflow">, input: OAuthStartInput, env: NodeJS.ProcessEnv, now: Date = new Date()): string {
   const secret = env.OAUTH_STATE_SECRET ?? "";
   const state = createOAuthState(secret, { ...input, provider }, now);
   switch (provider) {

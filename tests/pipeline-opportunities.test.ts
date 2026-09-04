@@ -27,7 +27,7 @@ describe("scoreOpportunity", () => {
 
 describe("opportunitiesFromCitationGaps", () => {
   it("maps a gap into a scored citation_gap opportunity keyed by question", () => {
-    const gap: CitationGap = { question_id: Q1, text: "sso vs scim", demand_score: 70, snapshot_id: "s1", fetched_at: "2026-09-01T00:00:00Z", provider: "serpapi", competitor_domains: ["okta.com", "microsoft.com"] };
+    const gap: CitationGap = { question_id: Q1, topic_id: null, text: "sso vs scim", demand_score: 70, snapshot_id: "s1", fetched_at: "2026-09-01T00:00:00Z", provider: "serpapi", competitor_domains: ["okta.com", "microsoft.com"] };
     const [o] = opportunitiesFromCitationGaps([gap]);
     expect(o).toMatchObject({ source: "citation_gap", title: "sso vs scim", targetQuery: "sso vs scim", questionId: Q1, dedupeKey: `question:${Q1}` });
     expect(o!.evidence).toMatchObject({ snapshotId: "s1", provider: "serpapi", competitorDomains: ["okta.com", "microsoft.com"] });
@@ -41,20 +41,20 @@ describe("upsertOpportunities", () => {
     let call = 0;
     const sql = fakeSql([[/insert into content\.opportunities/, () => (++call === 1 ? [{ inserted: true }] : call === 2 ? [{ inserted: false }] : [])]]);
     const rows = opportunitiesFromCitationGaps([
-      { question_id: Q1, text: "a", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [] },
-      { question_id: "q2", text: "b", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [] },
-      { question_id: "q3", text: "c", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [] },
+      { question_id: Q1, topic_id: null, text: "a", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [] },
+      { question_id: "q2", topic_id: null, text: "b", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [] },
+      { question_id: "q3", topic_id: null, text: "c", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [] },
     ]);
     expect(await upsertOpportunities(SITE_ID, rows, sql)).toEqual({ inserted: 1, updated: 1 });
     expect(sql.queries).toHaveLength(3);
     expect(sql.queries[0]!.text).toContain("where content.opportunities.status = 'open'");
     expect(sql.queries[0]!.values[0]).toBe(SITE_ID);
-    expect(sql.queries[0]!.values[10]).toBe(`question:${Q1}`);
+    expect(sql.queries[0]!.values[12]).toBe(`question:${Q1}`);
   });
 
   it("scanSite runs the gap query then upserts", async () => {
     const sql = fakeSql([
-      [/from measure\.serp_snapshots/, () => [{ question_id: Q1, text: "a", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [] }]],
+      [/from measure\.serp_snapshots/, () => [{ question_id: Q1, topic_id: null, text: "a", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [] }]],
       [/insert into content\.opportunities/, () => [{ inserted: true }]],
     ]);
     expect(await scanSite(SITE_ID, sql)).toEqual({ inserted: 1, updated: 0, gaps: 1 });
@@ -69,7 +69,7 @@ describe("refresh + status", () => {
     expect(q.values[1]).toBe("refresh");
     expect(q.values[2]).toBe("Refresh: SSO vs SCIM");
     expect(q.values[5]).toBe("item-1");
-    expect(q.values[10]).toBe("refresh:item-1:30d");
+    expect(q.values[12]).toBe("refresh:item-1:30d");
   });
 
   it("markOpportunity keeps an earlier dismissed_reason when none is given; loadOpportunity returns null for a miss", async () => {

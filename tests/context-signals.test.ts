@@ -87,7 +87,7 @@ describe("upsertSignals / bridge", () => {
     expect(ins.values[1]).toBe("signal");
     expect(ins.values[4]).toBe("q1");
     expect(ins.values[6]).toBe("s1");
-    expect(ins.values[10]).toBe("question:q1");
+    expect(ins.values[12]).toBe("question:q1");
     expect(sql.queries.at(-1)!.text).toContain("set status = 'bridged'");
   });
 

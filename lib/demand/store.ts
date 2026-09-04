@@ -199,6 +199,7 @@ function safeHost(url: string): string {
 
 export interface CitationGap {
   question_id: string;
+  topic_id: string | null;
   text: string;
   demand_score: number;
   snapshot_id: string;
@@ -233,17 +234,17 @@ export async function citationGaps(
       where site_id = ${siteId} and aio_triggered is true and provider = any (${[...providers]}::measure.serp_provider[])
       order by question_id, fetched_at desc
     )
-    select q.id as question_id, q.text, q.demand_score::float as demand_score,
+    select q.id as question_id, q.topic_id, q.text, q.demand_score::float as demand_score,
            l.id as snapshot_id, l.fetched_at, l.provider,
            array_agg(distinct c.domain order by c.domain) as competitor_domains
     from latest l
     join measure.questions q on q.id = l.question_id
     join measure.serp_citations c on c.serp_snapshot_id = l.id and c.surface = 'ai_overview'
-    where not exists (
+    where not q.excluded and not exists (
       select 1 from measure.serp_citations o
       where o.serp_snapshot_id = l.id and o.surface = 'ai_overview' and o.is_owned
     )
-    group by q.id, q.text, q.demand_score, l.id, l.fetched_at, l.provider
+    group by q.id, q.topic_id, q.text, q.demand_score, l.id, l.fetched_at, l.provider
     order by q.demand_score desc
     limit ${limit}`;
 }

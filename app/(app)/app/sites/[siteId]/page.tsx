@@ -64,6 +64,8 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
         <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/content` as Route}>Content</Link></Button>
         <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/demand` as Route}>Demand</Link></Button>
         <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/attribution` as Route}>Attribution</Link></Button>
+        <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/strategy` as Route}>Strategy</Link></Button>
+        <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/publishing` as Route}>Publishing</Link></Button>
         {manage && site.status === "active" ? <ActionButton size="sm" variant="outline" action={setSiteStatusAction.bind(null, siteId, "paused")}>Pause</ActionButton> : null}
         {manage && site.status === "paused" ? <ActionButton size="sm" variant="outline" action={setSiteStatusAction.bind(null, siteId, "active")}>Resume</ActionButton> : null}
       </PageHeader>

@@ -4,6 +4,7 @@ import { factKey, renderFact } from "@/lib/context/facts";
 import { manifestPromptBlock } from "@/lib/context/manifest";
 import { formatContextBlock, retrieveContext } from "@/lib/context/retrieve";
 import { appDb } from "@/lib/db/app";
+import { structuralTargetBlock as structuralTargetBlock_, structuralTargetFor } from "@/lib/strategy/competitors";
 import { runJsonTask } from "./model";
 import { briefSpecSchema, type BriefFact, type BriefSpec, type ModelRun } from "./types";
 
@@ -44,7 +45,22 @@ export interface BriefContext {
   /** A reviewer's note when regenerating. */
   note?: string | null;
   previous?: BriefSpec | null;
+  /** The topic this piece belongs to, when the site has organised its questions. */
+  topic?: { name: string; description: string | null; formats: string[]; notes: string | null } | null;
+  /** Preferred article format from the topic or the request. */
+  format?: "comparison" | "howto" | "guide" | "listicle" | "faq" | null;
+  /** Prompt block describing the currently-cited pages (lib/strategy/competitors). */
+  structuralTargetBlock?: string | null;
+  structuralTarget?: Record<string, unknown> | null;
 }
+
+const FORMAT_GUIDE: Record<NonNullable<BriefContext["format"]>, string> = {
+  comparison: "a comparison: intent 'comparative', a comparison table is mandatory, name the alternatives in the outline",
+  howto: "a how-to: intent 'howto', numbered steps as question-form H2s, a prerequisites section",
+  guide: "a definitive guide: intent 'informational', definitions first, broad question coverage",
+  listicle: "a list: intent 'informational', a numbered set of options each with a one-line verdict",
+  faq: "an FAQ page: intent 'informational', every H2 a literal buyer question with a 40–60 word answer",
+};
 
 export function briefSystemPrompt(): string {
   return [
@@ -86,6 +102,9 @@ export function briefPrompt(ctx: BriefContext): string {
     ctx.relatedQuestions.length ? `Related buyer questions:\n${ctx.relatedQuestions.map((q) => `- ${q}`).join("\n")}` : "Related buyer questions: none found.",
     ctx.existingPages.length ? `Existing pages to link to:\n${ctx.existingPages.map((p) => `- ${p.title} — ${p.url}`).join("\n")}` : "Existing pages: none yet.",
   ];
+  if (ctx.topic) parts.push(`Topic: ${ctx.topic.name}${ctx.topic.description ? ` — ${ctx.topic.description}` : ""}${ctx.topic.notes ? `\nTopic notes from the customer: ${ctx.topic.notes}` : ""}`);
+  if (ctx.format) parts.push(`Required format: ${FORMAT_GUIDE[ctx.format]}.`);
+  if (ctx.structuralTargetBlock) parts.push(`Structural target:\n${ctx.structuralTargetBlock}`);
   if (ctx.brain?.manifest) parts.push(`Brand manifesto:\n${ctx.brain.manifest}`);
   if (ctx.brain?.facts.length) {
     parts.push(`Verified brand facts (key → fact; only public ones may be cited in the article):\n${ctx.brain.facts.map((f) => `- ${f.key} [${f.type}, ${f.visibility}] ${f.text}`).join("\n")}`);
@@ -104,7 +123,8 @@ export async function generateBrief(
   sql: postgres.Sql = appDb(),
 ): Promise<{ spec: BriefSpec; run: ModelRun }> {
   const { value, run } = await runJsonTask("pipeline.brief", model, { system: briefSystemPrompt(), prompt: briefPrompt(ctx), promptVersion: BRIEF_PROMPT_VERSION, temperature: 0.4 }, briefSpecSchema, scope, sql);
-  return { spec: materializeFacts(value, ctx.brain ?? null), run };
+  const spec = materializeFacts(value, ctx.brain ?? null);
+  return { spec: { ...spec, format: ctx.format ?? spec.format ?? null, structuralTarget: ctx.structuralTarget ?? null }, run };
 }
 
 export const MAX_BRIEF_FACTS = 12;
@@ -140,7 +160,7 @@ export async function loadBriefBrain(scope: { orgId: string; siteId: string }, q
 }
 
 export async function loadBriefContext(
-  opportunity: { org_id: string; site_id: string; question_id: string | null; title: string; target_query: string; source: string; evidence: Record<string, unknown> },
+  opportunity: { org_id: string; site_id: string; question_id: string | null; title: string; target_query: string; source: string; evidence: Record<string, unknown>; topic_id?: string | null; format?: BriefContext["format"] },
   sql: postgres.Sql = appDb(),
 ): Promise<BriefContext> {
   const [site] = await sql<{ canonical_domain: string; path_prefix: string; organization: { name?: string } | null }[]>`
@@ -163,7 +183,26 @@ export async function loadBriefContext(
     where p.site_id = ${opportunity.site_id}
     order by p.updated_at desc limit 25`;
   const brain = await loadBriefBrain({ orgId: opportunity.org_id, siteId: opportunity.site_id }, `${opportunity.title} ${opportunity.target_query}`, sql);
+  const [topic] = opportunity.topic_id
+    ? await sql<{ name: string; description: string | null; formats: string[]; notes: string | null }[]>`select name, description, formats, notes from measure.topics where id = ${opportunity.topic_id}`
+    : [];
+  const format = opportunity.format ?? ((topic?.formats[0] as BriefContext["format"]) ?? null);
+  let structuralTarget: Record<string, unknown> | null = null;
+  let structuralTargetBlock: string | null = null;
+  try {
+    const target = await structuralTargetFor(opportunity.site_id, opportunity.topic_id ?? null, sql);
+    if (target.pages > 0) {
+      structuralTarget = target as unknown as Record<string, unknown>;
+      structuralTargetBlock = structuralTargetBlock_(target);
+    }
+  } catch (e) {
+    console.warn(`[pipeline] structural target unavailable for site ${opportunity.site_id}: ${e instanceof Error ? e.message : String(e)}`);
+  }
   return {
+    topic: topic ?? null,
+    format,
+    structuralTarget,
+    structuralTargetBlock,
     opportunity: { title: opportunity.title, targetQuery: opportunity.target_query, source: opportunity.source, evidence: opportunity.evidence },
     site: { domain: site.canonical_domain, pathPrefix: site.path_prefix, organizationName: site.organization?.name ?? site.canonical_domain },
     relatedQuestions: related.map((r) => r.text),

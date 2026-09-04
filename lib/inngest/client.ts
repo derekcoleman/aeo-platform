@@ -104,7 +104,7 @@ export const connectorSyncCompleted = eventType("connector/sync.completed", {
   schema: z.object({
     connectionId: z.guid(),
     orgId: z.guid(),
-    provider: z.enum(["slack", "google", "profound"]),
+    provider: z.enum(["slack", "google", "profound", "webflow"]),
     kind: syncKindSchema,
     ok: z.boolean(),
     documentsIngested: z.number().int(),
@@ -116,7 +116,7 @@ export const connectorSyncCompleted = eventType("connector/sync.completed", {
 /** A verified, deduped inbound webhook. The route wrote ops.webhook_events and returned 200 already. */
 export const connectorWebhookReceived = eventType("connector/webhook.received", {
   schema: z.object({
-    provider: z.enum(["slack", "google", "profound"]),
+    provider: z.enum(["slack", "google", "profound", "webflow"]),
     externalId: z.string().min(1),
     connectionId: z.guid().nullable().optional(),
     orgId: z.guid().nullable().optional(),
@@ -234,4 +234,14 @@ export const sitePreflightCompleted = eventType("site/preflight.completed", {
 /** The proxy passed verification through the customer's edge; the site is active. */
 export const siteVerified = eventType("site/verified", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
+});
+
+/** Fetch and score the pages currently cited for a site (optionally one topic). */
+export const strategyCompetitorsAnalyzeRequested = eventType("strategy/competitors.analyze.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid(), topicId: z.guid().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }),
+});
+
+/** Push a published item to its external publish targets (one, or every enabled one). */
+export const publishingPushRequested = eventType("publishing/push.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid(), contentItemId: z.guid(), targetId: z.guid().nullable().optional(), force: z.boolean().optional() }),
 });

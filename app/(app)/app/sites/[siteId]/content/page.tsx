@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { listContentItems } from "@/lib/app/content";
+import { listExternalPublications } from "@/lib/publishing/targets";
 import { loadSite } from "@/lib/app/store";
 import { requireUser, roleIn } from "@/lib/auth/session";
 
@@ -27,11 +28,14 @@ export default async function ContentPage({ params }: { params: Promise<{ siteId
   const user = await requireUser(`/app/sites/${siteId}/content`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
-  const items = await listContentItems(siteId);
+  const [items, publications] = await Promise.all([listContentItems(siteId), listExternalPublications(siteId)]);
+  const pushed = new Map<string, typeof publications>();
+  for (const p of publications) pushed.set(p.content_item_id, [...(pushed.get(p.content_item_id) ?? []), p]);
   return (
     <AppShell user={user} active="projects">
       <PageHeader title={`${site.name} · Content`} description="Every piece the pipeline has produced, its latest version, QA state and where it is published.">
         <Badge variant="secondary">{items.length} items</Badge>
+        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}/publishing` as Route}>Publishing</Link></Button>
         <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}` as Route}>Back to project</Link></Button>
       </PageHeader>
       <Card>
@@ -47,7 +51,7 @@ export default async function ContentPage({ params }: { params: Promise<{ siteId
                     <TableCell><Badge variant={STATUS_VARIANT[i.status] ?? "secondary"}>{i.status}</Badge></TableCell>
                     <TableCell>{i.version_no ? `v${i.version_no} · ${i.word_count ?? 0} words` : "—"}</TableCell>
                     <TableCell>{i.current_version_id ? (i.qa_failed ? <Badge variant="destructive">{i.qa_failed} failing</Badge> : <Badge variant="success">passed</Badge>) : "—"}</TableCell>
-                    <TableCell>{i.published_path ? <a className="underline-offset-2 hover:underline" href={`https://${site.canonical_domain}${i.published_path}`} target="_blank" rel="noreferrer">{i.published_path}</a> : <span className="text-muted-foreground">not yet</span>}</TableCell>
+                    <TableCell>{i.published_path ? <a className="underline-offset-2 hover:underline" href={`https://${site.canonical_domain}${i.published_path}`} target="_blank" rel="noreferrer">{i.published_path}</a> : <span className="text-muted-foreground">not yet</span>}{(pushed.get(i.id) ?? []).map((p) => <div key={p.id} className="text-xs">{p.status === "published" ? <Badge variant="success">{p.target_name}</Badge> : p.status === "failed" ? <Badge variant="destructive">{p.target_name} failed</Badge> : <Badge variant="secondary">{p.target_name} {p.status}</Badge>}{p.external_url ? <a className="ml-1 underline-offset-2 hover:underline" href={p.external_url} target="_blank" rel="noreferrer">open</a> : null}</div>)}</TableCell>
                     <TableCell>{when(i.updated_at)}</TableCell>
                     <TableCell className="text-right">
                       <span className="inline-flex gap-2">

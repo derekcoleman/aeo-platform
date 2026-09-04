@@ -3,10 +3,12 @@ import { loadSiteOwnership, recordSnapshot, type SiteOwnership } from "@/lib/dem
 import { normalizeQuestion } from "@/lib/demand/question-graph";
 import { isFeatureEnabled, upsertExternalMetrics, type ExternalMetricInput } from "../store";
 import { ConnectorError, FeatureDisabledError, type Connector, type SyncInput, type SyncResult } from "../types";
+import { ProfoundApi, profoundApiConfigSchema } from "./api";
 import { parseProfoundCsv, type ProfoundRecord } from "./csv";
 import type postgres from "postgres";
 
 export * from "./csv";
+export * from "./api";
 
 /**
  * Profound connector — CSV path first.
@@ -27,6 +29,13 @@ export const PROFOUND_DEVICE = "desktop";
 export interface ProfoundConfig {
   /** Profound plan tier as the customer reports it — decides which ingest paths the UI offers. */
   plan?: "growth" | "enterprise" | "unknown";
+  /** "api" connections sync on the daily schedule; CSV connections only accept uploads. */
+  mode?: "csv" | "api";
+  categoryId?: string;
+  categoryName?: string;
+  baseUrl?: string;
+  endpoints?: { categories?: string; answers?: string; citations?: string };
+  backfillDays?: number;
   /** Upload retention: raw snapshot JSON is kept; nothing else to trim. */
   notes?: string;
 }
@@ -131,14 +140,32 @@ export const profoundConnector: Connector<ProfoundConfig> = {
   async validate(conn, ctx) {
     if (!(await isFeatureEnabled(conn.org_id, PROFOUND_FEATURE, ctx.sql))) throw new FeatureDisabledError("profound", PROFOUND_FEATURE);
     if (!conn.site_id) throw new ConnectorError("profound", "site_required", "profound: connection must be scoped to a site");
+    if (conn.config.mode === "api") {
+      const cfg = profoundApiConfigSchema.parse(conn.config);
+      const api = await profoundApiFor(conn, cfg, ctx);
+      const cats = await api.categories();
+      if (!cats.some((c) => c.id === cfg.categoryId)) throw new ConnectorError("profound", "category_not_found", `profound: category ${cfg.categoryId} is not visible to this key (${cats.length} categories returned)`);
+    }
   },
 
   async sync(input, ctx): Promise<SyncResult> {
     const conn = input.connection;
     if (!(await isFeatureEnabled(conn.org_id, PROFOUND_FEATURE, ctx.sql))) throw new FeatureDisabledError("profound", PROFOUND_FEATURE);
     if (!conn.site_id) throw new ConnectorError("profound", "site_required", "profound: connection must be scoped to a site");
+    if (conn.config.mode === "api" && input.kind !== "upload") {
+      const cfg = profoundApiConfigSchema.parse(conn.config);
+      const api = await profoundApiFor(conn, cfg, ctx);
+      const today = ctx.now().toISOString().slice(0, 10);
+      const through = typeof input.cursor?.through === "string" ? input.cursor.through : null;
+      const start = input.kind === "backfill" || !through ? isoDaysAgo(ctx.now(), cfg.backfillDays) : through;
+      const { records, dropped, pages } = await api.answers({ categoryId: cfg.categoryId, startDate: start, endDate: today });
+      const own = await loadSiteOwnership(conn.site_id, ctx.sql);
+      if (!own) throw new ConnectorError("profound", "site_not_found");
+      const r = records.length ? await ingestProfoundRecords(own, { ...conn, site_id: conn.site_id }, records, ctx.sql) : { questionsInserted: 0, questionsMatched: 0, snapshots: 0, citations: 0, ownedCitations: 0, metrics: 0 };
+      return { documentsIngested: 0, metricsIngested: r.metrics, cursor: { through: today }, detail: { ...r, mode: "api", rows: records.length, dropped, pages, window: { start, end: today } } };
+    }
     if (input.kind !== "upload") {
-      // API/MCP paths land later; a scheduled sync on a CSV-only connection is a no-op, not a failure.
+      // A scheduled sync on a CSV-only connection is a no-op, not a failure.
       return { documentsIngested: 0, metricsIngested: 0, cursor: input.cursor, detail: { skipped: `kind ${input.kind} unsupported on csv path` } };
     }
     const payload = profoundUploadPayload.parse(input.payload);
@@ -157,3 +184,14 @@ export const profoundConnector: Connector<ProfoundConfig> = {
   },
 };
 
+
+async function profoundApiFor(conn: SyncInput<ProfoundConfig>["connection"], cfg: { baseUrl?: string; endpoints?: Record<string, string | undefined> }, ctx: { secrets: { get(ref: string): Promise<string | null> }; fetchImpl: typeof fetch }): Promise<ProfoundApi> {
+  if (!conn.secret_ref) throw new ConnectorError("profound", "no_api_key", "profound: connection has no API key");
+  const apiKey = await ctx.secrets.get(conn.secret_ref);
+  if (!apiKey) throw new ConnectorError("profound", "api_key_missing", "profound: API key not found in Vault");
+  return new ProfoundApi({ apiKey, baseUrl: cfg.baseUrl, endpoints: cfg.endpoints as never, fetchImpl: ctx.fetchImpl });
+}
+
+function isoDaysAgo(now: Date, days: number): string {
+  return new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10);
+}
