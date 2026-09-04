@@ -1,6 +1,6 @@
 import { connectorContext } from "@/lib/connectors";
 import { appDb } from "@/lib/db/app";
-import { notifyHealthSlack } from "@/lib/proxy/alerts";
+import { notifyHealthEmail, notifyHealthSlack } from "@/lib/proxy/alerts";
 import { probeCrawlerAccess } from "@/lib/proxy/crawler-access";
 import { publicOrigin, runHealthCheck } from "@/lib/proxy/health";
 import { runPreflight } from "@/lib/proxy/preflight";
@@ -54,13 +54,21 @@ export const siteHealthCheckFunction = inngest.createFunction(
     const { result, transition } = outcome;
     if (transition.alertFailure || transition.alertRecovery) {
       await step.run("alert", async () => {
+        const notice = { site: { id: site.id, name: site.name, canonicalDomain: site.canonical_domain, pathPrefix: site.path_prefix }, ok: result.ok, failures: transition.failures, result, appUrl: appUrl() };
+        let slack: { posted: boolean } = { posted: false };
         try {
-          return await notifyHealthSlack(orgId, { site: { id: site.id, name: site.name, canonicalDomain: site.canonical_domain, pathPrefix: site.path_prefix }, ok: result.ok, failures: transition.failures, result, appUrl: appUrl() }, connectorContext());
+          slack = await notifyHealthSlack(orgId, notice, connectorContext());
         } catch (e) {
           // Slack is best effort; the banner and the row are the record.
           console.warn(`[site-health] slack alert failed for ${siteId}: ${e instanceof Error ? e.message : String(e)}`);
-          return { posted: false };
         }
+        let email: { sent: boolean } = { sent: false };
+        try {
+          email = await notifyHealthEmail(orgId, notice);
+        } catch (e) {
+          console.warn(`[site-health] email alert failed for ${siteId}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        return { slack: slack.posted, email: email.sent };
       });
     }
     if (transition.previousOk !== result.ok) {

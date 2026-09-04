@@ -2,6 +2,7 @@ import type postgres from "postgres";
 import { listConnections, type ConnectorContext } from "@/lib/connectors";
 import { escapeMrkdwn, postMessage, slackClientFor, slackTokenFor, type SlackConfig } from "@/lib/connectors/slack";
 import { appDb } from "@/lib/db/app";
+import { emailConfigured, sendEmail, textToHtml } from "@/lib/notify/email";
 import type { HealthResult } from "./health";
 
 /**
@@ -53,4 +54,23 @@ export async function notifyHealthSlack(orgId: string, notice: HealthNotice, ctx
   const text = healthAlertText(notice);
   const { ts, channel } = await postMessage(api, target.channel, text, [{ type: "section", text: { type: "mrkdwn", text: escapeMrkdwn(text) } }]);
   return { posted: true, channel, ts };
+}
+
+/** Owners and admins of the org; the people who can actually fix a broken rewrite. */
+export async function alertEmailRecipients(orgId: string, sql: postgres.Sql = appDb()): Promise<string[]> {
+  const rows = await sql<{ email: string }[]>`
+    select u.email from app.memberships m join app.users u on u.id = m.user_id
+    where m.org_id = ${orgId} and m.role in ('owner', 'admin') and u.email <> '' order by u.email`;
+  return rows.map((r) => r.email);
+}
+
+/** Email alert to owners and admins when RESEND_API_KEY is set; otherwise reports why it was skipped. */
+export async function notifyHealthEmail(orgId: string, notice: HealthNotice, sql: postgres.Sql = appDb()): Promise<{ sent: boolean; recipients: number; reason?: string }> {
+  if (!emailConfigured()) return { sent: false, recipients: 0, reason: "email not configured" };
+  const to = await alertEmailRecipients(orgId, sql);
+  if (to.length === 0) return { sent: false, recipients: 0, reason: "no owners or admins with an email" };
+  const text = healthAlertText(notice);
+  const subject = notice.ok ? `Recovered: ${notice.site.canonicalDomain}${notice.site.pathPrefix}` : `Proxy health failing: ${notice.site.canonicalDomain}${notice.site.pathPrefix}`;
+  const result = await sendEmail({ to, subject, text, html: textToHtml(text) });
+  return { sent: result.sent, recipients: to.length, reason: result.reason };
 }

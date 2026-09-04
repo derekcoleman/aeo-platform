@@ -38,7 +38,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams: Pro
           <section key={org.id} className="mb-10">
             <div className="mb-3 flex items-baseline justify-between">
               <h2 className="text-lg font-medium">{org.name}</h2>
-              <span className="text-muted-foreground text-xs">{org.plan} · {own.length} project{own.length === 1 ? "" : "s"}</span>
+              <span className="text-muted-foreground text-xs">{org.plan} · {own.length} project{own.length === 1 ? "" : "s"}{canManage(user, org.id) ? <> · <Link className="underline-offset-2 hover:underline" href={`/app/orgs/${org.id}` as Route}>manage</Link></> : null}</span>
             </div>
             {own.length === 0 ? (
               <p className="text-muted-foreground rounded-lg border border-dashed p-6 text-sm">No projects yet. Add a domain to get its install guide.</p>

@@ -95,6 +95,7 @@ export interface SiteRow {
   trailing_slash: "never" | "always";
   locale: string;
   status: "provisioning" | "verifying" | "active" | "paused" | "disabled";
+  proxy_hmac_secret: string;
   verified_at: string | Date | null;
   health_failures: number;
   last_health_ok: boolean | null;
@@ -127,7 +128,7 @@ export async function createSite(userId: string, input: CreateSiteInput, sql: po
         insert into app.sites (org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode)
         values (${input.orgId}, ${input.name.trim()}, ${domain}, ${pathPrefix}, ${edge}, ${input.proxyMode})
         on conflict (edge_hostname) do nothing
-        returning id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, verified_at, health_failures, last_health_ok, last_health_at, created_at`;
+        returning id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at`;
       site = rows[0];
     }
     if (!site) throw new Error("could not allocate an edge hostname");
@@ -142,12 +143,12 @@ export async function createSite(userId: string, input: CreateSiteInput, sql: po
 export async function listSites(orgIds: string[] | "all", sql: postgres.Sql = appDb()): Promise<SiteRow[]> {
   if (orgIds !== "all" && orgIds.length === 0) return [];
   return orgIds === "all"
-    ? sql<SiteRow[]>`select id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, verified_at, health_failures, last_health_ok, last_health_at, created_at from app.sites order by created_at desc`
-    : sql<SiteRow[]>`select id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, verified_at, health_failures, last_health_ok, last_health_at, created_at from app.sites where org_id = any(${sql.array(orgIds)}::uuid[]) order by created_at desc`;
+    ? sql<SiteRow[]>`select id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at from app.sites order by created_at desc`
+    : sql<SiteRow[]>`select id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at from app.sites where org_id = any(${sql.array(orgIds)}::uuid[]) order by created_at desc`;
 }
 
 export async function loadSite(siteId: string, sql: postgres.Sql = appDb()): Promise<SiteRow | null> {
-  const [row] = await sql<SiteRow[]>`select id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, verified_at, health_failures, last_health_ok, last_health_at, created_at from app.sites where id = ${siteId}`;
+  const [row] = await sql<SiteRow[]>`select id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at from app.sites where id = ${siteId}`;
   return row ?? null;
 }
 

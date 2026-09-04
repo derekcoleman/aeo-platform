@@ -39,6 +39,7 @@ export class HttpSiteStore implements SiteStore {
         "trailing_slash",
         "locale",
         "status",
+        "proxy_hmac_secret",
         "site_domains(hostname)",
       ].join(","),
     );
@@ -88,6 +89,7 @@ export interface SiteRow {
   trailing_slash: SlashMode;
   locale: string;
   status: SiteRoute["status"];
+  proxy_hmac_secret?: string | null;
   site_domains?: { hostname: string }[];
 }
 
@@ -108,6 +110,7 @@ export function toSiteRoute(row: SiteRow): SiteRoute {
     locale: row.locale,
     status: row.status,
     allowedHosts: [...hosts],
+    proxyHmacSecret: row.proxy_hmac_secret ?? null,
   };
 }
 

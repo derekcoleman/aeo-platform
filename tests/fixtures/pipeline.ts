@@ -59,6 +59,8 @@ export const brief: BriefSpec = {
   factKeys: [],
   facts: [],
   manifestVersionId: null,
+  format: null,
+  structuralTarget: null,
 };
 
 /** The same brief with the brain attached: two public facts the draft may cite. */

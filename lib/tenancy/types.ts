@@ -23,6 +23,8 @@ export interface SiteRoute {
   status: "provisioning" | "verifying" | "active" | "paused" | "disabled";
   /** Hosts we will honour in x-forwarded-host, including canonicalDomain. */
   allowedHosts: string[];
+  /** Shared with the customer's Worker; verifies x-aeo-sig and signs origin telemetry. */
+  proxyHmacSecret?: string | null;
 }
 
 /**

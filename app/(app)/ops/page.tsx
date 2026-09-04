@@ -4,11 +4,13 @@ import { ActionButton } from "@/components/app/action-button";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { HealthBadge, SiteStatusBadge, when } from "@/components/app/status";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
 import { opsFailedSyncs, opsLlmSpend, opsOrganizations, opsSites, opsStaff } from "@/lib/app/queries";
+import { auditLog } from "@/lib/app/org";
 import { requireStaff } from "@/lib/auth/session";
 import { StaffForm } from "./staff-form";
 
@@ -17,7 +19,7 @@ export const dynamic = "force-dynamic";
 /** Staff-only. Every action here is audited; nothing runs as a raw service client from the browser. */
 export default async function OpsPage() {
   const user = await requireStaff();
-  const [orgs, sites, failed, spend, staff] = await Promise.all([opsOrganizations(), opsSites(), opsFailedSyncs(), opsLlmSpend(), opsStaff()]);
+  const [orgs, sites, failed, spend, staff, audit] = await Promise.all([opsOrganizations(), opsSites(), opsFailedSyncs(), opsLlmSpend(), opsStaff(), auditLog(null, 200)]);
   const failingSites = sites.filter((s) => s.last_health_ok === false).length;
   return (
     <AppShell user={user} active="ops">
@@ -26,6 +28,7 @@ export default async function OpsPage() {
         <Badge variant="secondary">{sites.length} sites</Badge>
         {failingSites ? <Badge variant="destructive">{failingSites} failing</Badge> : <Badge variant="success">all healthy</Badge>}
         {failed.length ? <Badge variant="warning">{failed.length} failed syncs / 7d</Badge> : null}
+        <Button asChild variant="outline" size="sm"><Link href={"/ops/setup" as Route}>Setup checklist</Link></Button>
       </PageHeader>
       <Tabs defaultValue="sites">
         <TabsList>
@@ -34,6 +37,7 @@ export default async function OpsPage() {
           <TabsTrigger value="health">Connector health</TabsTrigger>
           <TabsTrigger value="spend">LLM spend</TabsTrigger>
           <TabsTrigger value="staff">Staff</TabsTrigger>
+          <TabsTrigger value="audit">Audit log</TabsTrigger>
         </TabsList>
 
         <TabsContent value="sites" className="pt-4">
@@ -44,7 +48,7 @@ export default async function OpsPage() {
                 <TableBody>
                   {sites.map((s) => (
                     <TableRow key={s.id}>
-                      <TableCell><Link className="font-medium underline-offset-2 hover:underline" href={`/app/sites/${s.id}` as Route}>{s.name}</Link><p className="text-muted-foreground font-mono text-xs">{s.canonical_domain}{s.path_prefix}</p></TableCell>
+                      <TableCell><Link className="font-medium underline-offset-2 hover:underline" href={`/app/sites/${s.id}` as Route}>{s.name}</Link><p className="text-muted-foreground font-mono text-xs">{s.canonical_domain}{s.path_prefix} · <Link className="underline-offset-2 hover:underline" href={`/ops/sites/${s.id}/theme` as Route}>theme</Link></p></TableCell>
                       <TableCell>{s.org_name}</TableCell>
                       <TableCell className="text-xs">{s.proxy_mode}</TableCell>
                       <TableCell><SiteStatusBadge status={s.status} /></TableCell>
@@ -132,6 +136,30 @@ export default async function OpsPage() {
                 </TableBody>
               </Table>
               <StaffForm />
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="audit" className="pt-4">
+          <Card>
+            <CardHeader><CardTitle>Audit log</CardTitle><CardDescription>Every staff and owner action on any organisation, newest first. Billing webhooks land here too.</CardDescription></CardHeader>
+            <CardContent>
+              {audit.length === 0 ? <p className="text-muted-foreground text-sm">Nothing recorded yet.</p> : (
+                <Table>
+                  <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Org</TableHead><TableHead>Actor</TableHead><TableHead>Action</TableHead><TableHead>Target</TableHead><TableHead>Detail</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    {audit.map((a) => (
+                      <TableRow key={a.id}>
+                        <TableCell className="whitespace-nowrap">{when(a.at)}</TableCell>
+                        <TableCell>{a.org_name ?? "—"}</TableCell>
+                        <TableCell className="text-xs">{a.actor_email ?? "system"}</TableCell>
+                        <TableCell className="font-mono text-xs">{a.action}</TableCell>
+                        <TableCell className="text-muted-foreground text-xs">{a.target_type}{a.target_id ? ` ${a.target_id.slice(0, 8)}` : ""}</TableCell>
+                        <TableCell className="text-muted-foreground max-w-xs truncate text-xs">{a.after ? JSON.stringify(a.after).slice(0, 120) : ""}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

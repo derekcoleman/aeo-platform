@@ -208,38 +208,50 @@ async function reportCrawl(request, url, status, cacheStatus) {
   if (!agent || !CONFIG.crawlEndpoint) return;
 
   try {
+    // The address is sent so we can verify the hit against the operator's
+    // published IP ranges; we store a salted hash, never the address itself.
+    const body = JSON.stringify({
+      siteId: CONFIG.siteId,
+      events: [
+        {
+          ts: new Date().toISOString(),
+          path: url.pathname,
+          botFamily: agent.family,
+          purpose: agent.purpose,
+          ua,
+          status,
+          cacheStatus,
+          country: request.cf?.country ?? null,
+          ip: request.headers.get("cf-connecting-ip"),
+          source: "worker",
+        },
+      ],
+    });
     await fetch(CONFIG.crawlEndpoint, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-aeo-site": CONFIG.siteId },
-      body: JSON.stringify({
-        siteId: CONFIG.siteId,
-        events: [
-          {
-            ts: new Date().toISOString(),
-            path: url.pathname,
-            botFamily: agent.family,
-            purpose: agent.purpose,
-            ua,
-            status,
-            cacheStatus,
-            country: request.cf?.country ?? null,
-            source: "worker",
-          },
-        ],
-      }),
+      headers: await telemetryHeaders(body),
+      body,
     });
   } catch {
     // Telemetry must never affect what the reader sees.
   }
 }
 
+/** Telemetry posts are signed over their body so nobody can feed us fake crawl data for your site. */
+async function telemetryHeaders(body) {
+  const headers = { "content-type": "application/json", "x-aeo-site": CONFIG.siteId };
+  if (CONFIG.hmacSecret) headers["x-aeo-sig"] = await sign(CONFIG.hmacSecret, body);
+  return headers;
+}
+
 async function report(ctx, request, url, kind, detail) {
   if (!CONFIG.crawlEndpoint) return;
   try {
+    const body = JSON.stringify({ siteId: CONFIG.siteId, kind, detail, path: url.pathname });
     await fetch(CONFIG.crawlEndpoint.replace("/crawl", "/alert"), {
       method: "POST",
-      headers: { "content-type": "application/json", "x-aeo-site": CONFIG.siteId },
-      body: JSON.stringify({ siteId: CONFIG.siteId, kind, detail, path: url.pathname }),
+      headers: await telemetryHeaders(body),
+      body,
     });
   } catch {
     /* never block the response */

@@ -63,6 +63,10 @@ export const briefSpecSchema = z.object({
   /** The facts the draft may cite, materialised from factKeys + the offered list. */
   facts: z.array(briefFactSchema).max(20).default([]),
   manifestVersionId: z.guid().nullable().default(null),
+  /** Article format the topic or the requester asked for; set by code, not the model. */
+  format: z.enum(["comparison", "howto", "guide", "listicle", "faq"]).nullable().default(null),
+  /** What currently-cited pages look like for this topic; set by code from measure.competitor_pages. */
+  structuralTarget: z.record(z.string(), z.unknown()).nullable().default(null),
 });
 export type BriefSpec = z.infer<typeof briefSpecSchema>;
 

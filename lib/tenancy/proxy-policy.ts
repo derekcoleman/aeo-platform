@@ -42,6 +42,8 @@ export const INTERNAL_HEADER = {
   pathPrefix: "x-aeo-internal-path-prefix",
   locale: "x-aeo-internal-locale",
   indexable: "x-aeo-internal-indexable",
+  /** "1" when the request carried a valid x-aeo-sig from the site's Worker. */
+  signed: "x-aeo-internal-signed",
   trailingSlash: "x-aeo-internal-trailing-slash",
   /**
    * Root-relative Location for a trailing-slash normalisation.

@@ -19,6 +19,8 @@ const SITES = [
     path_prefix: "/resources",
     edge_hostname: "acme-8fj2.blogedge.aeo.app",
     proxy_mode: "cloudflare_worker",
+    // Optional: lets a local run exercise the signed telemetry path against a real database.
+    proxy_hmac_secret: process.env.AEO_FIXTURE_HMAC_SECRET ?? null,
     trailing_slash: "never",
     locale: "en-US",
     status: "active",

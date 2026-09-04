@@ -3,6 +3,7 @@ import { vaultSecrets } from "@/lib/secrets/vault";
 import { googleConnector } from "./google";
 import { profoundConnector } from "./profound";
 import { slackConnector } from "./slack";
+import { webflowConnector } from "./webflow";
 import type { Connector, ConnectorContext, ConnectorProvider } from "./types";
 
 export * from "./types";
@@ -12,12 +13,14 @@ export * from "./oauth-start";
 export { slackConnector } from "./slack";
 export { googleConnector } from "./google";
 export { profoundConnector } from "./profound";
+export { webflowConnector } from "./webflow";
 
 /** Provider → adapter. Gong/Zoom/Fireflies land here as the same shape. */
 export const connectors: Record<ConnectorProvider, Connector<never>> = {
   slack: slackConnector as Connector<never>,
   google: googleConnector as Connector<never>,
   profound: profoundConnector as Connector<never>,
+  webflow: webflowConnector as Connector<never>,
 };
 
 export function getConnector(provider: ConnectorProvider): Connector<never> {
