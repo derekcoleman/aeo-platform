@@ -1,4 +1,6 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
+import { classifyUserAgent } from "@/lib/analytics/bots";
+import { hmacHex, verifyRequestSignature } from "@/lib/tenancy/signature";
 import { refreshSession } from "@/lib/auth/supabase";
 import {
   HEADER,
@@ -34,7 +36,7 @@ export const config = {
 
 const PROTECTED = ["/app", "/ops", "/settings"];
 
-export async function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest, event: NextFetchEvent) {
   const host = req.headers.get("host");
 
   // Only requests arriving on a per-site edge hostname are public render
@@ -124,6 +126,21 @@ export async function middleware(req: NextRequest) {
       headers.set(INTERNAL_HEADER.trailingSlash, action.site.trailingSlash);
       headers.set(INTERNAL_HEADER.indexable, action.indexable ? "1" : "0");
 
+      // A Mode A Worker signs host + path + minute with the site's secret.
+      // Verified means "this came through the customer's own proxy", which
+      // is what tells us the Worker is already reporting crawl telemetry.
+      const secret = action.site.proxyHmacSecret ?? null;
+      const signed = secret ? await verifyRequestSignature(secret, forwardedHost ?? "", req.nextUrl.pathname, req.headers.get("x-aeo-sig")) : false;
+      headers.set(INTERNAL_HEADER.signed, signed ? "1" : "0");
+
+      // Origin-side crawl telemetry for installs without a Worker (or an
+      // unsigned one): partial coverage, misses only, but never nothing.
+      // Signed requests are skipped because the Worker reports those itself.
+      const bot = classifyUserAgent(req.headers.get("user-agent"));
+      if (bot && secret && !signed) {
+        event.waitUntil(reportOriginCrawl(req, action.siteId, secret, bot).catch(() => undefined));
+      }
+
       if (action.redirectTo) {
         // The handler emits the 301; see the note on ProxyAction.redirectTo.
         headers.set(INTERNAL_HEADER.redirect, action.redirectTo);
@@ -144,4 +161,32 @@ export async function middleware(req: NextRequest) {
       return res;
     }
   }
+}
+
+/** Fire-and-forget post to our own ingest route, signed like a Worker's would be. */
+async function reportOriginCrawl(req: NextRequest, siteId: string, secret: string, bot: { family: string; purpose: string }): Promise<void> {
+  const base = process.env.APP_URL || req.nextUrl.origin;
+  const ip = req.headers.get("cf-connecting-ip") ?? req.headers.get("x-real-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+  const body = JSON.stringify({
+    siteId,
+    events: [
+      {
+        ts: new Date().toISOString(),
+        path: req.nextUrl.pathname,
+        botFamily: bot.family,
+        purpose: bot.purpose,
+        ua: req.headers.get("user-agent"),
+        cacheStatus: "MISS",
+        country: req.headers.get("x-vercel-ip-country") ?? req.headers.get("cf-ipcountry") ?? null,
+        ip,
+        source: "origin",
+      },
+    ],
+  });
+  await fetch(`${base}/api/ingest/crawl`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-aeo-site": siteId, "x-aeo-sig": await hmacHex(secret, body) },
+    body,
+    signal: AbortSignal.timeout(3000),
+  });
 }

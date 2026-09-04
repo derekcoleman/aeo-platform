@@ -14,6 +14,8 @@ import { listConnectionsForOrg, listHealthChecks, listOpportunities, listPending
 import { loadSite } from "@/lib/app/store";
 import { canManage, requireUser, roleIn } from "@/lib/auth/session";
 import { buildInstall } from "@/lib/proxy/install";
+import { crawlSummary } from "@/lib/analytics/crawl";
+import { CrawlersPanel } from "@/components/app/crawlers-panel";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -23,18 +25,20 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
   const user = await requireUser(`/app/sites/${siteId}`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
-  const [preflights, health, opportunities, approvals, connections, published] = await Promise.all([
+  const [preflights, health, opportunities, approvals, connections, published, crawl] = await Promise.all([
     listPreflights(siteId),
     listHealthChecks(siteId),
     listOpportunities(siteId),
     listPendingApprovals(siteId),
     listConnectionsForOrg(site.org_id),
     listPublished(siteId),
+    crawlSummary(siteId),
   ]);
   const install = buildInstall({
     site: { id: site.id, canonicalDomain: site.canonical_domain, pathPrefix: site.path_prefix, edgeHostname: site.edge_hostname, proxyMode: site.proxy_mode, name: site.name },
     mirrorOrigin: process.env.AEO_MIRROR_ORIGIN,
     crawlEndpoint: process.env.APP_URL ? `${process.env.APP_URL}/api/ingest/crawl` : undefined,
+    hmacSecret: site.proxy_hmac_secret,
   });
   const latestPreflight = preflights.find((p) => p.kind === "preflight");
   const latestReport = preflights.find((p) => p.crawler_access)?.crawler_access ?? null;
@@ -70,6 +74,7 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
           <TabsTrigger value="install">Install</TabsTrigger>
           <TabsTrigger value="checks">Checks</TabsTrigger>
           <TabsTrigger value="content">Content {opportunities.length + approvals.length ? <Badge variant="secondary">{opportunities.length + approvals.length}</Badge> : null}</TabsTrigger>
+          <TabsTrigger value="crawlers">Crawlers {crawl.byPurpose.some((p) => p.purpose === "live_fetch" && p.hits24h > 0) ? <Badge variant="success">live</Badge> : null}</TabsTrigger>
           <TabsTrigger value="connectors">Connectors</TabsTrigger>
         </TabsList>
 
@@ -241,6 +246,10 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="crawlers" className="grid gap-4 pt-4">
+          <CrawlersPanel crawl={crawl} proxyMode={site.proxy_mode} />
         </TabsContent>
 
         <TabsContent value="connectors" className="pt-4">

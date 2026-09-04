@@ -4,6 +4,7 @@ import { ActionButton } from "@/components/app/action-button";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { HealthBadge, SiteStatusBadge, when } from "@/components/app/status";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -26,6 +27,7 @@ export default async function OpsPage() {
         <Badge variant="secondary">{sites.length} sites</Badge>
         {failingSites ? <Badge variant="destructive">{failingSites} failing</Badge> : <Badge variant="success">all healthy</Badge>}
         {failed.length ? <Badge variant="warning">{failed.length} failed syncs / 7d</Badge> : null}
+        <Button asChild variant="outline" size="sm"><Link href={"/ops/setup" as Route}>Setup checklist</Link></Button>
       </PageHeader>
       <Tabs defaultValue="sites">
         <TabsList>

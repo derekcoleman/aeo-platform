@@ -768,3 +768,78 @@ begin;
 rollback;
 
 \echo 'isolation: app auth assertions passed'
+
+-- ── 0010: crawl telemetry ───────────────────────────────────────────────────
+grant usage on schema analytics to app_user;
+grant select on all tables in schema analytics, ops to app_user;
+grant select on all tables in schema app to app_user;
+
+-- org_id omitted everywhere: the site trigger must fill it.
+insert into analytics.crawl_events (site_id, ts, path, bot_family, purpose, verified, source) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', now(), '/resources/sso-vs-scim', 'chatgpt-user', 'live_fetch', true, 'worker'),
+  ('aaaaaaaa-0000-0000-0000-000000000001', now(), '/resources/sso-vs-scim', 'gptbot', 'train', false, 'origin'),
+  ('bbbbbbbb-0000-0000-0000-000000000002', now(), '/blog/widgets', 'perplexity-user', 'live_fetch', false, 'worker');
+insert into analytics.crawl_daily (site_id, day, bot_family, purpose, source, path, hits, verified_hits) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', current_date, 'chatgpt-user', 'live_fetch', 'worker', '/resources/sso-vs-scim', 3, 3),
+  ('bbbbbbbb-0000-0000-0000-000000000002', current_date, 'perplexity-user', 'live_fetch', 'worker', '/blog/widgets', 1, 0);
+insert into ops.site_alerts (site_id, kind, path) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'site_mismatch', '/resources/x'),
+  ('bbbbbbbb-0000-0000-0000-000000000002', 'loop', '/blog/y');
+
+do $$ begin
+  if exists (select 1 from analytics.crawl_events where org_id is null) then raise exception 'FAIL crawl_events org trigger'; end if;
+  if exists (select 1 from analytics.crawl_daily where org_id is null) then raise exception 'FAIL crawl_daily org trigger'; end if;
+  if exists (select 1 from ops.site_alerts where org_id is null) then raise exception 'FAIL site_alerts org trigger'; end if;
+  if exists (select 1 from app.sites where length(proxy_hmac_secret) <> 48) then raise exception 'FAIL proxy_hmac_secret default'; end if;
+  if (select count(distinct proxy_hmac_secret) from app.sites) <> (select count(*) from app.sites) then raise exception 'FAIL proxy secrets must be distinct'; end if;
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member sees own crawl events', (select count(*) from analytics.crawl_events), 2);
+  select pg_temp.expect('acme member sees own crawl_daily', (select count(*) from analytics.crawl_daily), 1);
+  select pg_temp.expect('acme member sees own site alerts', (select count(*) from ops.site_alerts), 1);
+  select pg_temp.expect('acme member reads own proxy secret only', (select count(*) from app.sites where proxy_hmac_secret is not null), 1);
+  select pg_temp.expect('bot catalogue is readable', (select count(*) from ops.bots), 15);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('globex member never sees acme crawl events', (select count(*) from analytics.crawl_events where org_id = '11111111-1111-1111-1111-111111111111'), 0);
+  select pg_temp.expect('globex member sees own alerts only', (select count(*) from ops.site_alerts), 1);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every crawl event', (select count(*) from analytics.crawl_events), 3);
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from analytics.crawl_events;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read analytics.crawl_events';
+    end if;
+    denied := false;
+    begin
+      perform 1 from ops.bots;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read ops.bots';
+    end if;
+  end $$;
+rollback;
+
+\echo 'isolation: crawl telemetry assertions passed'
