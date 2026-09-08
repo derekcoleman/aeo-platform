@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { withTimeout } from "@/lib/async";
+import { CALLBACK_PATH, NEXT_COOKIE, NEXT_COOKIE_MAX_AGE } from "@/lib/auth/callback";
 import { supabaseBrowser, type BrowserSupabaseConfig } from "@/lib/auth/supabase-browser";
 
 type Phase = { kind: "idle" } | { kind: "sending"; via: "email" | "google" } | { kind: "sent"; email: string } | { kind: "error"; message: string };
@@ -28,7 +29,12 @@ function describe(e: unknown): string {
  */
 export function LoginForm({ next, initialError, supabase }: { next: string; initialError: string | null; supabase: BrowserSupabaseConfig | null }) {
   const [phase, setPhase] = useState<Phase>(initialError ? { kind: "error", message: initialError } : { kind: "idle" });
-  const callback = () => `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`;
+  // Query-free so it matches an exact allow-list entry in Supabase; the
+  // destination rides in a short-lived cookie the callback reads and clears.
+  const callback = () => {
+    document.cookie = `${NEXT_COOKIE}=${encodeURIComponent(next)}; path=/; max-age=${NEXT_COOKIE_MAX_AGE}; samesite=lax${location.protocol === "https:" ? "; secure" : ""}`;
+    return `${window.location.origin}${CALLBACK_PATH}`;
+  };
 
   async function sendLink(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
