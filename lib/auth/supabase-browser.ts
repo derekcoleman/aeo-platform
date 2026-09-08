@@ -1,12 +1,21 @@
 import { createBrowserClient } from "@supabase/ssr";
 
+export interface BrowserSupabaseConfig {
+  url: string;
+  key: string;
+}
+
 /**
- * Browser client. Next only inlines NEXT_PUBLIC_* when referenced literally,
- * so this cannot go through lib/db/env's dynamic lookup.
+ * Browser client. Prefer passing the config from a server component
+ * (`supabaseUrl()` / `supabasePublishableKey()` in lib/db/env accept both our
+ * variable names and the Vercel↔Supabase integration's). The inlined
+ * NEXT_PUBLIC_* fallback only works when those exact names were present at
+ * build time, which is what left the sign-in form frozen on a deployment
+ * configured through the integration.
  */
-export function supabaseBrowser() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !key) throw new Error("Supabase is not configured for the browser (NEXT_PUBLIC_SUPABASE_URL / _PUBLISHABLE_KEY)");
+export function supabaseBrowser(config?: BrowserSupabaseConfig | null) {
+  const url = config?.url || process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = config?.key || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) throw new Error("Sign-in is not configured: the Supabase URL and publishable key are missing.");
   return createBrowserClient(url, key);
 }
