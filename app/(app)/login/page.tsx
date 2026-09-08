@@ -5,6 +5,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { currentUser } from "@/lib/auth/session";
 import { isAuthConfigured } from "@/lib/auth/supabase";
+import { supabasePublishableKey, supabaseUrl } from "@/lib/db/env";
 import { LoginForm } from "./login-form";
 
 export const metadata: Metadata = { title: "Sign in — AEO Platform" };
@@ -31,7 +32,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
               <AlertDescription>Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (or connect the Supabase integration on Vercel).</AlertDescription>
             </Alert>
           ) : (
-            <LoginForm next={next?.startsWith("/") ? next : "/app"} initialError={error ?? null} />
+            <LoginForm next={next?.startsWith("/") ? next : "/app"} initialError={error ?? null} supabase={{ url: supabaseUrl()!, key: supabasePublishableKey()! }} />
           )}
           <p className="text-muted-foreground text-xs">
             By signing in you agree to publish only content you have reviewed. <Link href="/" className="underline">Back</Link>
