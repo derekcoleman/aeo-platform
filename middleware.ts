@@ -1,6 +1,7 @@
 import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
 import { classifyUserAgent } from "@/lib/analytics/bots";
 import { hmacHex, verifyRequestSignature } from "@/lib/tenancy/signature";
+import { strayAuthRedirect } from "@/lib/auth/callback";
 import { refreshSession } from "@/lib/auth/supabase";
 import {
   HEADER,
@@ -47,6 +48,12 @@ export async function middleware(req: NextRequest, event: NextFetchEvent) {
     // Our own domain: refresh the Supabase session (rotated cookies land on
     // this response) and gate the authenticated surfaces. This branch never
     // runs for a customer's domain, so we never set a cookie there.
+    // A sign-in code that Supabase delivered to the wrong page (its Site URL
+    // fallback when the callback is not on the allow list) is still a valid
+    // sign-in: forward it to the callback instead of dropping it.
+    const stray = strayAuthRedirect(req.nextUrl);
+    if (stray) return NextResponse.redirect(stray);
+
     const res = NextResponse.next();
     const { pathname } = req.nextUrl;
     const protectedPath = PROTECTED.some((p) => pathname === p || pathname.startsWith(`${p}/`));
