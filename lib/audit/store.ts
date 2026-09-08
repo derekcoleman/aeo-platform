@@ -167,3 +167,10 @@ export async function recentCompletedRunForDomain(domain: string, maxAgeHours: n
     order by r.completed_at desc limit 1`;
   return row ? { runId: row.run_id, slug: row.slug } : null;
 }
+
+/** The share slug and the address the requester left (if any) for a public run, for the "we'll email you the link" promise. */
+export async function publicAuditContactForRun(auditRunId: string, sql: postgres.Sql = appDb()): Promise<{ slug: string; email: string | null } | null> {
+  const [row] = await sql<{ slug: string; email: string | null }[]>`
+    select id as slug, email from app.public_audits where audit_run_id = ${auditRunId} order by created_at desc limit 1`;
+  return row ?? null;
+}
