@@ -7,7 +7,7 @@ import { z } from "zod";
 import { canManage, requireUser } from "@/lib/auth/session";
 import { connectorContext, createConnection, getConnection, updateConnection } from "@/lib/connectors";
 import { WebflowApi, WebflowApiError, suggestFieldMap, webflowClientFor, type FieldMap } from "@/lib/connectors/webflow";
-import { inngest, publishingPushRequested } from "@/lib/inngest";
+import { publishingPushRequested } from "@/lib/inngest";
 import { createWebflowTarget, deletePublishTarget, loadPublishTarget, updatePublishTarget, type WebflowTargetConfig } from "@/lib/publishing/targets";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";

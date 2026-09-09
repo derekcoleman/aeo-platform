@@ -11,7 +11,7 @@ import { connectorContext, createConnection, setFeature } from "@/lib/connectors
 import { PROFOUND_FEATURE } from "@/lib/connectors/profound";
 import { ProfoundApi, ProfoundApiError } from "@/lib/connectors/profound/api";
 import { appDb } from "@/lib/db/app";
-import { connectorSyncRequested, contentPipelineRequested, inngest, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
+import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
 import { createManualOpportunity } from "@/lib/pipeline/opportunities";
 import { addManualPrompt, assignQuestionsToTopics, createTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
 import type { ActionResult } from "./actions";

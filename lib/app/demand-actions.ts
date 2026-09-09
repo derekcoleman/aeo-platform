@@ -5,7 +5,7 @@ import { queueJob } from "@/lib/jobs/dispatch";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { canEdit, requireUser } from "@/lib/auth/session";
-import { demandMineRequested, inngest, serpTrackRequested } from "@/lib/inngest";
+import { demandMineRequested, serpTrackRequested } from "@/lib/inngest";
 import type { ActionResult } from "./actions";
 import { setQuestionTracking, trackTopQuestions, trackedQuestionIds } from "./demand";
 import { loadSite } from "./store";

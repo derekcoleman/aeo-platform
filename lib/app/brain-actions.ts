@@ -12,7 +12,7 @@ import { rejectFact, verifyFact } from "@/lib/context/facts";
 import { activateManifest, draftManifestFromFacts, insertManifest, manifestDocSchema } from "@/lib/context/manifest";
 import { entityTypeSchema } from "@/lib/context/types";
 import { appDb } from "@/lib/db/app";
-import { contextFactsExtractRequested, contextIngestRequested, contextSignalsScanRequested, inngest } from "@/lib/inngest";
+import { contextFactsExtractRequested, contextIngestRequested, contextSignalsScanRequested } from "@/lib/inngest";
 import { modelFor } from "@/lib/pipeline/model";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";
