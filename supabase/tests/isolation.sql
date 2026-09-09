@@ -981,3 +981,31 @@ begin;
 rollback;
 
 \echo 'isolation: topics and publishing assertions passed'
+
+-- ── 0013: onboarding keywords + website profile ──────────────────────────────
+update app.sites set keywords = '{scim,sso}', profile = '{"name":"Acme","oneLiner":"IAM for mid-market"}', profile_status = 'ready' where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+update app.sites set keywords = '{widgets}', profile_status = 'queued' where id = 'bbbbbbbb-0000-0000-0000-000000000002';
+
+do $$ begin
+  if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid where t.typname = 'connector_provider' and e.enumlabel = 'website') then raise exception 'FAIL website provider missing'; end if;
+  begin
+    update app.sites set profile_status = 'bogus' where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+    raise exception 'FAIL profile_status check must reject unknown states';
+  exception when check_violation then null;
+  end;
+  begin
+    update app.sites set profile = '[]'::jsonb where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+    raise exception 'FAIL profile must be a JSON object';
+  exception when check_violation then null;
+  end;
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"sub":"99999999-0000-0000-0000-000000000001","org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member sees own site keywords only', (select count(*) from app.sites where 'scim' = any (keywords)), 1);
+  select pg_temp.expect('acme member cannot see globex keywords', (select count(*) from app.sites where 'widgets' = any (keywords)), 0);
+  select pg_temp.expect('acme member reads own profile', (select count(*) from app.sites where profile ->> 'name' = 'Acme'), 1);
+rollback;
+
+\echo 'isolation: onboarding assertions passed'

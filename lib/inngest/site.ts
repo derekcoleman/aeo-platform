@@ -17,7 +17,8 @@ import {
   recordHealthCheck,
   toHealthSite,
 } from "@/lib/proxy/store";
-import { inngest, siteHealthChanged, siteHealthCheckRequested, sitePreflightCompleted, sitePreflightRequested, siteVerified } from "./client";
+import { runSiteOnboarding } from "@/lib/onboarding/run";
+import { inngest, siteHealthChanged, siteHealthCheckRequested, siteOnboardingRequested, sitePreflightCompleted, sitePreflightRequested, siteVerified } from "./client";
 
 /**
  * Proxy onboarding and health. The monitor fans out every five minutes to
@@ -150,4 +151,22 @@ export const sitePreflightFunction = inngest.createFunction(
   },
 );
 
-export const siteFunctions = [siteHealthCheckFunction, siteHealthMonitor, sitePreflightFunction];
+/**
+ * Onboarding: crawl the customer's site into the brain and extract the
+ * business profile. One step, because the crawl feeds the extraction and the
+ * pages are too large to memoise usefully; a retry re-crawls (cheap, idempotent).
+ */
+export const siteOnboardingFunction = inngest.createFunction(
+  {
+    id: "site-onboarding",
+    triggers: [siteOnboardingRequested],
+    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: 5 }],
+    retries: 1,
+  },
+  async ({ event, step }) => {
+    const { siteId, orgId } = event.data;
+    return step.run("crawl-and-profile", () => runSiteOnboarding({ siteId, orgId }));
+  },
+);
+
+export const siteFunctions = [siteHealthCheckFunction, siteHealthMonitor, sitePreflightFunction, siteOnboardingFunction];

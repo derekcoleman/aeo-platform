@@ -104,7 +104,7 @@ export const connectorSyncCompleted = eventType("connector/sync.completed", {
   schema: z.object({
     connectionId: z.guid(),
     orgId: z.guid(),
-    provider: z.enum(["slack", "google", "profound", "webflow"]),
+    provider: z.enum(["slack", "google", "profound", "webflow", "website"]),
     kind: syncKindSchema,
     ok: z.boolean(),
     documentsIngested: z.number().int(),
@@ -116,7 +116,7 @@ export const connectorSyncCompleted = eventType("connector/sync.completed", {
 /** A verified, deduped inbound webhook. The route wrote ops.webhook_events and returned 200 already. */
 export const connectorWebhookReceived = eventType("connector/webhook.received", {
   schema: z.object({
-    provider: z.enum(["slack", "google", "profound", "webflow"]),
+    provider: z.enum(["slack", "google", "profound", "webflow", "website"]),
     externalId: z.string().min(1),
     connectionId: z.guid().nullable().optional(),
     orgId: z.guid().nullable().optional(),
@@ -229,6 +229,11 @@ export const sitePreflightRequested = eventType("site/preflight.requested", {
 
 export const sitePreflightCompleted = eventType("site/preflight.completed", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid(), preflightId: z.guid(), kind: z.enum(["preflight", "crawler_report"]), ok: z.boolean(), blocking: z.array(z.string()) }),
+});
+
+/** Crawl the customer's site into the brain and extract the business profile (onboarding, or a re-crawl). */
+export const siteOnboardingRequested = eventType("site/onboarding.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
 });
 
 /** The proxy passed verification through the customer's edge; the site is active. */

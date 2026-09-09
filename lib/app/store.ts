@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type postgres from "postgres";
 import { z } from "zod";
+import type { BusinessProfile } from "@/lib/onboarding/profile";
+import { keywordsToTopics, parseKeywords } from "@/lib/onboarding/profile";
 import { appDb } from "@/lib/db/app";
 import { EDGE_DOMAIN_SUFFIX, normaliseHost, normalisePathPrefix, type ProxyMode } from "@/lib/tenancy";
 
@@ -42,6 +44,7 @@ export const createSiteSchema = z.object({
   pathPrefix: z.string().trim().default("/resources"),
   proxyMode: z.enum(["cloudflare_worker", "vercel_rewrite", "nginx", "netlify", "subdomain"]).default("cloudflare_worker"),
   organizationName: z.string().trim().max(120).optional(),
+  keywords: z.preprocess((v) => (typeof v === "string" ? v : Array.isArray(v) ? v.join("\n") : ""), z.string().max(4000)).optional(),
 });
 export type CreateSiteInput = z.infer<typeof createSiteSchema>;
 
@@ -101,8 +104,16 @@ export interface SiteRow {
   last_health_ok: boolean | null;
   last_health_at: string | Date | null;
   created_at: string | Date;
+  keywords: string[];
+  profile: BusinessProfile | null;
+  profile_status: "none" | "queued" | "running" | "ready" | "failed";
+  profile_error: string | null;
+  profile_updated_at: string | Date | null;
 }
 
+
+/** Column list shared by every site read/insert so a new column cannot be forgotten in one place. */
+export const SITE_COLUMNS = "id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at, keywords, profile, profile_status, profile_error, profile_updated_at";
 
 export class SiteInputError extends Error {}
 
@@ -118,6 +129,7 @@ export async function createSite(userId: string, input: CreateSiteInput, sql: po
   if (!/^\/[a-z0-9][a-z0-9/_-]*$/.test(pathPrefix) || pathPrefix.endsWith("/") || pathPrefix === "/render" || pathPrefix.startsWith("/render/")) {
     throw new SiteInputError("The path prefix must look like /resources (lowercase, no trailing slash, not /render)");
   }
+  const keywords = parseKeywords(input.keywords);
   return sql.begin(async (tx) => {
     const [dup] = await tx<{ id: string }[]>`select id from app.sites where org_id = ${input.orgId} and canonical_domain = ${domain} and path_prefix = ${pathPrefix}`;
     if (dup) throw new SiteInputError(`${domain}${pathPrefix} already exists in this organisation`);
@@ -125,17 +137,19 @@ export async function createSite(userId: string, input: CreateSiteInput, sql: po
     for (let attempt = 0; attempt < 3 && !site; attempt++) {
       const edge = edgeHostnameFor(input.name, random);
       const rows = await tx<SiteRow[]>`
-        insert into app.sites (org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode)
-        values (${input.orgId}, ${input.name.trim()}, ${domain}, ${pathPrefix}, ${edge}, ${input.proxyMode})
+        insert into app.sites (org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, keywords, profile_status)
+        values (${input.orgId}, ${input.name.trim()}, ${domain}, ${pathPrefix}, ${edge}, ${input.proxyMode}, ${tx.array(keywords)}, 'queued')
         on conflict (edge_hostname) do nothing
-        returning id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at`;
+        returning ${tx.unsafe(SITE_COLUMNS)}`;
       site = rows[0];
     }
     if (!site) throw new Error("could not allocate an edge hostname");
     await tx`insert into app.site_domains (org_id, site_id, hostname, is_primary) values (${input.orgId}, ${site.id}, ${domain}, true), (${input.orgId}, ${site.id}, ${`www.${domain}`}, false) on conflict do nothing`;
     await tx`update content.site_render_config set organization = ${tx.json({ name: input.organizationName?.trim() || input.name.trim(), url: `https://${domain}` } as never)} where site_id = ${site.id}`;
+    // Every keyword is a topic from day one: the Strategy page, briefs and demand mining all hang off topics.
+    if (keywords.length) await keywordsToTopics(site.id, keywords, tx as unknown as postgres.Sql);
     await tx`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, after)
-             values (${input.orgId}, ${userId}, 'site.create', 'site', ${site.id}, ${tx.json({ domain, pathPrefix, proxyMode: input.proxyMode } as never)})`;
+             values (${input.orgId}, ${userId}, 'site.create', 'site', ${site.id}, ${tx.json({ domain, pathPrefix, proxyMode: input.proxyMode, keywords } as never)})`;
     return site;
   });
 }
@@ -148,7 +162,7 @@ export async function listSites(orgIds: string[] | "all", sql: postgres.Sql = ap
 }
 
 export async function loadSite(siteId: string, sql: postgres.Sql = appDb()): Promise<SiteRow | null> {
-  const [row] = await sql<SiteRow[]>`select id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at from app.sites where id = ${siteId}`;
+  const [row] = await sql<SiteRow[]>`select ${sql.unsafe(SITE_COLUMNS)} from app.sites where id = ${siteId}`;
   return row ?? null;
 }
 

@@ -1,5 +1,8 @@
 "use server";
 
+import { dispatch } from "@/lib/jobs/dispatch";
+import { runSiteOnboarding } from "@/lib/onboarding/run";
+
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import type { Route } from "next";
@@ -14,6 +17,7 @@ import {
   opportunitiesScanRequested,
   siteHealthCheckRequested,
   sitePreflightRequested,
+  siteOnboardingRequested,
 } from "@/lib/inngest";
 import { loadApproval, recordDecision } from "@/lib/pipeline/approvals";
 import { loadOpportunity, markOpportunity } from "@/lib/pipeline/opportunities";
@@ -54,6 +58,7 @@ export async function createSiteAction(_prev: ActionResult | null, form: FormDat
     pathPrefix: form.get("pathPrefix") || "/resources",
     proxyMode: form.get("proxyMode") || "cloudflare_worker",
     organizationName: form.get("organizationName") || undefined,
+    keywords: form.get("keywords") || undefined,
   });
   if (!parsed.success) return fail(parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
   if (!canManage(user, parsed.data.orgId)) return fail("Only owners and admins can add projects.");
@@ -63,6 +68,14 @@ export async function createSiteAction(_prev: ActionResult | null, form: FormDat
   } catch (e) {
     if (e instanceof SiteInputError) return fail(e.message);
     throw e;
+  }
+  const site = await loadSite(siteId);
+  if (site) {
+    await dispatch(
+      () => inngest.send(siteOnboardingRequested.create({ siteId, orgId: site.org_id })),
+      () => runSiteOnboarding({ siteId, orgId: site.org_id }),
+      "site onboarding",
+    );
   }
   revalidatePath("/app");
   redirect(`/app/sites/${siteId}` as Route);

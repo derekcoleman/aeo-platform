@@ -6,6 +6,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { createOrgAction, createSiteAction, type ActionResult } from "@/lib/app/actions";
@@ -96,6 +97,11 @@ export function CreateSiteDialog({ orgs, defaultOrgId }: { orgs: { id: string; n
           <div className="grid gap-2">
             <Label htmlFor="site-orgname">Company name for bylines and schema (optional)</Label>
             <Input id="site-orgname" name="organizationName" placeholder="Acme" />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="site-keywords">Keywords or topics to be known for <span className="text-muted-foreground font-normal">(optional, one per line)</span></Label>
+            <Textarea id="site-keywords" name="keywords" rows={3} placeholder={"scim provisioning\nsso for mid-market\nokta alternatives"} />
+            <p className="text-muted-foreground text-xs">Each becomes a topic. We also crawl the site right away to learn what the business does and suggest more.</p>
           </div>
           {state && !state.ok ? <Alert variant="destructive"><AlertDescription>{state.error}</AlertDescription></Alert> : null}
           <Button type="submit" disabled={pending}>{pending ? "Creating…" : "Create project"}</Button>

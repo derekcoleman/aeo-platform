@@ -19,6 +19,9 @@ import { canManage, requireUser, roleIn } from "@/lib/auth/session";
 import { buildInstall } from "@/lib/proxy/install";
 import { crawlSummary } from "@/lib/analytics/crawl";
 import { CrawlersPanel } from "@/components/app/crawlers-panel";
+import { BusinessProfileCard } from "@/components/app/business-profile";
+import { canEdit } from "@/lib/auth/session";
+import { listTopics } from "@/lib/strategy/topics";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -28,7 +31,7 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
   const user = await requireUser(`/app/sites/${siteId}`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
-  const [preflights, health, opportunities, approvals, connections, published, crawl] = await Promise.all([
+  const [preflights, health, opportunities, approvals, connections, published, crawl, topics] = await Promise.all([
     listPreflights(siteId),
     listHealthChecks(siteId),
     listOpportunities(siteId),
@@ -36,7 +39,9 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
     listConnectionsForOrg(site.org_id),
     listPublished(siteId),
     crawlSummary(siteId),
+    listTopics(siteId),
   ]);
+  const trackedKeywords = topics.flatMap((t) => [t.name, ...t.seed_terms]);
   const install = buildInstall({
     site: { id: site.id, canonicalDomain: site.canonical_domain, pathPrefix: site.path_prefix, edgeHostname: site.edge_hostname, proxyMode: site.proxy_mode, name: site.name },
     mirrorOrigin: process.env.AEO_MIRROR_ORIGIN,
@@ -77,6 +82,10 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
           <AlertDescription>{nextStep}</AlertDescription>
         </Alert>
       ) : null}
+
+      <div className="mb-6">
+        <BusinessProfileCard site={site} trackedKeywords={trackedKeywords} canEdit={canEdit(user, site.org_id)} />
+      </div>
 
       <Tabs defaultValue={site.status === "active" ? "content" : "install"}>
         <TabsList>

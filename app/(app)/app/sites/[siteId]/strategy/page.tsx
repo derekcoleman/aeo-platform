@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/app/action-button";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
-import { ContentRequestForm, EditTopic, ProfoundConnectForm, PromptForm, TopicForm } from "@/components/app/strategy-forms";
+import { ContentRequestForm, EditTopic, KeywordsForm, ProfoundConnectForm, PromptForm, TopicForm } from "@/components/app/strategy-forms";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -107,10 +107,16 @@ export default async function StrategyPage({ params, searchParams }: { params: P
             );
           })}
           {editor ? (
+            <>
+            <Card>
+              <CardHeader><CardTitle>Add keywords</CardTitle><CardDescription>The quick way: paste a list and each keyword becomes a topic with itself as the seed term. Refine priority, cadence and formats on the topic afterwards.</CardDescription></CardHeader>
+              <CardContent><KeywordsForm siteId={siteId} /></CardContent>
+            </Card>
             <Card>
               <CardHeader><CardTitle>New topic</CardTitle></CardHeader>
               <CardContent><TopicForm siteId={siteId} /></CardContent>
             </Card>
+            </>
           ) : null}
         </TabsContent>
 
