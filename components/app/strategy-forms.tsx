@@ -1,6 +1,9 @@
 "use client";
 
+import { addKeywordsFormAction } from "@/lib/app/onboarding-actions";
+
 import { useActionState, useState } from "react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +21,23 @@ function Note({ state, okText = "Saved" }: { state: ActionResult | null; okText?
 }
 
 const selectClass = "border-input bg-background h-9 rounded-md border px-3 text-sm";
+
+/** Paste a keyword list; each becomes a topic (skipping ones already tracked). */
+export function KeywordsForm({ siteId }: { siteId: string }) {
+  const [state, action, pending] = useActionState(addKeywordsFormAction, null);
+  return (
+    <form action={action} className="grid gap-3">
+      <input type="hidden" name="siteId" value={siteId} />
+      <div className="grid gap-2">
+        <Label htmlFor="kw-list">Keywords, one per line</Label>
+        <Textarea id="kw-list" name="keywords" rows={4} placeholder={"scim provisioning\nsso vs scim\nokta alternatives"} required />
+      </div>
+      {state && !state.ok ? <Alert variant="destructive"><AlertDescription>{state.error}</AlertDescription></Alert> : null}
+      {state?.ok ? <Alert variant="success"><AlertDescription>Added as topics.</AlertDescription></Alert> : null}
+      <Button type="submit" disabled={pending} className="w-fit">{pending ? "Adding…" : "Add as topics"}</Button>
+    </form>
+  );
+}
 
 export function TopicForm({ siteId, topic, onDone }: { siteId: string; topic?: TopicRow | null; onDone?: () => void }) {
   const [state, action, pending] = useActionState<ActionResult | null, FormData>(async (prev, form) => {

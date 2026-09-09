@@ -14,7 +14,7 @@ import type { SecretStore } from "@/lib/secrets/vault";
  *  - webhooks are verified, deduped in ops.webhook_events and handed to Inngest
  */
 
-export type ConnectorProvider = "slack" | "google" | "profound" | "webflow";
+export type ConnectorProvider = "slack" | "google" | "profound" | "webflow" | "website";
 export type ConnectionStatus = "pending" | "active" | "error" | "disabled" | "disconnected";
 export type SyncKind = "backfill" | "incremental" | "webhook" | "upload";
 

@@ -1,5 +1,7 @@
 "use server";
 
+import { LLM_NOT_CONFIGURED, llmConfigured } from "@/lib/ai/model";
+
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { canEdit, canManage, requireUser } from "@/lib/auth/session";
@@ -114,7 +116,7 @@ export async function createContentAction(_prev: ActionResult | null, form: Form
   if (!site || error) return fail(error ?? "Site not found.");
   const { id } = await createManualOpportunity(siteId, { title, topicId: topicId || null, questionId: questionId || null, format: (format || null) as never, note: note || null });
   if (startNow) {
-    if (!process.env.ANTHROPIC_API_KEY) return { ok: true, id, error: "Queued, but ANTHROPIC_API_KEY is not set so the pipeline cannot draft yet." };
+    if (!llmConfigured()) return { ok: true, id, error: `Queued, but the pipeline cannot draft yet. ${LLM_NOT_CONFIGURED}` };
     await inngest.send(contentPipelineRequested.create({ opportunityId: id, siteId, orgId: site.org_id, note: note || null }));
   }
   refresh(siteId);

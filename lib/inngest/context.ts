@@ -1,4 +1,5 @@
 import { defaultEmbedder } from "@/lib/ai/embed";
+import { llmConfigured } from "@/lib/ai/model";
 import { ScoredJsonError } from "@/lib/ai/scored-json";
 import { chunkDocument } from "@/lib/context/chunk";
 import { ensureBrandEntity } from "@/lib/context/entities";
@@ -85,7 +86,7 @@ export const contextIngestFunction = inngest.createFunction(
     }
     await step.sendEvent("completed", contextIngestCompleted.create({ orgId, documents, chunks, embedded, remaining }));
     // Facts need a model; without a key the candidates simply wait.
-    if (documents > 0 && process.env.ANTHROPIC_API_KEY) {
+    if (documents > 0 && llmConfigured()) {
       await step.sendEvent("extract", contextFactsExtractRequested.create({ orgId }));
     }
     return { orgId, documents, chunks, embedded, remaining };
@@ -101,7 +102,7 @@ export const contextExtractFactsFunction = inngest.createFunction(
   },
   async ({ event, step }) => {
     const { orgId, siteId = null, maxDocuments = EXTRACT_MAX_DOCS } = event.data;
-    if (!process.env.ANTHROPIC_API_KEY) return { orgId, skipped: "ANTHROPIC_API_KEY is not set" as const };
+    if (!llmConfigured()) return { orgId, skipped: "no model key (OPENROUTER_API_KEY / ANTHROPIC_API_KEY)" as const };
 
     const brand = await step.run("brand", async () => {
       const sql = appDb();

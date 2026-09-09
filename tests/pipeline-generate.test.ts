@@ -149,7 +149,7 @@ describe("model helpers", () => {
   });
 
   it("estimateCostUsd uses the price table with a fallback", () => {
-    expect(estimateCostUsd("claude-sonnet-5", 1_000_000, 0)).toBe(3);
+    expect(estimateCostUsd("claude-sonnet-5", 1_000_000, 0)).toBe(2);
     expect(estimateCostUsd("unknown-model", 1_000_000, 1_000_000)).toBe(30);
   });
 

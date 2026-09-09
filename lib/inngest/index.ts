@@ -26,6 +26,7 @@ export {
   sitePreflightRequested,
   sitePreflightCompleted,
   siteVerified,
+  siteOnboardingRequested,
   strategyCompetitorsAnalyzeRequested,
   publishingPushRequested,
 } from "./client";

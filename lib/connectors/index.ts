@@ -14,6 +14,8 @@ export { slackConnector } from "./slack";
 export { googleConnector } from "./google";
 export { profoundConnector } from "./profound";
 export { webflowConnector } from "./webflow";
+export { websiteConnector } from "./website";
+import { websiteConnector } from "./website";
 
 /** Provider → adapter. Gong/Zoom/Fireflies land here as the same shape. */
 export const connectors: Record<ConnectorProvider, Connector<never>> = {
@@ -21,6 +23,7 @@ export const connectors: Record<ConnectorProvider, Connector<never>> = {
   google: googleConnector as Connector<never>,
   profound: profoundConnector as Connector<never>,
   webflow: webflowConnector as Connector<never>,
+  website: websiteConnector as Connector<never>,
 };
 
 export function getConnector(provider: ConnectorProvider): Connector<never> {
