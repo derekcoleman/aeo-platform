@@ -1,7 +1,7 @@
 import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
 import { classifyUserAgent } from "@/lib/analytics/bots";
 import { hmacHex, verifyRequestSignature } from "@/lib/tenancy/signature";
-import { strayAuthRedirect } from "@/lib/auth/callback";
+import { canonicalHostRedirect, strayAuthRedirect } from "@/lib/auth/callback";
 import { refreshSession } from "@/lib/auth/supabase";
 import {
   HEADER,
@@ -51,6 +51,10 @@ export async function middleware(req: NextRequest, event: NextFetchEvent) {
     // A sign-in code that Supabase delivered to the wrong page (its Site URL
     // fallback when the callback is not on the allow list) is still a valid
     // sign-in: forward it to the callback instead of dropping it.
+    // One hostname for the app, so auth cookies always land where the
+    // callback reads them (see canonicalHostRedirect).
+    const canonical = canonicalHostRedirect(req.nextUrl);
+    if (canonical) return NextResponse.redirect(canonical, 308);
     const stray = strayAuthRedirect(req.nextUrl);
     if (stray) return NextResponse.redirect(stray);
 

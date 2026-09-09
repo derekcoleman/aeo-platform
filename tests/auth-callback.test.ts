@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasAuthParams, safeNext, strayAuthRedirect } from "@/lib/auth/callback";
+import { canonicalHostRedirect, hasAuthParams, safeNext, strayAuthRedirect } from "@/lib/auth/callback";
 
 describe("safeNext", () => {
   it("accepts same-origin paths only", () => {
@@ -39,5 +39,30 @@ describe("strayAuthRedirect", () => {
     expect(strayAuthRedirect(u("/audit?x=1"))).toBeNull();
     expect(strayAuthRedirect(u("/auth/callback?code=abc"))).toBeNull();
     expect(hasAuthParams(u("/?type=magiclink"))).toBe(false);
+  });
+});
+
+describe("canonicalHostRedirect", () => {
+  const prod = { APP_URL: "https://aeo-platform-kurby.vercel.app", VERCEL_ENV: "production" };
+
+  it("sends an alias host to APP_URL with path and query intact", () => {
+    const r = canonicalHostRedirect(new URL("https://aeo-platform-dusky.vercel.app/login?next=%2Fapp"), prod);
+    expect(r?.toString()).toBe("https://aeo-platform-kurby.vercel.app/login?next=%2Fapp");
+  });
+
+  it("does nothing on the canonical host itself", () => {
+    expect(canonicalHostRedirect(new URL("https://aeo-platform-kurby.vercel.app/app"), prod)).toBeNull();
+  });
+
+  it("leaves previews and local dev alone", () => {
+    const u = new URL("https://aeo-platform-git-branch-kurby.vercel.app/login");
+    expect(canonicalHostRedirect(u, { ...prod, VERCEL_ENV: "preview" })).toBeNull();
+    expect(canonicalHostRedirect(new URL("http://localhost:3000/login"), { APP_URL: prod.APP_URL })).toBeNull();
+  });
+
+  it("ignores a missing or malformed APP_URL", () => {
+    const u = new URL("https://aeo-platform-dusky.vercel.app/");
+    expect(canonicalHostRedirect(u, { VERCEL_ENV: "production" })).toBeNull();
+    expect(canonicalHostRedirect(u, { VERCEL_ENV: "production", APP_URL: "not a url" })).toBeNull();
   });
 });
