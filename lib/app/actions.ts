@@ -22,7 +22,8 @@ import {
 import { loadApproval, recordDecision } from "@/lib/pipeline/approvals";
 import { loadOpportunity, markOpportunity } from "@/lib/pipeline/opportunities";
 import { createPreflight } from "@/lib/proxy/store";
-import { createOrganization, createSite, createSiteSchema, loadSite, setSiteStatus, SiteInputError } from "./store";
+import { createOrganization, createSite, createSiteSchema, deleteSite, loadSite, setSiteStatus, SiteInputError } from "./store";
+import { vaultSecrets } from "@/lib/secrets/vault";
 
 /**
  * Server actions behind the dashboard forms. Each one re-checks the session
@@ -79,6 +80,21 @@ export async function createSiteAction(_prev: ActionResult | null, form: FormDat
   }
   revalidatePath("/app");
   redirect(`/app/sites/${siteId}` as Route);
+}
+
+/**
+ * Delete a project. Owners and admins only, and the caller must type the
+ * project's domain: this removes published pages, content, topics, prompts,
+ * connectors and telemetry for the project in one go.
+ */
+export async function deleteSiteAction(siteId: string, confirmation: string): Promise<ActionResult> {
+  const { user, site, error } = await siteForAction(siteId, "manage");
+  if (!site) return fail(error ?? "Project not found.");
+  if (error) return fail(error);
+  if (confirmation.trim().toLowerCase() !== site.canonical_domain.toLowerCase()) return fail(`Type ${site.canonical_domain} to confirm.`);
+  await deleteSite(site, user.id, vaultSecrets());
+  revalidatePath("/app");
+  redirect("/app" as Route);
 }
 
 async function siteForAction(siteId: string, need: "edit" | "manage") {

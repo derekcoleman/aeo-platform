@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type postgres from "postgres";
 import { z } from "zod";
+import type { SecretStore } from "@/lib/secrets/vault";
+import { siteResolver } from "@/lib/tenancy/store";
 import type { BusinessProfile } from "@/lib/onboarding/profile";
 import { keywordsToTopics, parseKeywords } from "@/lib/onboarding/profile";
 import { appDb } from "@/lib/db/app";
@@ -169,4 +171,29 @@ export async function loadSite(siteId: string, sql: postgres.Sql = appDb()): Pro
 export async function setSiteStatus(siteId: string, orgId: string, status: "paused" | "active" | "disabled", userId: string, sql: postgres.Sql = appDb()): Promise<void> {
   await sql`update app.sites set status = ${status} where id = ${siteId} and org_id = ${orgId}`;
   await sql`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, after) values (${orgId}, ${userId}, 'site.status', 'site', ${siteId}, ${sql.json({ status } as never)})`;
+}
+
+/**
+ * Delete a project and everything that hangs off it. Every site-scoped table
+ * cascades from app.sites, so the database side is one statement; what would
+ * otherwise leak is the Vault secret behind each site-scoped connector (a
+ * Webflow token, a Profound key) and the edge-host cache entry that would
+ * keep resolving a deleted site for a while. Both are handled here. The
+ * caller has already checked the role and the typed confirmation.
+ */
+export async function deleteSite(site: Pick<SiteRow, "id" | "org_id" | "name" | "canonical_domain" | "path_prefix" | "edge_hostname">, userId: string, secrets: SecretStore, sql: postgres.Sql = appDb()): Promise<void> {
+  const refs = await sql<{ id: string; secret_ref: string | null }[]>`select id, secret_ref from context.context_connections where site_id = ${site.id} and org_id = ${site.org_id}`;
+  for (const r of refs) {
+    if (r.secret_ref) await secrets.delete(r.secret_ref).catch((e) => console.warn(`[sites] secret delete failed for connection ${r.id}: ${e instanceof Error ? e.message : String(e)}`));
+  }
+  await sql.begin(async (tx) => {
+    await tx`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, before)
+             values (${site.org_id}, ${userId}, 'site.delete', 'site', ${site.id}, ${tx.json({ name: site.name, domain: site.canonical_domain, pathPrefix: site.path_prefix, edgeHostname: site.edge_hostname, connections: refs.length } as never)})`;
+    await tx`delete from app.sites where id = ${site.id} and org_id = ${site.org_id}`;
+  });
+  try {
+    siteResolver().invalidate(site.edge_hostname);
+  } catch {
+    // The resolver needs Supabase env; without it there is no cache to clear.
+  }
 }

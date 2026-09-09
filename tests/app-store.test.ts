@@ -83,3 +83,22 @@ describe("createSite", () => {
     await expect(createSite(USER, input, dup)).rejects.toThrow(/already exists/);
   });
 });
+
+describe("deleteSite", () => {
+  it("deletes connector secrets first, writes the audit row, then deletes the site (cascade does the rest)", async () => {
+    const { deleteSite } = await import("@/lib/app/store");
+    const sql = fakeSql([[/select id, secret_ref from context\.context_connections/, () => [{ id: "c1", secret_ref: "ctx/c1" }, { id: "c2", secret_ref: null }]]]);
+    const deleted: string[] = [];
+    const secrets = { put: async () => "", get: async () => null, delete: async (ref: string) => { deleted.push(ref); } };
+    await deleteSite({ id: "s1", org_id: ORG, name: "Acme", canonical_domain: "acme.com", path_prefix: "/resources", edge_hostname: "acme-x.blogedge.aeo.app" }, USER, secrets, sql);
+    expect(deleted).toEqual(["ctx/c1"]);
+    const texts = sql.queries.map((q) => q.text);
+    const audit = texts.findIndex((t) => t.startsWith("insert into app.audit_log"));
+    const del = texts.findIndex((t) => t.startsWith("delete from app.sites"));
+    expect(audit).toBeGreaterThan(-1);
+    expect(del).toBeGreaterThan(audit);
+    expect(sql.queries[del]!.values).toEqual(["s1", ORG]);
+    expect(sql.queries[audit]!.text).toContain("'site.delete'");
+    expect(sql.queries[audit]!.values.slice(0, 3)).toEqual([ORG, USER, "s1"]);
+  });
+});
