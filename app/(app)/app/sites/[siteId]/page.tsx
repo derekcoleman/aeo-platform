@@ -20,6 +20,7 @@ import { buildInstall } from "@/lib/proxy/install";
 import { crawlSummary } from "@/lib/analytics/crawl";
 import { CrawlersPanel } from "@/components/app/crawlers-panel";
 import { BusinessProfileCard } from "@/components/app/business-profile";
+import { DeleteSiteDialog } from "@/components/app/delete-site-dialog";
 import { canEdit } from "@/lib/auth/session";
 import { listTopics } from "@/lib/strategy/topics";
 
@@ -73,6 +74,7 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
         <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/publishing` as Route}>Publishing</Link></Button>
         {manage && site.status === "active" ? <ActionButton size="sm" variant="outline" action={setSiteStatusAction.bind(null, siteId, "paused")}>Pause</ActionButton> : null}
         {manage && site.status === "paused" ? <ActionButton size="sm" variant="outline" action={setSiteStatusAction.bind(null, siteId, "active")}>Resume</ActionButton> : null}
+        {manage ? <DeleteSiteDialog siteId={siteId} domain={site.canonical_domain} name={site.name} published={published.length} /> : null}
       </PageHeader>
 
       {nextStep ? (
