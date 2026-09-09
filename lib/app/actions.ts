@@ -1,6 +1,6 @@
 "use server";
 
-import { dispatch } from "@/lib/jobs/dispatch";
+import { dispatch, queueJob } from "@/lib/jobs/dispatch";
 import { runSiteOnboarding } from "@/lib/onboarding/run";
 
 import { revalidatePath } from "next/cache";
@@ -110,7 +110,8 @@ export async function runPreflightAction(siteId: string, kind: "preflight" | "cr
   if (!site) return fail(error!);
   if (error) return fail(error);
   const { id } = await createPreflight(siteId, kind);
-  await inngest.send(sitePreflightRequested.create({ siteId, orgId: site.org_id, kind, preflightId: id }));
+  const jobError = await queueJob(sitePreflightRequested.create({ siteId, orgId: site.org_id, kind, preflightId: id }));
+  if (jobError) return fail(jobError);
   revalidatePath(`/app/sites/${siteId}`);
   return { ok: true, id };
 }
@@ -119,7 +120,8 @@ export async function runHealthCheckAction(siteId: string, kind: "monitor" | "ve
   const { site, error } = await siteForAction(siteId, "edit");
   if (!site) return fail(error!);
   if (error) return fail(error);
-  await inngest.send(siteHealthCheckRequested.create({ siteId, orgId: site.org_id, kind }));
+  const jobError = await queueJob(siteHealthCheckRequested.create({ siteId, orgId: site.org_id, kind }));
+  if (jobError) return fail(jobError);
   revalidatePath(`/app/sites/${siteId}`);
   return { ok: true };
 }
@@ -128,7 +130,8 @@ export async function scanOpportunitiesAction(siteId: string): Promise<ActionRes
   const { site, error } = await siteForAction(siteId, "edit");
   if (!site) return fail(error!);
   if (error) return fail(error);
-  await inngest.send([opportunitiesScanRequested.create({ siteId, orgId: site.org_id }), contextSignalsScanRequested.create({ siteId, orgId: site.org_id })]);
+  const jobError = await queueJob([opportunitiesScanRequested.create({ siteId, orgId: site.org_id }), contextSignalsScanRequested.create({ siteId, orgId: site.org_id })]);
+  if (jobError) return fail(jobError);
   revalidatePath(`/app/sites/${siteId}`);
   return { ok: true };
 }
@@ -141,7 +144,8 @@ export async function startPipelineAction(opportunityId: string, note?: string):
   if (error) return fail(error);
   if (opp.status !== "open") return fail(`Opportunity is already ${opp.status}.`);
   await markOpportunity(opportunityId, "queued");
-  await inngest.send(contentPipelineRequested.create({ opportunityId, siteId: opp.site_id, orgId: opp.org_id, note: note?.trim() || null }));
+  const jobError = await queueJob(contentPipelineRequested.create({ opportunityId, siteId: opp.site_id, orgId: opp.org_id, note: note?.trim() || null }));
+  if (jobError) return fail(jobError);
   revalidatePath(`/app/sites/${opp.site_id}`);
   return { ok: true };
 }
@@ -166,8 +170,9 @@ export async function decideApprovalAction(approvalId: string, decision: "approv
   const by = { userId: user.id, name: user.name ?? user.email };
   const { applied } = await recordDecision(approvalId, { decision, by, source: "app", note: note?.trim() || null });
   if (!applied) return fail("This approval was already decided.");
-  await inngest.send(approvalDecided.create({ approvalId, decision, by, source: "app", note: note?.trim() || null, orgId: approval.org_id }));
+  const jobError = await queueJob(approvalDecided.create({ approvalId, decision, by, source: "app", note: note?.trim() || null, orgId: approval.org_id }), undefined, "pipeline resume");
   revalidatePath(`/app/sites/${approval.site_id}`);
+  if (jobError) return fail(`Decision saved, but the pipeline could not resume. ${jobError}`);
   return { ok: true };
 }
 

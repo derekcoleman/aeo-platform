@@ -1,5 +1,7 @@
 "use server";
 
+import { queueJob } from "@/lib/jobs/dispatch";
+
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { canManage, requireUser } from "@/lib/auth/session";
@@ -158,6 +160,7 @@ export async function testTargetAction(siteId: string, targetId: string): Promis
 export async function pushItemAction(siteId: string, contentItemId: string, targetId: string | null, force = true): Promise<ActionResult> {
   const { site, error } = await guard(siteId);
   if (!site || error) return fail(error ?? "Site not found.");
-  await inngest.send(publishingPushRequested.create({ siteId, orgId: site.org_id, contentItemId, targetId: targetId ?? null, force }));
+  const jobError = await queueJob(publishingPushRequested.create({ siteId, orgId: site.org_id, contentItemId, targetId: targetId ?? null, force }));
+  if (jobError) return fail(jobError);
   return { ok: true };
 }
