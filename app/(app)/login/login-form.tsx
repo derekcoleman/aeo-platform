@@ -14,6 +14,12 @@ type Phase = { kind: "idle" } | { kind: "sending"; via: "email" | "google" } | {
 
 const REQUEST_TIMEOUT_MS = 20_000;
 
+/** Codes the callback route sends back on /login?error=. Anything else is shown as-is. */
+const CALLBACK_ERRORS: Record<string, string> = {
+  missing_code: "That link did not carry a sign-in code. Request a new one below.",
+  verifier_missing: "That link was opened in a different browser, or on a different address, than the one it was requested from. Request a new link here and open it in this same browser.",
+};
+
 function describe(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
   if (/timed out/i.test(msg)) return "Supabase did not answer within 20 seconds. Check your connection and try again.";
@@ -28,7 +34,7 @@ function describe(e: unknown): string {
  * timeout, Supabase error) ends in a visible message, never a stuck button.
  */
 export function LoginForm({ next, initialError, supabase }: { next: string; initialError: string | null; supabase: BrowserSupabaseConfig | null }) {
-  const [phase, setPhase] = useState<Phase>(initialError ? { kind: "error", message: initialError } : { kind: "idle" });
+  const [phase, setPhase] = useState<Phase>(initialError ? { kind: "error", message: CALLBACK_ERRORS[initialError] ?? initialError } : { kind: "idle" });
   // Query-free so it matches an exact allow-list entry in Supabase; the
   // destination rides in a short-lived cookie the callback reads and clears.
   const callback = () => {

@@ -44,3 +44,26 @@ export function strayAuthRedirect(url: URL): URL | null {
   if (dest) target.searchParams.set("next", dest);
   return target;
 }
+
+/**
+ * The app must live on exactly one hostname: Supabase's PKCE verifier and
+ * the session are cookies, and cookies do not cross hosts. Vercel gives a
+ * project several aliases (`<project>-<team>.vercel.app`,
+ * `<project>-<hash>.vercel.app`, ...); a link requested on one and finished
+ * on another fails with "code verifier not found". When APP_URL is set and
+ * this is the production deployment, every other host redirects to it,
+ * path and query intact. Previews and local dev are left alone.
+ */
+export function canonicalHostRedirect(url: URL, env: Record<string, string | undefined> = process.env): URL | null {
+  const app = env.APP_URL?.trim();
+  if (!app || env.VERCEL_ENV !== "production") return null;
+  let canonical: URL;
+  try {
+    canonical = new URL(app);
+  } catch {
+    return null;
+  }
+  if (canonical.host === url.host) return null;
+  const target = new URL(url.pathname + url.search, canonical.origin);
+  return target;
+}

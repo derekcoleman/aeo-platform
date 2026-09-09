@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
   const { error } = code
     ? await supabase.auth.exchangeCodeForSession(code)
     : await supabase.auth.verifyOtp({ token_hash: tokenHash!, type: type! });
-  if (error) return fail(error.message);
+  if (error) return fail(error.code === "pkce_code_verifier_not_found" ? "verifier_missing" : error.message);
 
   const res = NextResponse.redirect(new URL(target, url.origin));
   res.cookies.delete(NEXT_COOKIE);
