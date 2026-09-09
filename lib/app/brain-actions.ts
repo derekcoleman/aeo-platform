@@ -1,5 +1,7 @@
 "use server";
 
+import { LLM_NOT_CONFIGURED, llmConfigured } from "@/lib/ai/model";
+
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { requireUser, canEdit, canManage } from "@/lib/auth/session";
@@ -85,7 +87,7 @@ export async function ingestNowAction(siteId: string): Promise<ActionResult> {
 export async function extractFactsAction(siteId: string): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
-  if (!process.env.ANTHROPIC_API_KEY) return fail("ANTHROPIC_API_KEY is not set; fact extraction needs a model.");
+  if (!llmConfigured()) return fail(LLM_NOT_CONFIGURED);
   await inngest.send(contextFactsExtractRequested.create({ orgId: site.org_id, siteId }));
   return { ok: true };
 }
@@ -108,7 +110,7 @@ export async function dismissSignalAction(siteId: string, signalId: string): Pro
 export async function draftManifestAction(siteId: string): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "manage");
   if (!site || error) return fail(error ?? "Site not found.");
-  if (!process.env.ANTHROPIC_API_KEY) return fail("ANTHROPIC_API_KEY is not set; drafting needs a model.");
+  if (!llmConfigured()) return fail(LLM_NOT_CONFIGURED);
   const entities = await listEntities(site.org_id, appDb(), ["brand"]);
   const brand = entities[0]?.name ?? site.name;
   const row = await draftManifestFromFacts(modelFor("context.manifest.draft"), { orgId: site.org_id, siteId, brand: { name: brand, domain: site.canonical_domain } });

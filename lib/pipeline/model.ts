@@ -1,5 +1,5 @@
 import type { ZodType } from "zod";
-import { anthropicModel, unavailableModel, type TextModel } from "@/lib/ai/model";
+import { modelFromEnv, type TextModel } from "@/lib/ai/model";
 import { parseScoredJson } from "@/lib/ai/scored-json";
 import { appDb } from "@/lib/db/app";
 import type postgres from "postgres";
@@ -28,7 +28,7 @@ const DEFAULTS: Record<TaskKey, string> = {
   "pipeline.brief": "claude-opus-5",
   "pipeline.draft": "claude-opus-5",
   "pipeline.qa.judge": "claude-sonnet-5",
-  "context.facts.extract": "claude-haiku-4-5-20251001",
+  "context.facts.extract": "claude-haiku-4-5",
   "context.manifest.draft": "claude-sonnet-5",
 };
 
@@ -37,19 +37,24 @@ export function modelIdFor(task: TaskKey, env: NodeJS.ProcessEnv = process.env):
 }
 
 export function modelFor(task: TaskKey, env: NodeJS.ProcessEnv = process.env): TextModel {
-  const id = modelIdFor(task, env);
-  return env.ANTHROPIC_API_KEY ? anthropicModel(id, env.ANTHROPIC_API_KEY) : unavailableModel(`ANTHROPIC_API_KEY is not set (task ${task})`);
+  return modelFromEnv(modelIdFor(task, env), env);
 }
 
-/** USD per million tokens, [input, output]. Overridable; billing truth is the provider invoice, not this. */
+/**
+ * USD per million tokens, [input, output], Anthropic list prices. Used only
+ * when the provider did not report spend (OpenRouter does); billing truth is
+ * the provider invoice, not this. Keys match both id spellings.
+ */
 const PRICE_PER_M: Record<string, [number, number]> = {
-  "claude-opus-5": [15, 75],
-  "claude-sonnet-5": [3, 15],
-  "claude-haiku-4-5-20251001": [1, 5],
+  "claude-opus-5": [5, 25],
+  "claude-sonnet-5": [2, 10],
+  "claude-haiku-4-5": [1, 5],
+  "claude-haiku-4.5": [1, 5],
 };
 
 export function estimateCostUsd(model: string, inputTokens: number, outputTokens: number): number {
-  const key = Object.keys(PRICE_PER_M).find((k) => model.startsWith(k));
+  const bare = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
+  const key = Object.keys(PRICE_PER_M).find((k) => bare.startsWith(k));
   const [inP, outP] = key ? PRICE_PER_M[key]! : [5, 25];
   return Math.round(((inputTokens * inP + outputTokens * outP) / 1_000_000) * 1e5) / 1e5;
 }
@@ -99,7 +104,7 @@ export async function runJsonTask<T>(
     promptVersion: input.promptVersion,
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
-    costUsd: estimateCostUsd(usage.model, usage.inputTokens, usage.outputTokens),
+    costUsd: usage.costUsd ?? estimateCostUsd(usage.model, usage.inputTokens, usage.outputTokens),
   };
   await recordLlmCall(task, scope, run, sql);
   const value = parseScoredJson<T>(text, schema);

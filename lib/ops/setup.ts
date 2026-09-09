@@ -47,7 +47,7 @@ export function envChecks(env: Env = process.env): SetupCheck[] {
     envCheck(env, "edge", "env.edge_domain", "AEO_EDGE_DOMAIN", ["AEO_EDGE_DOMAIN"], { fix: "Set AEO_EDGE_DOMAIN (e.g. blogedge.example.com) and add the wildcard to Vercel. See docs/EDGE_SETUP.md." }),
     envCheck(env, "edge", "env.mirror", "R2 mirror origin", ["AEO_MIRROR_ORIGIN"], { fix: "Optional until the R2 mirror ships; the Worker falls back to Cloudflare's cache without it.", optional: true }),
     envCheck(env, "jobs", "env.inngest", "Inngest keys", ["INNGEST_EVENT_KEY"], { fix: "Connect the Vercel project in the Inngest dashboard (sets INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY)." }),
-    envCheck(env, "jobs", "env.anthropic", "Anthropic API key", ["ANTHROPIC_API_KEY"], { fix: "Set ANTHROPIC_API_KEY; fact extraction, briefs and drafts are no-ops without it." }),
+    envCheck(env, "jobs", "env.llm", "Model provider key", ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"], { fix: "Set OPENROUTER_API_KEY (or ANTHROPIC_API_KEY); fact extraction, briefs and drafts are no-ops without it." }),
     envCheck(env, "integrations", "env.oauth_state", "OAuth state secret", ["OAUTH_STATE_SECRET"], { fix: "Set OAUTH_STATE_SECRET (≥16 random chars) before connecting Slack or Google." }),
     envCheck(env, "integrations", "env.slack", "Slack app", ["SLACK_CLIENT_ID"], { fix: "Create the Slack app and set SLACK_CLIENT_ID / SLACK_CLIENT_SECRET / SLACK_SIGNING_SECRET.", optional: true }),
     envCheck(env, "integrations", "env.google", "Google OAuth client", ["GOOGLE_OAUTH_CLIENT_ID"], { fix: "Create a Google OAuth client with the Search Console and Analytics read-only scopes.", optional: true }),
