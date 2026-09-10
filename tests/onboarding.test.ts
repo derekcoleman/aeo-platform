@@ -98,10 +98,29 @@ describe("parseKeywords / keywordsToTopics", () => {
     expect(sql.queries.filter((q) => q.text.includes("insert into measure.topics"))).toHaveLength(1);
   });
 
-  it("businessProfileSchema requires a few keywords and fills the rest with defaults", () => {
+  it("businessProfileSchema fills blanks with defaults and never rejects long or odd model output", () => {
     const p = businessProfileSchema.parse({ name: "Acme", oneLiner: "IAM for mid-market", category: "Identity", keywords: ["scim", "sso", "provisioning"] });
     expect(p.products).toEqual([]);
     expect(p.pricingModel).toBeNull();
-    expect(() => businessProfileSchema.parse({ name: "Acme", oneLiner: "x", category: "y", keywords: ["a"] })).toThrow();
+    expect(p.keywords).toEqual(["scim", "sso", "provisioning"]);
+
+    const long = businessProfileSchema.parse({
+      name: "Acme",
+      oneLiner: "x",
+      category: "y",
+      pricingModel: "Per seat, ".repeat(100),
+      keywords: ["a", "SCIM", "scim", 42, " sso ", "k".repeat(200)],
+      products: [{ name: "One", description: "d".repeat(500) }, "Two", { description: "no name" }, null],
+      competitors: "Okta",
+      differentiators: null,
+    });
+    expect(long.pricingModel).toHaveLength(400);
+    expect(long.keywords).toEqual(["SCIM", "42", "sso", "k".repeat(80)]);
+    expect(long.products).toEqual([{ name: "One", description: "d".repeat(300) }, { name: "Two", description: "" }]);
+    expect(long.competitors).toEqual([]);
+    expect(long.differentiators).toEqual([]);
+
+    expect(() => businessProfileSchema.parse({ name: "", oneLiner: "x", category: "y" })).toThrow();
+    expect(() => businessProfileSchema.parse({ oneLiner: "x", category: "y" })).toThrow();
   });
 });

@@ -14,19 +14,54 @@ import { createTopic, listTopics, topicInputSchema } from "@/lib/strategy/topics
  * and the source of the first entities (brand, products, competitors) and
  * the keyword suggestions the Strategy page turns into topics.
  */
+const dedupe = (items: string[]): string[] => {
+  const seen = new Set<string>();
+  return items.filter((s) => {
+    const k = s.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+};
+const asText = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v)).replace(/\s+/g, " ").trim();
+
+/** A string the model must supply, clipped to `max` characters rather than rejected. */
+const required = (max: number) => z.unknown().transform(asText).pipe(z.string().min(1)).transform((s) => s.slice(0, max));
+/** An optional string; empty or missing becomes "" (or null when `nullable`), long values are clipped. */
+const optional = (max: number) => z.unknown().optional().transform((v) => asText(v).slice(0, max));
+const optionalOrNull = (max: number) => z.unknown().optional().transform((v) => asText(v).slice(0, max) || null);
+/** A list of short strings: non-strings and too-short items dropped, long items clipped, deduped, capped. */
+const list = (max: number, itemMax: number, itemMin = 1) =>
+  z.unknown().optional().transform((v) => (Array.isArray(v) ? dedupe(v.map(asText).map((s) => s.slice(0, itemMax)).filter((s) => s.length >= itemMin)).slice(0, max) : []));
+
+/**
+ * Model output is data, so length limits clip instead of failing the run:
+ * one over-long `pricingModel` must never fail a whole crawl. Only `name`,
+ * `oneLiner` and `category` are required.
+ */
 export const businessProfileSchema = z.object({
-  name: z.string().min(1).max(120),
-  oneLiner: z.string().min(1).max(300),
-  category: z.string().min(1).max(120),
-  description: z.string().max(1500).default(""),
-  products: z.array(z.object({ name: z.string().min(1).max(120), description: z.string().max(300).default("") })).max(15).default([]),
-  audiences: z.array(z.string().min(1).max(120)).max(10).default([]),
-  useCases: z.array(z.string().min(1).max(160)).max(15).default([]),
-  differentiators: z.array(z.string().min(1).max(200)).max(10).default([]),
-  competitors: z.array(z.string().min(1).max(120)).max(15).default([]),
-  keywords: z.array(z.string().min(2).max(80)).min(3).max(30),
-  pricingModel: z.string().max(200).nullable().default(null),
-  locations: z.array(z.string().min(1).max(120)).max(10).default([]),
+  name: required(120),
+  oneLiner: required(300),
+  category: required(120),
+  description: optional(1500),
+  products: z
+    .unknown()
+    .optional()
+    .transform((v) =>
+      Array.isArray(v)
+        ? v
+            .map((item) => (item && typeof item === "object" ? { name: asText((item as { name?: unknown }).name).slice(0, 120), description: asText((item as { description?: unknown }).description).slice(0, 300) } : { name: asText(item).slice(0, 120), description: "" }))
+            .filter((item) => item.name.length > 0)
+            .slice(0, 15)
+        : [],
+    ),
+  audiences: list(10, 120),
+  useCases: list(15, 160),
+  differentiators: list(10, 200),
+  competitors: list(15, 120),
+  keywords: list(30, 80, 2),
+  pricingModel: optionalOrNull(400),
+  locations: list(10, 120),
 });
 export type BusinessProfile = z.infer<typeof businessProfileSchema>;
 
