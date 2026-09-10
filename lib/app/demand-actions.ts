@@ -1,9 +1,11 @@
 "use server";
 
+import { queueJob } from "@/lib/jobs/dispatch";
+
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { canEdit, requireUser } from "@/lib/auth/session";
-import { demandMineRequested, inngest, serpTrackRequested } from "@/lib/inngest";
+import { demandMineRequested, serpTrackRequested } from "@/lib/inngest";
 import type { ActionResult } from "./actions";
 import { setQuestionTracking, trackTopQuestions, trackedQuestionIds } from "./demand";
 import { loadSite } from "./store";
@@ -38,7 +40,8 @@ export async function mineDemandAction(_prev: ActionResult | null, form: FormDat
   if (!serpConfigured()) return fail("No SERP provider configured (DATAFORSEO_LOGIN / SERPAPI_KEY).");
   const list = [...new Set(seeds.split(/[\n,]/).map((s) => s.trim()).filter((s) => s.length >= 2))].slice(0, 50);
   if (list.length === 0) return fail("Add at least one seed term.");
-  await inngest.send(demandMineRequested.create({ siteId, orgId: site.org_id, seeds: list, locale: { country: country.toLowerCase(), language: language.toLowerCase() }, depth, trackTop, paa }));
+  const jobError = await queueJob(demandMineRequested.create({ siteId, orgId: site.org_id, seeds: list, locale: { country: country.toLowerCase(), language: language.toLowerCase() }, depth, trackTop, paa }));
+  if (jobError) return fail(jobError);
   return { ok: true };
 }
 
@@ -64,6 +67,7 @@ export async function snapshotNowAction(siteId: string): Promise<ActionResult> {
   if (!serpConfigured()) return fail("No SERP provider configured (DATAFORSEO_LOGIN / SERPAPI_KEY).");
   const ids = await trackedQuestionIds(siteId, 200);
   if (ids.length === 0) return fail("Nothing is tracked yet.");
-  await inngest.send(serpTrackRequested.create({ siteId, orgId: site.org_id, questionIds: ids }));
+  const jobError = await queueJob(serpTrackRequested.create({ siteId, orgId: site.org_id, questionIds: ids }));
+  if (jobError) return fail(jobError);
   return { ok: true };
 }

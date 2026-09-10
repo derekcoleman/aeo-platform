@@ -1,5 +1,7 @@
 "use server";
 
+import { queueJob } from "@/lib/jobs/dispatch";
+
 import { LLM_NOT_CONFIGURED, llmConfigured } from "@/lib/ai/model";
 
 import { revalidatePath } from "next/cache";
@@ -9,7 +11,7 @@ import { connectorContext, createConnection, setFeature } from "@/lib/connectors
 import { PROFOUND_FEATURE } from "@/lib/connectors/profound";
 import { ProfoundApi, ProfoundApiError } from "@/lib/connectors/profound/api";
 import { appDb } from "@/lib/db/app";
-import { connectorSyncRequested, contentPipelineRequested, inngest, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
+import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
 import { createManualOpportunity } from "@/lib/pipeline/opportunities";
 import { addManualPrompt, assignQuestionsToTopics, createTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
 import type { ActionResult } from "./actions";
@@ -117,7 +119,8 @@ export async function createContentAction(_prev: ActionResult | null, form: Form
   const { id } = await createManualOpportunity(siteId, { title, topicId: topicId || null, questionId: questionId || null, format: (format || null) as never, note: note || null });
   if (startNow) {
     if (!llmConfigured()) return { ok: true, id, error: `Queued, but the pipeline cannot draft yet. ${LLM_NOT_CONFIGURED}` };
-    await inngest.send(contentPipelineRequested.create({ opportunityId: id, siteId, orgId: site.org_id, note: note || null }));
+    const jobError = await queueJob(contentPipelineRequested.create({ opportunityId: id, siteId, orgId: site.org_id, note: note || null }), undefined, "pipeline");
+    if (jobError) return { ok: true, id, error: `Created, but not started. ${jobError}` };
   }
   refresh(siteId);
   return { ok: true, id };
@@ -126,7 +129,8 @@ export async function createContentAction(_prev: ActionResult | null, form: Form
 export async function analyzeCompetitorsAction(siteId: string, topicId?: string | null): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
-  await inngest.send(strategyCompetitorsAnalyzeRequested.create({ siteId, orgId: site.org_id, topicId: topicId ?? null }));
+  const jobError = await queueJob(strategyCompetitorsAnalyzeRequested.create({ siteId, orgId: site.org_id, topicId: topicId ?? null }));
+  if (jobError) return fail(jobError);
   return { ok: true };
 }
 
@@ -172,7 +176,8 @@ export async function connectProfoundAction(_prev: ActionResult | null, form: Fo
     ctx.sql,
   );
   await setFeature(site.org_id, PROFOUND_FEATURE, true);
-  await inngest.send(connectorSyncRequested.create({ connectionId: conn.id, orgId: site.org_id, kind: "backfill" }));
+  const jobError = await queueJob(connectorSyncRequested.create({ connectionId: conn.id, orgId: site.org_id, kind: "backfill" }));
+  if (jobError) return fail(jobError);
   refresh(siteId);
   return { ok: true, id: conn.id };
 }

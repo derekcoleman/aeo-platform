@@ -1,5 +1,7 @@
 "use server";
 
+import { queueJob } from "@/lib/jobs/dispatch";
+
 import { LLM_NOT_CONFIGURED, llmConfigured } from "@/lib/ai/model";
 
 import { revalidatePath } from "next/cache";
@@ -10,7 +12,7 @@ import { rejectFact, verifyFact } from "@/lib/context/facts";
 import { activateManifest, draftManifestFromFacts, insertManifest, manifestDocSchema } from "@/lib/context/manifest";
 import { entityTypeSchema } from "@/lib/context/types";
 import { appDb } from "@/lib/db/app";
-import { contextFactsExtractRequested, contextIngestRequested, contextSignalsScanRequested, inngest } from "@/lib/inngest";
+import { contextFactsExtractRequested, contextIngestRequested, contextSignalsScanRequested } from "@/lib/inngest";
 import { modelFor } from "@/lib/pipeline/model";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";
@@ -80,7 +82,8 @@ export async function upsertEntityAction(_prev: ActionResult | null, form: FormD
 export async function ingestNowAction(siteId: string): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
-  await inngest.send(contextIngestRequested.create({ orgId: site.org_id }));
+  const jobError = await queueJob(contextIngestRequested.create({ orgId: site.org_id }));
+  if (jobError) return fail(jobError);
   return { ok: true };
 }
 
@@ -88,14 +91,16 @@ export async function extractFactsAction(siteId: string): Promise<ActionResult> 
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
   if (!llmConfigured()) return fail(LLM_NOT_CONFIGURED);
-  await inngest.send(contextFactsExtractRequested.create({ orgId: site.org_id, siteId }));
+  const jobError = await queueJob(contextFactsExtractRequested.create({ orgId: site.org_id, siteId }));
+  if (jobError) return fail(jobError);
   return { ok: true };
 }
 
 export async function scanSignalsAction(siteId: string): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
-  await inngest.send(contextSignalsScanRequested.create({ siteId, orgId: site.org_id }));
+  const jobError = await queueJob(contextSignalsScanRequested.create({ siteId, orgId: site.org_id }));
+  if (jobError) return fail(jobError);
   return { ok: true };
 }
 
