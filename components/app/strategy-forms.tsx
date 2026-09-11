@@ -198,14 +198,14 @@ export function ProfoundConnectForm({ siteId }: { siteId: string }) {
       </div>
       <div className="grid gap-1">
         <Label>API base URL (only if Profound gave you a different one)</Label>
-        <Input name="baseUrl" placeholder="https://api.tryprofound.com/v1" />
+        <Input name="baseUrl" placeholder="https://api.tryprofound.com" />
       </div>
       <details className="sm:col-span-2">
         <summary className="text-muted-foreground cursor-pointer text-sm">Advanced: endpoint paths (copy from Profound&apos;s API reference if the defaults 404)</summary>
         <div className="mt-2 grid gap-3 sm:grid-cols-3">
-          <div className="grid gap-1"><Label htmlFor="profound-cat-path">Category list (GET)</Label><Input id="profound-cat-path" name="categoriesPath" placeholder="/categories" /></div>
-          <div className="grid gap-1"><Label htmlFor="profound-ans-path">Answers report (POST)</Label><Input id="profound-ans-path" name="answersPath" placeholder="/reports/answers" /></div>
-          <div className="grid gap-1"><Label htmlFor="profound-cit-path">Citations report (POST)</Label><Input id="profound-cit-path" name="citationsPath" placeholder="/reports/citations" /></div>
+          <div className="grid gap-1"><Label htmlFor="profound-cat-path">Category list (GET)</Label><Input id="profound-cat-path" name="categoriesPath" placeholder="/v1/org/categories" /></div>
+          <div className="grid gap-1"><Label htmlFor="profound-ans-path">Answers report (POST)</Label><Input id="profound-ans-path" name="answersPath" placeholder="/v1/prompts/answers" /></div>
+          <div className="grid gap-1"><Label htmlFor="profound-cit-path">Citations report (POST)</Label><Input id="profound-cit-path" name="citationsPath" placeholder="/v1/reports/citations" /></div>
         </div>
       </details>
       <div className="flex items-center gap-3 sm:col-span-2">
