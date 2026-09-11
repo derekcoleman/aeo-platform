@@ -16,22 +16,27 @@ and the visibility score lands in `measure.external_metrics` (surface
 `profound_visibility`). Native metrics never read Profound rows; the UI labels
 Profound numbers as Profound's.
 
-**Endpoints:** the client defaults to `https://api.tryprofound.com/v1` with
-`/categories` and `POST /reports/answers`. Both the base URL and the endpoint
-paths are stored on the connection (`config.baseUrl`, `config.endpoints`) so
-an ops person can adapt to an API change without a deploy.
+**Endpoints:** the client follows Profound's official TypeScript SDK
+(`@profoundai/client`): base `https://api.tryprofound.com`, the API key in
+the `X-API-Key` header, `GET /v1/org/categories` for the category list (one
+row per category × organisation), and `POST /v1/prompts/answers` for the
+answers report (one row per prompt × model × run, `pagination: {limit,
+offset}`, date-time bounds, `include` selecting fields; the answer text is
+never requested). A brand mention is `asset ∈ mentions`. Both the base URL
+and the endpoint paths are stored on the connection (`config.baseUrl`,
+`config.endpoints`) so an ops person can follow a rename without a deploy,
+and a versioned base plus a versioned path never doubles the segment.
 
 The connect step discovers the category list rather than trusting the
-default: it tries the configured path, then `/orgs`, `/organizations`,
-`/brands`, `/companies` and `/accounts`, on the configured base and on the
-base with the version segment toggled. A 401/403 stops the search (the path
+default: it tries the configured path, then `/v1/categories`, `/categories`,
+`/v1/orgs` and `/v1/organizations`, on the configured base and on the base
+with a trailing version segment removed. A 401/403 stops the search (the path
 exists, the key is wrong); a 404 (`{"detail":"Not Found"}`) moves on. Whatever
 answered is written to the connection. When nothing answers and a category id
-was entered, one day of the answers report proves the key and category
+was entered, one row of the answers report proves the key and category
 instead, and the connection is created with that id. The form's *Advanced*
-section takes the exact paths from Profound's API reference for the case
-where both the list and the report have moved. The error names every URL
-tried and its status.
+section takes exact paths for the case where both have moved. The error names
+every URL tried and its status.
 
 **Field names:** the normaliser accepts the spellings Profound has used
 (`prompt` / `prompt_text`, `platform` / `engine` / `model`, `date` / `day`,
