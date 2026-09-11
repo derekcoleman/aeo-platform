@@ -226,8 +226,9 @@ export async function connectProfoundAction(_prev: ActionResult | null, form: Fo
     ctx.sql,
   );
   await setFeature(site.org_id, PROFOUND_FEATURE, true);
-  const jobError = await queueJob(connectorSyncRequested.create({ connectionId: conn.id, orgId: site.org_id, kind: "backfill" }));
-  if (jobError) return fail(jobError);
   refresh(siteId);
-  return { ok: true, id: conn.id, note };
+  // The connection is saved whatever happens next; a queue failure is a note, not a failure.
+  const jobError = await queueJob(connectorSyncRequested.create({ connectionId: conn.id, orgId: site.org_id, kind: "backfill" }), undefined, "Profound backfill");
+  if (jobError) return { ok: true, id: conn.id, note: [note, `Saved as "${chosen.name}", but the 90-day backfill did not start and the daily sync will not run until the job runner is connected: ${jobError}`].filter(Boolean).join(" ") };
+  return { ok: true, id: conn.id, note: [note, "The 90-day backfill is queued."].filter(Boolean).join(" ") };
 }
