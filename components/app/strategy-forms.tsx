@@ -17,7 +17,7 @@ const FORMATS = ["comparison", "howto", "guide", "listicle", "faq"] as const;
 function Note({ state, okText = "Saved" }: { state: ActionResult | null; okText?: string }) {
   if (!state) return null;
   if (!state.ok) return <span className="text-destructive text-xs">{state.error}</span>;
-  return <span className="text-muted-foreground text-xs">{state.error ?? okText}</span>;
+  return <span className="text-muted-foreground text-xs">{state.note ? `${okText} ${state.note}` : (state.error ?? okText)}</span>;
 }
 
 const selectClass = "border-input bg-background h-9 rounded-md border px-3 text-sm";
@@ -200,6 +200,14 @@ export function ProfoundConnectForm({ siteId }: { siteId: string }) {
         <Label>API base URL (only if Profound gave you a different one)</Label>
         <Input name="baseUrl" placeholder="https://api.tryprofound.com/v1" />
       </div>
+      <details className="sm:col-span-2">
+        <summary className="text-muted-foreground cursor-pointer text-sm">Advanced: endpoint paths (copy from Profound&apos;s API reference if the defaults 404)</summary>
+        <div className="mt-2 grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-1"><Label htmlFor="profound-cat-path">Category list (GET)</Label><Input id="profound-cat-path" name="categoriesPath" placeholder="/categories" /></div>
+          <div className="grid gap-1"><Label htmlFor="profound-ans-path">Answers report (POST)</Label><Input id="profound-ans-path" name="answersPath" placeholder="/reports/answers" /></div>
+          <div className="grid gap-1"><Label htmlFor="profound-cit-path">Citations report (POST)</Label><Input id="profound-cit-path" name="citationsPath" placeholder="/reports/citations" /></div>
+        </div>
+      </details>
       <div className="flex items-center gap-3 sm:col-span-2">
         <Button type="submit" disabled={pending}>{pending ? "Checking…" : "Connect Profound"}</Button>
         <Note state={state} okText="Connected; the 90-day backfill is queued." />

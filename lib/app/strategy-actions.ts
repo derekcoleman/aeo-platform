@@ -9,7 +9,7 @@ import { z } from "zod";
 import { canEdit, canManage, requireUser } from "@/lib/auth/session";
 import { connectorContext, createConnection, setFeature } from "@/lib/connectors";
 import { PROFOUND_FEATURE } from "@/lib/connectors/profound";
-import { ProfoundApi, ProfoundApiError } from "@/lib/connectors/profound/api";
+import { PROFOUND_DEFAULT_BASE, ProfoundApi, ProfoundApiError, ProfoundDiscoveryError, type DiscoveryAttempt } from "@/lib/connectors/profound/api";
 import { appDb } from "@/lib/db/app";
 import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
 import { createManualOpportunity } from "@/lib/pipeline/opportunities";
@@ -136,37 +136,87 @@ export async function analyzeCompetitorsAction(siteId: string, topicId?: string 
 
 // ── Profound API connection ─────────────────────────────────────────────────
 
+const apiPath = z.string().trim().max(200).regex(/^(\/[^\s?#]*)?$/, "Endpoint paths start with /").optional().default("");
+
 const profoundForm = z.object({
   siteId: z.guid(),
   apiKey: z.string().trim().min(8).max(500),
   categoryId: z.string().trim().max(200).optional().default(""),
   baseUrl: z.string().trim().url().optional().or(z.literal("")).default(""),
+  categoriesPath: apiPath,
+  answersPath: apiPath,
+  citationsPath: apiPath,
 });
 
+const describeAttempts = (attempts: DiscoveryAttempt[]) => attempts.map((a) => `${a.url} → ${a.status ?? "no response"}`).join("; ");
+
+/**
+ * Connect a Profound API key to a site. The category list endpoint is
+ * discovered (Profound has moved it), and when it cannot be found at all
+ * but a category id was given, one day of the answers report proves the
+ * key and category instead. Whatever answered is stored on the connection
+ * so the daily sync does not repeat the search.
+ */
 export async function connectProfoundAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
   const parsed = profoundForm.safeParse(Object.fromEntries(form));
   if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid input.");
-  const { siteId, apiKey, categoryId, baseUrl } = parsed.data;
+  const { siteId, apiKey, categoryId, baseUrl, categoriesPath, answersPath, citationsPath } = parsed.data;
   const { user, site, error } = await guard(siteId, "manage");
   if (!site || error) return fail(error ?? "Site not found.");
-  const api = new ProfoundApi({ apiKey, baseUrl: baseUrl || undefined });
-  let categories;
-  try {
-    categories = await api.categories();
-  } catch (e) {
-    return fail(e instanceof ProfoundApiError ? `Profound rejected the key (${e.status}): ${e.message}` : `Could not reach Profound: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  if (categories.length === 0) return fail("The key works but Profound returned no categories. Check the plan and the base URL / endpoint paths.");
-  const chosen = categoryId ? categories.find((c) => c.id === categoryId) : categories.length === 1 ? categories[0] : undefined;
-  if (!chosen) return fail(`Choose a category id: ${categories.slice(0, 12).map((c) => `${c.id} (${c.name})`).join(", ")}`);
+  const endpoints = { ...(categoriesPath ? { categories: categoriesPath } : {}), ...(answersPath ? { answers: answersPath } : {}), ...(citationsPath ? { citations: citationsPath } : {}) };
+  const api = new ProfoundApi({ apiKey, baseUrl: baseUrl || undefined, endpoints });
   const ctx = connectorContext();
+
+  let chosen: { id: string; name: string } | undefined;
+  let resolvedBase = api.baseUrl;
+  let resolvedEndpoints: Record<string, string> = { ...endpoints };
+  let note: string | undefined;
+  let discovery: Awaited<ReturnType<ProfoundApi["discoverCategories"]>> | null = null;
+  try {
+    discovery = await api.discoverCategories();
+  } catch (e) {
+    if (e instanceof ProfoundApiError) return fail(`Profound rejected the key (${e.status}) at ${e.path}: ${e.message}. The endpoint exists, so check the key and the plan.`);
+    if (!(e instanceof ProfoundDiscoveryError)) return fail(`Could not reach Profound: ${e instanceof Error ? e.message : String(e)}`);
+    if (!categoryId) {
+      return fail(
+        `Profound answered, but no category-list endpoint was found. That is a path problem, not the key: tried ${describeAttempts(e.attempts)}. ` +
+          "Open Profound's API reference, put the current paths under Advanced, or enter your category id and we will verify it with a one-day report call instead.",
+      );
+    }
+    try {
+      const { rows } = await api.verifyReport(categoryId, ctx.now().toISOString().slice(0, 10));
+      chosen = { id: categoryId, name: categoryId };
+      note = `Category list endpoint not found (tried ${e.attempts.length} paths); verified with a one-day answers report instead (${rows} row${rows === 1 ? "" : "s"}).`;
+    } catch (re) {
+      if (re instanceof ProfoundApiError) return fail(`No category-list endpoint answered (tried ${describeAttempts(e.attempts)}) and the answers report at ${re.path} failed too (${re.status}): ${re.message}. Copy the current paths from Profound's API reference into Advanced.`);
+      return fail(`Could not reach Profound: ${re instanceof Error ? re.message : String(re)}`);
+    }
+  }
+  if (discovery) {
+    resolvedBase = discovery.baseUrl;
+    resolvedEndpoints = { ...resolvedEndpoints, categories: discovery.path };
+    const { categories } = discovery;
+    if (categories.length === 0) return fail(`The key works (${discovery.baseUrl}${discovery.path} answered) but Profound returned no categories. Check the plan, or enter a category id to verify with a report call.`);
+    chosen = categoryId ? categories.find((c) => c.id === categoryId) : categories.length === 1 ? categories[0] : undefined;
+    if (!chosen) return fail(`Choose a category id: ${categories.slice(0, 12).map((c) => `${c.id} (${c.name})`).join(", ")}`);
+  }
+  if (!chosen) return fail("Could not determine a Profound category.");
+
   const conn = await createConnection(
     {
       orgId: site.org_id,
       siteId,
       provider: "profound",
       secret: apiKey,
-      config: { mode: "api", plan: "enterprise", categoryId: chosen.id, categoryName: chosen.name, ...(baseUrl ? { baseUrl } : {}), backfillDays: 90 },
+      config: {
+        mode: "api",
+        plan: "enterprise",
+        categoryId: chosen.id,
+        categoryName: chosen.name,
+        ...(resolvedBase !== PROFOUND_DEFAULT_BASE ? { baseUrl: resolvedBase } : {}),
+        ...(Object.keys(resolvedEndpoints).length ? { endpoints: resolvedEndpoints } : {}),
+        backfillDays: 90,
+      },
       externalAccountId: chosen.id,
       externalAccountName: chosen.name,
       status: "active",
@@ -179,5 +229,5 @@ export async function connectProfoundAction(_prev: ActionResult | null, form: Fo
   const jobError = await queueJob(connectorSyncRequested.create({ connectionId: conn.id, orgId: site.org_id, kind: "backfill" }));
   if (jobError) return fail(jobError);
   refresh(siteId);
-  return { ok: true, id: conn.id };
+  return { ok: true, id: conn.id, note };
 }
