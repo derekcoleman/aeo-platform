@@ -210,7 +210,7 @@ export function ProfoundConnectForm({ siteId }: { siteId: string }) {
       </details>
       <div className="flex items-center gap-3 sm:col-span-2">
         <Button type="submit" disabled={pending}>{pending ? "Checking…" : "Connect Profound"}</Button>
-        <Note state={state} okText="Connected; the 90-day backfill is queued." />
+        <Note state={state} okText="Connected." />
       </div>
     </form>
   );
