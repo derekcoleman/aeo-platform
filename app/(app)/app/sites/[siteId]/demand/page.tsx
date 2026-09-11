@@ -16,7 +16,9 @@ import { setTrackingAction, snapshotNowAction, trackTopAction } from "@/lib/app/
 import { loadSite } from "@/lib/app/store";
 import { canEdit, requireUser, roleIn } from "@/lib/auth/session";
 import { listEntities } from "@/lib/context/entities";
+import { demandSeeds, mineLocale } from "@/lib/demand/seeds";
 import { citationGaps, visibilitySummary } from "@/lib/demand/store";
+import { listTopics } from "@/lib/strategy/topics";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -29,15 +31,17 @@ export default async function DemandPage({ params }: { params: Promise<{ siteId:
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
   const editor = canEdit(user, site.org_id);
-  const [counts, questions, gaps, visibility, spend, entities] = await Promise.all([
+  const [counts, questions, gaps, visibility, spend, entities, topics] = await Promise.all([
     demandCounts(siteId),
     listSiteQuestions(siteId, { limit: 150 }),
     citationGaps(siteId, 30),
     visibilitySummary(siteId),
     serpSpendSummary(site.org_id, siteId),
     listEntities(site.org_id),
+    listTopics(siteId),
   ]);
-  const seeds = entities.filter((e) => e.type === "brand" || e.type === "product" || e.type === "competitor" || e.type === "category").map((e) => e.name).slice(0, 12);
+  const seeds = demandSeeds({ siteName: site.name, keywords: site.keywords, profile: site.profile, topics, entities });
+  const locale = mineLocale(site.locale);
   const providerConfigured = !!(process.env.DATAFORSEO_LOGIN || process.env.SERPAPI_KEY);
   const budgetPct = spend.budget_usd > 0 ? Math.min(100, Math.round((spend.org_month_usd / spend.budget_usd) * 100)) : 0;
   const share = visibility.aio_triggered ? Math.round((visibility.aio_cited / visibility.aio_triggered) * 100) : 0;
@@ -140,8 +144,8 @@ export default async function DemandPage({ params }: { params: Promise<{ siteId:
 
         <TabsContent value="mine" className="grid gap-4 pt-4">
           <Card>
-            <CardHeader><CardTitle>Mine a question graph</CardTitle><CardDescription>Autocomplete expansion two levels deep plus the People-Also-Ask tree, deduped by embedding and clustered. Seeds come from the brand brain when it has them.</CardDescription></CardHeader>
-            <CardContent>{editor ? <MineForm siteId={siteId} suggestedSeeds={seeds} /> : <p className="text-muted-foreground text-sm">Editors and above can mine.</p>}</CardContent>
+            <CardHeader><CardTitle>Mine a question graph</CardTitle><CardDescription>Autocomplete expansion plus the People-Also-Ask tree, deduped by embedding and clustered. The seeds below are your tracked topics and their seed terms, the keywords from onboarding, the category terms the website crawl suggested, and competitors as “alternative” queries. Your own brand and product names are left out on purpose: branded searches measure people who already know you.</CardDescription></CardHeader>
+            <CardContent>{editor ? <MineForm siteId={siteId} suggestedSeeds={seeds} locale={locale} /> : <p className="text-muted-foreground text-sm">Editors and above can mine.</p>}</CardContent>
           </Card>
           <Card>
             <CardHeader><CardTitle>Spend this month</CardTitle><CardDescription>Cached by (query, locale, device, day); the budget guard stops calls before the limit, never after.</CardDescription></CardHeader>

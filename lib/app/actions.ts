@@ -35,6 +35,8 @@ export interface ActionResult {
   ok: boolean;
   error?: string;
   id?: string;
+  /** Extra outcome shown next to the success label (what else was started, what was skipped). */
+  note?: string;
 }
 
 function fail(error: string): ActionResult {

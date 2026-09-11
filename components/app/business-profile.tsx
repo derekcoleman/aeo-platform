@@ -1,5 +1,6 @@
 import { Loader2, RefreshCw } from "lucide-react";
 import { ActionButton } from "@/components/app/action-button";
+import { LiveRefresh } from "@/components/app/live-refresh";
 import { when } from "@/components/app/status";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +22,7 @@ export function BusinessProfileCard({ site, trackedKeywords, canEdit }: { site: 
 
   return (
     <Card>
+      <LiveRefresh active={busy} />
       <CardHeader>
         <CardTitle className="flex flex-wrap items-center gap-2">
           Business profile
@@ -29,7 +31,7 @@ export function BusinessProfileCard({ site, trackedKeywords, canEdit }: { site: 
           {status === "failed" ? <Badge variant="destructive">failed</Badge> : null}
         </CardTitle>
         <CardDescription>
-          {busy ? "Reading the site to learn what the business does. This takes about a minute; refresh the page." : p ? `Extracted ${when(site.profile_updated_at)} from the website crawl. Products and competitors were added to the brand brain as entities.` : "We crawl your own website to learn what the business does, then suggest topics and seed the brand brain."}
+          {busy ? "Reading the site to learn what the business does. This takes about a minute and this card updates on its own." : p ? `Extracted ${when(site.profile_updated_at)} from the website crawl. Products and competitors were added to the brand brain as entities.` : "We crawl your own website to learn what the business does, then suggest topics and seed the brand brain."}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -74,6 +76,7 @@ export function BusinessProfileCard({ site, trackedKeywords, canEdit }: { site: 
         {p ? (
           <div>
             <p className="mb-1 text-sm font-medium">Suggested topics {suggestions.length === 0 && p.keywords.length ? <span className="text-muted-foreground font-normal">· all tracked</span> : null}</p>
+            <p className="text-muted-foreground mb-2 text-xs">Each one you add becomes a topic and a seed term for demand mining; mining starts for it right away when a SERP provider is connected.</p>
             <div className="flex flex-wrap gap-2">
               {p.keywords.map((k) => tracked.has(k.trim().toLowerCase()) ? (
                 <Badge key={k} variant="success">{k}</Badge>
