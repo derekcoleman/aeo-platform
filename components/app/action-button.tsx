@@ -17,8 +17,8 @@ export function ActionButton({ action, children, done = "Done", ...props }: { ac
           setNote(null);
           start(async () => {
             const r = await action();
-            setNote(r.ok ? done : r.error ?? "Failed");
-            if (r.ok) setTimeout(() => setNote(null), 4000);
+            setNote(r.ok ? (r.note ? `${done} · ${r.note}` : done) : r.error ?? "Failed");
+            if (r.ok) setTimeout(() => setNote(null), r.note ? 12000 : 4000);
           });
         }}
       >
