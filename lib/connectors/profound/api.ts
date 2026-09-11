@@ -31,6 +31,36 @@ export const DEFAULT_ENDPOINTS: ProfoundEndpoints = {
   citations: "/reports/citations",
 };
 
+/**
+ * Paths tried, in order, when the configured category endpoint is not found.
+ * Profound has renamed the top-level object more than once (category,
+ * organisation, brand), and a FastAPI 404 (`{"detail":"Not Found"}`) tells
+ * us the host is right and only the path is stale.
+ */
+export const CATEGORY_PATH_CANDIDATES = ["/categories", "/orgs", "/organizations", "/brands", "/companies", "/accounts"];
+
+export interface DiscoveryAttempt {
+  url: string;
+  status: number | null;
+  detail: string;
+}
+
+export interface DiscoveryResult {
+  categories: ProfoundCategory[];
+  /** The base and path that answered, to persist on the connection. */
+  baseUrl: string;
+  path: string;
+  attempts: DiscoveryAttempt[];
+}
+
+/** A discovery that found no category endpoint at all; `attempts` says what was tried. */
+export class ProfoundDiscoveryError extends Error {
+  constructor(public readonly attempts: DiscoveryAttempt[]) {
+    super(`profound: no category endpoint answered (${attempts.length} tried)`);
+    this.name = "ProfoundDiscoveryError";
+  }
+}
+
 export interface ProfoundApiConfig {
   apiKey: string;
   baseUrl?: string;
@@ -151,12 +181,17 @@ export class ProfoundApi {
     this.fetchImpl = cfg.fetchImpl ?? fetch;
   }
 
-  private async call<T = unknown>(path: string, init: { method?: string; body?: unknown; query?: Record<string, string> } = {}): Promise<T> {
-    const url = new URL(`${this.base}${path.startsWith("/") ? path : `/${path}`}`);
+  get baseUrl(): string {
+    return this.base;
+  }
+
+  private async call<T = unknown>(path: string, init: { method?: string; body?: unknown; query?: Record<string, string>; base?: string } = {}): Promise<T> {
+    const url = new URL(`${init.base ?? this.base}${path.startsWith("/") ? path : `/${path}`}`);
     for (const [k, v] of Object.entries(init.query ?? {})) url.searchParams.set(k, v);
     const res = await this.fetchImpl(url, {
       method: init.method ?? "GET",
-      headers: { authorization: `Bearer ${this.cfg.apiKey}`, accept: "application/json", ...(init.body ? { "content-type": "application/json" } : {}) },
+      // Bearer is what their reference shows; the x-api-key spelling costs nothing and covers the other one.
+      headers: { authorization: `Bearer ${this.cfg.apiKey}`, "x-api-key": this.cfg.apiKey, accept: "application/json", ...(init.body ? { "content-type": "application/json" } : {}) },
       body: init.body ? JSON.stringify(init.body) : undefined,
       signal: AbortSignal.timeout(30_000),
     });
@@ -176,6 +211,51 @@ export class ProfoundApi {
 
   async categories(): Promise<ProfoundCategory[]> {
     return normalizeCategories(await this.call(this.endpoints.categories));
+  }
+
+  /**
+   * Find the category list when the configured path may be stale: the
+   * configured path first, then the known alternatives, on the configured
+   * base and on the base with the version segment toggled. A 401/403 stops
+   * the search (the path exists; the key is the problem). A 404 moves on.
+   */
+  async discoverCategories(): Promise<DiscoveryResult> {
+    const bases = [this.base];
+    const m = /\/v\d+$/.exec(this.base);
+    bases.push(m ? this.base.slice(0, -m[0].length) : `${this.base}/v1`);
+    const paths = [...new Set([this.endpoints.categories, ...CATEGORY_PATH_CANDIDATES])];
+    const attempts: DiscoveryAttempt[] = [];
+    let empty: DiscoveryResult | null = null;
+    for (const base of bases) {
+      for (const path of paths) {
+        const url = `${base}${path}`;
+        try {
+          const categories = normalizeCategories(await this.call(path, { base }));
+          attempts.push({ url, status: 200, detail: `${categories.length} categories` });
+          const found = { categories, baseUrl: base, path, attempts };
+          if (categories.length > 0) return found;
+          empty ??= found;
+        } catch (e) {
+          if (e instanceof ProfoundApiError) {
+            attempts.push({ url, status: e.status, detail: e.message.replace(/^profound [^:]*: /, "") });
+            if (e.status === 401 || e.status === 403) throw e;
+          } else {
+            attempts.push({ url, status: null, detail: e instanceof Error ? e.message : String(e) });
+          }
+        }
+      }
+    }
+    if (empty) return empty;
+    throw new ProfoundDiscoveryError(attempts);
+  }
+
+  /** Prove the key and category work by asking for one day of the answers report. */
+  async verifyReport(categoryId: string, endDate: string): Promise<{ rows: number }> {
+    const start = new Date(`${endDate}T00:00:00Z`);
+    start.setUTCDate(start.getUTCDate() - 1);
+    const body = { category_id: categoryId, start_date: start.toISOString().slice(0, 10), end_date: endDate, metrics: ["mentions"], dimensions: ["prompt", "platform", "date"], limit: 1 };
+    const json = await this.call<Record<string, unknown>>(this.endpoints.answers, { method: "POST", body });
+    return { rows: reportRows(json).length };
   }
 
   /** Answers with citations, one row per prompt × platform × date, paged until the response stops offering a cursor. */

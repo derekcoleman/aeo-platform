@@ -3,7 +3,7 @@ import { loadSiteOwnership, recordSnapshot, type SiteOwnership } from "@/lib/dem
 import { normalizeQuestion } from "@/lib/demand/question-graph";
 import { isFeatureEnabled, upsertExternalMetrics, type ExternalMetricInput } from "../store";
 import { ConnectorError, FeatureDisabledError, type Connector, type SyncInput, type SyncResult } from "../types";
-import { ProfoundApi, profoundApiConfigSchema } from "./api";
+import { ProfoundApi, ProfoundApiError, profoundApiConfigSchema } from "./api";
 import { parseProfoundCsv, type ProfoundRecord } from "./csv";
 import type postgres from "postgres";
 
@@ -143,8 +143,15 @@ export const profoundConnector: Connector<ProfoundConfig> = {
     if (conn.config.mode === "api") {
       const cfg = profoundApiConfigSchema.parse(conn.config);
       const api = await profoundApiFor(conn, cfg, ctx);
-      const cats = await api.categories();
-      if (!cats.some((c) => c.id === cfg.categoryId)) throw new ConnectorError("profound", "category_not_found", `profound: category ${cfg.categoryId} is not visible to this key (${cats.length} categories returned)`);
+      let cats: { id: string }[] | null = null;
+      try {
+        cats = await api.categories();
+      } catch (e) {
+        // The list endpoint moved or is not on this plan; the report itself is the proof.
+        if (!(e instanceof ProfoundApiError && e.status === 404)) throw e;
+        await api.verifyReport(cfg.categoryId, ctx.now().toISOString().slice(0, 10));
+      }
+      if (cats && !cats.some((c) => c.id === cfg.categoryId)) throw new ConnectorError("profound", "category_not_found", `profound: category ${cfg.categoryId} is not visible to this key (${cats.length} categories returned)`);
     }
   },
 

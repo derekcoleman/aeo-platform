@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProfoundApi, ProfoundApiError, normalizeAnswerRows, normalizeCategories, reportRows } from "@/lib/connectors/profound/api";
+import { ProfoundApi, ProfoundApiError, ProfoundDiscoveryError, normalizeAnswerRows, normalizeCategories, reportRows } from "@/lib/connectors/profound/api";
 
 describe("normalizeAnswerRows", () => {
   it("accepts the field spellings the reports use and drops rows without a prompt or date", () => {
@@ -49,5 +49,60 @@ describe("ProfoundApi", () => {
     expect(calls[1]!.body).toMatchObject({ category_id: "c1", start_date: "2026-08-01", end_date: "2026-09-01", include_citations: true });
     const other = new ProfoundApi({ apiKey: "pk", baseUrl: "https://api.example.test/v1", endpoints: { categories: "/orgs" }, fetchImpl });
     await expect(other.categories()).rejects.toBeInstanceOf(ProfoundApiError);
+  });
+});
+
+describe("ProfoundApi.discoverCategories", () => {
+  const server = (routes: Record<string, number | unknown>) =>
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(String(url));
+      const key = `${init?.method ?? "GET"} ${u.pathname}`;
+      const r = routes[key];
+      if (r === undefined) return new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 });
+      if (typeof r === "number") return new Response(JSON.stringify({ detail: "nope" }), { status: r });
+      return new Response(JSON.stringify(r), { status: 200 });
+    }) as typeof fetch;
+
+  it("returns the configured path when it answers", async () => {
+    const api = new ProfoundApi({ apiKey: "k", baseUrl: "https://api.example.test/v1", fetchImpl: server({ "GET /v1/categories": { data: [{ id: "c1", name: "Identity" }] } }) });
+    const d = await api.discoverCategories();
+    expect(d.path).toBe("/categories");
+    expect(d.baseUrl).toBe("https://api.example.test/v1");
+    expect(d.categories).toHaveLength(1);
+    expect(d.attempts).toHaveLength(1);
+  });
+
+  it("walks the alternatives and the unversioned base after a 404, and persists what answered", async () => {
+    const api = new ProfoundApi({ apiKey: "k", baseUrl: "https://api.example.test/v1", fetchImpl: server({ "GET /orgs": { data: [{ id: "o1", name: "Acme" }] } }) });
+    const d = await api.discoverCategories();
+    expect(d.path).toBe("/orgs");
+    expect(d.baseUrl).toBe("https://api.example.test");
+    expect(d.categories).toEqual([{ id: "o1", name: "Acme", organization: null }]);
+    expect(d.attempts.every((a) => a.status === 404 || a.url === "https://api.example.test/orgs")).toBe(true);
+  });
+
+  it("stops at a 401: the path exists and the key is the problem", async () => {
+    const api = new ProfoundApi({ apiKey: "k", baseUrl: "https://api.example.test/v1", fetchImpl: server({ "GET /v1/categories": 404, "GET /v1/orgs": 401 }) });
+    await expect(api.discoverCategories()).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("reports every attempt when nothing answers", async () => {
+    const api = new ProfoundApi({ apiKey: "k", baseUrl: "https://api.example.test/v1", fetchImpl: server({}) });
+    const err = await api.discoverCategories().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProfoundDiscoveryError);
+    expect((err as ProfoundDiscoveryError).attempts.length).toBe(12);
+    expect((err as ProfoundDiscoveryError).attempts[0]).toMatchObject({ url: "https://api.example.test/v1/categories", status: 404 });
+  });
+
+  it("verifyReport posts a one-day answers query for the category", async () => {
+    let body: Record<string, unknown> | null = null;
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(String(url)).toBe("https://api.example.test/v1/reports/answers");
+      return new Response(JSON.stringify({ data: [{ prompt: "p", platform: "chatgpt", date: "2026-09-10" }] }), { status: 200 });
+    }) as typeof fetch;
+    const api = new ProfoundApi({ apiKey: "k", baseUrl: "https://api.example.test/v1", fetchImpl });
+    expect(await api.verifyReport("c1", "2026-09-11")).toEqual({ rows: 1 });
+    expect(body).toMatchObject({ category_id: "c1", start_date: "2026-09-10", end_date: "2026-09-11", limit: 1 });
   });
 });

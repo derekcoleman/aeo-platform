@@ -19,9 +19,19 @@ Profound numbers as Profound's.
 **Endpoints:** the client defaults to `https://api.tryprofound.com/v1` with
 `/categories` and `POST /reports/answers`. Both the base URL and the endpoint
 paths are stored on the connection (`config.baseUrl`, `config.endpoints`) so
-an ops person can adapt to an API change without a deploy. The connect step
-calls the categories endpoint and shows exactly what came back, so a wrong
-path fails loudly at connect time, not silently at 05:00.
+an ops person can adapt to an API change without a deploy.
+
+The connect step discovers the category list rather than trusting the
+default: it tries the configured path, then `/orgs`, `/organizations`,
+`/brands`, `/companies` and `/accounts`, on the configured base and on the
+base with the version segment toggled. A 401/403 stops the search (the path
+exists, the key is wrong); a 404 (`{"detail":"Not Found"}`) moves on. Whatever
+answered is written to the connection. When nothing answers and a category id
+was entered, one day of the answers report proves the key and category
+instead, and the connection is created with that id. The form's *Advanced*
+section takes the exact paths from Profound's API reference for the case
+where both the list and the report have moved. The error names every URL
+tried and its status.
 
 **Field names:** the normaliser accepts the spellings Profound has used
 (`prompt` / `prompt_text`, `platform` / `engine` / `model`, `date` / `day`,
