@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { loadSite } from "@/lib/app/store";
 import { competitorDomains, listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
-import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction } from "@/lib/app/strategy-actions";
+import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
 import { canEdit, canManage, requireUser, roleIn } from "@/lib/auth/session";
 import { listCompetitorPages, structuralTargetFrom } from "@/lib/strategy/competitors";
 import { listTopics, topicStats } from "@/lib/strategy/topics";
@@ -220,7 +220,7 @@ export default async function StrategyPage({ params, searchParams }: { params: P
           <Card>
             <CardHeader>
               <CardTitle>Profound {profound ? <Badge variant={profound.status === "active" ? "success" : "destructive"}>{profound.status} · {profound.mode}</Badge> : null}</CardTitle>
-              <CardDescription>{profound ? `${profound.category ?? "category"} · last sync ${when(profound.last_synced_at)}${profound.last_error ? ` · ${profound.last_error.slice(0, 120)}` : ""}` : "Profound tracks where you and competitors appear across ChatGPT, Perplexity, Gemini and Copilot. Connect the Enterprise API to pull it in; every number from it is labelled as Profound's."}</CardDescription>
+              <CardDescription>{profound ? `${profound.category ?? "category"} · last sync ${when(profound.last_synced_at)}${profound.last_error ? ` · ${profound.last_error.slice(0, 120)}` : ""}${profound.mode === "api" ? " · syncs daily at 05:00 UTC; the first sync backfills 90 days" : ""}` : "Profound tracks where you and competitors appear across ChatGPT, Perplexity, Gemini and Copilot. Connect the Enterprise API to pull it in; every number from it is labelled as Profound's."}</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
               {engines.length ? (
@@ -229,6 +229,12 @@ export default async function StrategyPage({ params, searchParams }: { params: P
                   <TableBody>{engines.map((e) => <TableRow key={e.engine}><TableCell className="font-medium">{e.engine}</TableCell><TableCell className="text-right tabular-nums">{e.prompts}</TableCell><TableCell className="text-right tabular-nums">{e.answers}</TableCell><TableCell className="text-right tabular-nums">{pct(e.mention_rate)}</TableCell><TableCell className="text-right tabular-nums">{e.visibility === null ? "—" : Math.round(e.visibility)}</TableCell><TableCell className="text-right tabular-nums">{pct(e.owned_citation_rate)}</TableCell></TableRow>)}</TableBody>
                 </Table>
               ) : <p className="text-muted-foreground text-sm">No Profound data in the last 30 days.</p>}
+              {manager && profound && profound.mode === "api" && profound.status === "active" ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <ActionButton size="sm" variant="outline" action={syncConnectionNowAction.bind(null, siteId, profound.id)} done="Queued">{profound.last_synced_at ? "Sync now" : "Run the 90-day backfill now"}</ActionButton>
+                  <span className="text-muted-foreground text-xs">Reload this page in a few minutes to see the results.</span>
+                </div>
+              ) : null}
               {manager && (!profound || profound.mode !== "api") ? <ProfoundConnectForm siteId={siteId} /> : null}
             </CardContent>
           </Card>

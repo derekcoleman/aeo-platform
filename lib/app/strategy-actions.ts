@@ -7,7 +7,7 @@ import { LLM_NOT_CONFIGURED, llmConfigured } from "@/lib/ai/model";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { canEdit, canManage, requireUser } from "@/lib/auth/session";
-import { connectorContext, createConnection, setFeature } from "@/lib/connectors";
+import { connectorContext, createConnection, getConnection, setFeature } from "@/lib/connectors";
 import { PROFOUND_FEATURE } from "@/lib/connectors/profound";
 import { PROFOUND_DEFAULT_BASE, ProfoundApi, ProfoundApiError, ProfoundDiscoveryError, type DiscoveryAttempt } from "@/lib/connectors/profound/api";
 import { appDb } from "@/lib/db/app";
@@ -132,6 +132,25 @@ export async function analyzeCompetitorsAction(siteId: string, topicId?: string 
   const jobError = await queueJob(strategyCompetitorsAnalyzeRequested.create({ siteId, orgId: site.org_id, topicId: topicId ?? null }));
   if (jobError) return fail(jobError);
   return { ok: true };
+}
+
+/**
+ * Queue a sync for a connection on this site right now, outside the daily
+ * schedule. The first sync of a connection is the backfill; later ones are
+ * incremental from the last successful cursor, the same as the schedule.
+ */
+export async function syncConnectionNowAction(siteId: string, connectionId: string): Promise<ActionResult> {
+  const { site, error } = await guard(siteId, "manage");
+  if (!site || error) return fail(error ?? "Site not found.");
+  const conn = await getConnection(connectionId);
+  if (!conn || conn.org_id !== site.org_id || (conn.site_id && conn.site_id !== siteId)) return fail("Connection not found.");
+  if (!conn.enabled || conn.status === "disconnected" || conn.status === "disabled") return fail(`Connection is ${conn.status}.`);
+  if (conn.provider === "profound" && (conn.config as { mode?: string }).mode !== "api") return fail("This Profound connection only accepts CSV uploads.");
+  const kind = conn.last_synced_at ? "incremental" : "backfill";
+  const jobError = await queueJob(connectorSyncRequested.create({ connectionId: conn.id, orgId: site.org_id, kind }), undefined, `${conn.provider} sync`);
+  if (jobError) return fail(jobError);
+  refresh(siteId);
+  return { ok: true, note: kind === "backfill" ? "Backfill queued; it pages through the report and lands in a few minutes." : "Incremental sync queued." };
 }
 
 // ── Profound API connection ─────────────────────────────────────────────────
