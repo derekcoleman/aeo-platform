@@ -128,6 +128,44 @@ async function edgeDnsCheck(env: Env): Promise<SetupCheck> {
   }
 }
 
+/**
+ * Can Inngest reach us? It registers and invokes every function through
+ * GET/PUT/POST on /api/inngest, so the endpoint must answer JSON to an
+ * anonymous request. Vercel Deployment Protection answers a redirect to
+ * vercel.com/sso-api instead, which is the single most common reason
+ * "Queued" never turns into a run.
+ */
+export async function jobsEndpointCheck(env: Env, fetchImpl: typeof fetch): Promise<SetupCheck> {
+  const key = "jobs.endpoint";
+  const label = "Inngest can reach /api/inngest";
+  const base = env.APP_URL?.replace(/\/+$/, "");
+  if (!base) return { key, group: "jobs", label, state: "skip", detail: "APP_URL unset" };
+  const url = `${base}/api/inngest`;
+  const protectionFix = "Vercel → Project → Settings → Deployment Protection → Vercel Authentication: choose \"Only Preview Deployments\" (or add a Protection Bypass for Automation secret to the Inngest integration). Then sync the app in the Inngest dashboard.";
+  try {
+    const res = await fetchImpl(url, { headers: { accept: "application/json" }, redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(6000) });
+    const location = res.headers.get("location") ?? "";
+    if (res.status >= 300 && res.status < 400) {
+      const sso = /vercel\.com\/sso-api/.test(location);
+      return { key, group: "jobs", label, state: "fail", detail: `${url} redirects to ${sso ? "Vercel SSO" : location || "another URL"}`, fix: sso ? protectionFix : "The endpoint must answer directly; check rewrites and APP_URL." };
+    }
+    if (res.status === 401 || res.status === 403) return { key, group: "jobs", label, state: "fail", detail: `${url} answered ${res.status}`, fix: protectionFix };
+    if (!res.ok) return { key, group: "jobs", label, state: "fail", detail: `${url} answered ${res.status}`, fix: "The Inngest serve route is failing; check the runtime logs for /api/inngest." };
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    if (!body || typeof body.function_count !== "number") return { key, group: "jobs", label, state: "fail", detail: `${url} answered ${res.status} without Inngest's introspection JSON`, fix: "Something other than the Inngest handler is answering this path; check middleware and rewrites." };
+    const mode = typeof body.mode === "string" ? body.mode : "unknown";
+    if (body.has_signing_key === false || body.has_event_key === false) return { key, group: "jobs", label, state: "fail", detail: `${body.function_count} functions, mode ${mode}, keys missing at runtime`, fix: "Redeploy after the Inngest integration set INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY; the running build was made before they existed." };
+    return { key, group: "jobs", label, state: "ok", detail: `${body.function_count} functions registered, mode ${mode}` };
+  } catch (e) {
+    return { key, group: "jobs", label, state: "fail", detail: `${url}: ${msg(e)}`, fix: "APP_URL must be this deployment's public URL and reachable from the internet." };
+  }
+}
+
 /** Decoded JWT payload, or null. No verification: this is our own session's token, read for its claims. */
 export function jwtClaims(token: string | null | undefined): Record<string, unknown> | null {
   if (!token) return null;
@@ -164,7 +202,7 @@ export interface SetupReport {
 export async function runSetupChecks(opts: { env?: Env; claims?: Record<string, unknown> | null; fetchImpl?: typeof fetch } = {}): Promise<SetupReport> {
   const env = opts.env ?? process.env;
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const [app, renderer, rest, edge] = await Promise.all([appDbCheck(env), rendererDbCheck(env), postgrestCheck(env, fetchImpl), edgeDnsCheck(env)]);
-  const checks = [...envChecks(env), ...app, ...renderer, rest, authUrlCheck(env), authHookCheck(opts.claims ?? null, env), edge];
+  const [app, renderer, rest, edge, jobs] = await Promise.all([appDbCheck(env), rendererDbCheck(env), postgrestCheck(env, fetchImpl), edgeDnsCheck(env), jobsEndpointCheck(env, fetchImpl)]);
+  const checks = [...envChecks(env), ...app, ...renderer, rest, authUrlCheck(env), authHookCheck(opts.claims ?? null, env), edge, jobs];
   return { checks, failing: checks.filter((c) => c.state === "fail").length, warnings: checks.filter((c) => c.state === "warn").length };
 }

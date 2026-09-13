@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authHookCheck, envChecks, jwtClaims } from "@/lib/ops/setup";
+import { authHookCheck, envChecks, jobsEndpointCheck, jwtClaims } from "@/lib/ops/setup";
 
 const env = (o: Record<string, string>) => o as unknown as NodeJS.ProcessEnv;
 
@@ -35,5 +35,35 @@ describe("jwtClaims + authHookCheck", () => {
     expect(authHookCheck(null, env({})).state).toBe("skip");
     expect(authHookCheck(null, configured).state).toBe("warn");
     expect(jwtClaims("garbage")).toBeNull();
+  });
+});
+
+describe("jobsEndpointCheck", () => {
+  const env = { APP_URL: "https://app.example.test/" } as unknown as NodeJS.ProcessEnv;
+  const respond = (status: number, body: string | null, headers: Record<string, string> = {}) => (async () => new Response(body, { status, headers })) as unknown as typeof fetch;
+
+  it("passes when the Inngest handler answers its introspection JSON with keys present", async () => {
+    const c = await jobsEndpointCheck(env, respond(200, JSON.stringify({ function_count: 27, mode: "cloud", has_event_key: true, has_signing_key: true })));
+    expect(c).toMatchObject({ state: "ok", detail: "27 functions registered, mode cloud" });
+  });
+
+  it("fails with the Deployment Protection fix when the endpoint redirects to Vercel SSO", async () => {
+    const c = await jobsEndpointCheck(env, respond(302, null, { location: "https://vercel.com/sso-api?url=https%3A%2F%2Fapp.example.test%2Fapi%2Finngest" }));
+    expect(c.state).toBe("fail");
+    expect(c.detail).toContain("redirects to Vercel SSO");
+    expect(c.fix).toContain("Only Preview Deployments");
+  });
+
+  it("fails when the running build predates the keys", async () => {
+    const c = await jobsEndpointCheck(env, respond(200, JSON.stringify({ function_count: 27, mode: "dev", has_event_key: false, has_signing_key: false })));
+    expect(c.state).toBe("fail");
+    expect(c.fix).toContain("Redeploy");
+  });
+
+  it("skips without APP_URL and fails on a network error", async () => {
+    expect((await jobsEndpointCheck({} as unknown as NodeJS.ProcessEnv, respond(200, "{}"))).state).toBe("skip");
+    const c = await jobsEndpointCheck(env, (async () => { throw new Error("getaddrinfo ENOTFOUND"); }) as unknown as typeof fetch);
+    expect(c.state).toBe("fail");
+    expect(c.detail).toContain("ENOTFOUND");
   });
 });
