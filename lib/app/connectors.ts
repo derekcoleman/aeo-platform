@@ -57,12 +57,20 @@ export interface ConnectorsOverview {
 
 const RANK: Record<ConnectorState, number> = { error: 0, needs_setup: 1, connected: 2, not_connected: 3 };
 
-export async function connectorsOverview(orgId: string, opts: { sql?: postgres.Sql; ctx?: ConnectorContext; env?: NodeJS.ProcessEnv; now?: Date } = {}): Promise<ConnectorsOverview> {
+/**
+ * The catalogue for one project: its own site-scoped rows plus the
+ * organisation-wide ones (Slack, custom sources bound to the org). Pass no
+ * `siteId` for the whole organisation.
+ */
+export async function connectorsOverview(orgId: string, opts: { siteId?: string | null; sql?: postgres.Sql; ctx?: ConnectorContext; env?: NodeJS.ProcessEnv; now?: Date } = {}): Promise<ConnectorsOverview> {
   const sql = opts.sql ?? appDb();
   const ctx = opts.ctx ?? connectorContext({ sql });
   const env = opts.env ?? process.env;
   const now = opts.now ?? new Date();
-  const [sites, rows] = await Promise.all([listSites([orgId], sql), listConnectionsForOrg(orgId, sql)]);
+  const siteId = opts.siteId ?? null;
+  const [allSites, allRows] = await Promise.all([listSites([orgId], sql), listConnectionsForOrg(orgId, sql)]);
+  const sites = siteId ? allSites.filter((s) => s.id === siteId) : allSites;
+  const rows = siteId ? allRows.filter((r) => r.site_id === null || r.site_id === siteId) : allRows;
   const siteById = new Map(sites.map((s) => [s.id, s]));
   const runs = new Map<string, SyncRunRow | null>();
   await Promise.all(rows.map(async (r) => runs.set(r.id, await latestSyncRun(r.id, sql))));

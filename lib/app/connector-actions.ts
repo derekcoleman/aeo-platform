@@ -24,6 +24,8 @@ const CONNECTORS_PATH = "/settings/connectors";
 
 const refresh = (siteIds: (string | null | undefined)[] = []) => {
   revalidatePath(CONNECTORS_PATH);
+  // Org-wide rows (Slack, org custom sources) show on every project's page.
+  revalidatePath("/app/sites/[siteId]/connectors", "page");
   for (const id of siteIds) if (id) revalidatePath(`/app/sites/${id}`);
 };
 

@@ -6,8 +6,12 @@ row, never silence.
 
 ## The Connectors page
 
-`/settings/connectors` lists **every** connector the product offers, per
-organisation, connected or not, in three groups:
+Project → **Connectors** (`/app/sites/{id}/connectors`) lists **every**
+connector the product offers for that project, connected or not, as a
+compact grid of tiles in three groups. A tile opens a dialog with what the
+connector feeds, the rows that exist and their sync state, and the connect or
+setup form. `/settings/connectors` redirects to the user's first project and
+carries the query an OAuth callback attaches.
 
 | Group | Connectors | Scope |
 |---|---|---|
@@ -15,9 +19,8 @@ organisation, connected or not, in three groups:
 | Publish | Webflow | per project |
 | Brand brain sources | Your website, Slack, Custom source (API or MCP) | website per project; Slack and custom for the organisation (a custom source can also be pinned to one project) |
 
-Each card says what the connector feeds, shows the rows that exist (project,
-account, state, last sync, the live sync state from the run ledger, *Sync
-now*, *Disconnect*), and offers the way to connect another. The catalogue is
+Organisation-wide rows (Slack, org-level custom sources) show on every
+project's page; project-scoped rows only on their own. The catalogue is
 `lib/connectors/catalog.ts`; the read model that joins it with the org's rows
 and the option lists is `lib/app/connectors.ts`.
 
@@ -121,8 +124,7 @@ Refresh page) lists every item of every collection the token can see into
 existing posts can be scored for a refresh against Search Console and AI
 citations and updated in place. See `docs/REFRESH.md`.
 
-**Where else:** Connectors → Webflow lists every project's connection and
-connects another (pick the project, paste the token).
+**Where else:** the project's Connectors page, Webflow tile.
 
 **API:** Webflow Data API v2 (`/v2/sites`, `/v2/sites/{id}/collections`,
 `/v2/collections/{id}`, `/v2/collections/{id}/items` (list + create),
@@ -147,7 +149,8 @@ no single invocation outlives Vercel's 300-second limit.
 
 ## Custom source (API or MCP)
 
-**Where:** Connectors → Custom source. Owners and admins only.
+**Where:** the project's Connectors page, Custom source tile. Owners and
+admins only. "Applies to" chooses this project or the whole organisation.
 
 A source the customer defines instead of one we ship. Both kinds land in
 `context.context_documents` exactly like Slack messages and the website

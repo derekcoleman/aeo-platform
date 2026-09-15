@@ -218,7 +218,7 @@ export default async function BrainPage({ params, searchParams }: { params: Prom
               <div className="flex flex-wrap gap-2">
                 <ActionButton size="sm" variant="outline" action={ingestNowAction.bind(null, siteId)} done="Ingest queued">Ingest now</ActionButton>
                 <ActionButton size="sm" variant="outline" action={extractFactsAction.bind(null, siteId)} done="Extraction queued">Extract facts</ActionButton>
-                <Button asChild size="sm" variant="outline"><Link href={"/settings/connectors" as Route}>Manage connectors</Link></Button>
+                <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/connectors` as Route}>Manage connectors</Link></Button>
               </div>
               {sources.length === 0 ? <p className="text-muted-foreground text-sm">Nothing connected. Slack and Google are the first two; Profound CSV is enrichment.</p> : (
                 <Table>

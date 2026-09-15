@@ -32,21 +32,21 @@ function Note({ state, okText = "Saved" }: { state: ActionResult | null; okText?
 function SiteSelect({ sites, value, onChange, name, allowNone = false }: { sites: SiteOption[]; value: string; onChange: (v: string) => void; name?: string; allowNone?: boolean }) {
   return (
     <select name={name} className={selectClass} value={value} onChange={(e) => onChange(e.target.value)}>
+      {sites.map((s) => <option key={s.id} value={s.id}>{sites.length === 1 ? `This project (${s.domain})` : `${s.name} · ${s.domain}`}</option>)}
       {allowNone ? <option value="">Whole organisation</option> : null}
-      {sites.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.domain}</option>)}
     </select>
   );
 }
 
 /** Start an OAuth flow for a project (Google) or the organisation (Slack). */
-export function OAuthConnect({ provider, orgId, sites, label, ready, siteScoped }: { provider: "google" | "slack"; orgId: string; sites: SiteOption[]; label: string; ready: boolean; siteScoped: boolean }) {
+export function OAuthConnect({ provider, orgId, sites, label, ready, siteScoped, returnTo = "/settings/connectors" }: { provider: "google" | "slack"; orgId: string; sites: SiteOption[]; label: string; ready: boolean; siteScoped: boolean; returnTo?: string }) {
   const [siteId, setSiteId] = useState(sites[0]?.id ?? "");
-  const href = `/api/connectors/${provider}/start?orgId=${encodeURIComponent(orgId)}${siteScoped && siteId ? `&siteId=${encodeURIComponent(siteId)}` : ""}&returnTo=${encodeURIComponent("/settings/connectors")}`;
+  const href = `/api/connectors/${provider}/start?orgId=${encodeURIComponent(orgId)}${siteScoped && siteId ? `&siteId=${encodeURIComponent(siteId)}` : ""}&returnTo=${encodeURIComponent(returnTo)}`;
   if (!ready) return <p className="text-muted-foreground text-xs">This deployment has no {provider === "google" ? "Google" : "Slack"} OAuth client configured ({provider === "google" ? "GOOGLE_OAUTH_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI" : "SLACK_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI"}). Ops → Setup lists what is missing.</p>;
   if (siteScoped && sites.length === 0) return <p className="text-muted-foreground text-xs">Create a project first; this connector binds to one.</p>;
   return (
     <div className="flex flex-wrap items-end gap-3">
-      {siteScoped ? (
+      {siteScoped && sites.length > 1 ? (
         <div className="grid gap-1">
           <Label>Project</Label>
           <SiteSelect sites={sites} value={siteId} onChange={setSiteId} />
@@ -150,10 +150,12 @@ export function SiteScopedConnect({ kind, sites }: { kind: "profound" | "webflow
   if (sites.length === 0) return <p className="text-muted-foreground text-xs">Create a project first; this connector binds to one.</p>;
   return (
     <div className="grid gap-3">
-      <div className="grid gap-1">
-        <Label>Project</Label>
-        <SiteSelect sites={sites} value={siteId} onChange={setSiteId} />
-      </div>
+      {sites.length > 1 ? (
+        <div className="grid gap-1">
+          <Label>Project</Label>
+          <SiteSelect sites={sites} value={siteId} onChange={setSiteId} />
+        </div>
+      ) : null}
       {kind === "profound" ? <ProfoundConnectForm key={siteId} siteId={siteId} /> : <WebflowConnectForm key={siteId} siteId={siteId} />}
     </div>
   );
@@ -164,7 +166,7 @@ export function CustomConnectorForm({ orgId, sites }: { orgId: string; sites: Si
   const [state, action, pending] = useActionState<ActionResult | null, FormData>(connectCustomAction, null);
   const [kind, setKind] = useState<"api" | "mcp">("api");
   const [authType, setAuthType] = useState<"none" | "bearer" | "header">("none");
-  const [siteId, setSiteId] = useState("");
+  const [siteId, setSiteId] = useState(sites.length === 1 ? sites[0]!.id : "");
   return (
     <form action={action} className="grid gap-3 sm:grid-cols-2">
       <input type="hidden" name="orgId" value={orgId} />

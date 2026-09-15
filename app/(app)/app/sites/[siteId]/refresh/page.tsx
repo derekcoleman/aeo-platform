@@ -79,7 +79,7 @@ export default async function RefreshPage({ params, searchParams }: { params: Pr
       {!connected ? (
         <Alert className="mb-4">
           <AlertTitle>Connect Webflow to see your existing content</AlertTitle>
-          <AlertDescription>Paste a site API token under <Link className="underline-offset-2 hover:underline" href={`/app/sites/${siteId}/publishing` as Route}>Publishing</Link>. Every collection the token can see is inventoried nightly; the first sync runs right after you connect.</AlertDescription>
+          <AlertDescription>Paste a site API token under <Link className="underline-offset-2 hover:underline" href={`/app/sites/${siteId}/connectors` as Route}>Connectors</Link>. Every collection the token can see is inventoried nightly; the first sync runs right after you connect.</AlertDescription>
         </Alert>
       ) : null}
       {connected && (!avail.gsc || !(avail.native || avail.profound)) ? (
