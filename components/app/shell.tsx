@@ -3,7 +3,8 @@ import Link from "next/link";
 import { BarChart3, Brain, Building2, Compass, FileText, LayoutDashboard, LayoutGrid, ListChecks, LogOut, Palette, Plug, RefreshCw, Search, Send, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ProjectSwitcher, type SwitcherProject } from "@/components/app/project-switcher";
-import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, pageHrefForSite, sectionHref, sitePageHref, type NavSection, type SitePageKey } from "@/lib/app/nav";
+import { SidebarItem } from "@/components/app/sidebar-item";
+import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, opsHref, pageHrefForSite, sectionHref, sitePageHref, type NavSection, type SitePageKey } from "@/lib/app/nav";
 import { listSites } from "@/lib/app/store";
 import { canManage } from "@/lib/auth/roles";
 import { visibleOrgIds, type SessionUser } from "@/lib/auth/session";
@@ -53,8 +54,8 @@ export interface AppShellProps {
   active?: "projects" | "connectors" | "ops";
   /** The project whose pages fill the sidebar. */
   site?: ShellSite | null;
-  /** The project page being shown; drives which sections unfold under it. */
-  page?: SitePageKey | "console" | "setup" | "theme";
+  /** The project page being shown; drives which sections unfold under it. "org" is the organisation page opened from a project. */
+  page?: SitePageKey | "console" | "setup" | "theme" | "org";
   /** The organisation whose settings sections fill the sidebar. */
   org?: { id: string; name: string } | null;
   /** The section (tab) currently shown, after `resolveTab`. */
@@ -71,7 +72,7 @@ export interface AppShellProps {
 export async function AppShell({ user, active = "projects", site, page, org, section, children }: AppShellProps) {
   const { workspace, context } = buildGroups({ user, active, site: site ?? null, page, org: org ?? null });
   const groups = [workspace, ...context];
-  const projects: SwitcherProject[] = (await listSites(visibleOrgIds(user))).map((s) => ({ id: s.id, name: s.name, domain: s.canonical_domain, href: pageHrefForSite(s.id, page) }));
+  const projects: SwitcherProject[] = (await listSites(visibleOrgIds(user))).map((s) => ({ id: s.id, name: s.name, domain: s.canonical_domain, href: page === "org" ? `/app/orgs/${s.org_id}?site=${s.id}` : pageHrefForSite(s.id, page) }));
   const switcher = <ProjectSwitcher projects={projects} currentId={site?.id ?? null} />;
   return (
     <div className="flex min-h-screen">
@@ -114,39 +115,9 @@ function SidebarGroup({ group, section }: { group: NavGroup; section?: string })
     <div>
       {group.title ? <p className="text-muted-foreground mb-1 px-2 text-[11px] font-medium tracking-wide uppercase">{group.title}</p> : null}
       <ul className="flex flex-col gap-0.5">
-        {group.items.map((n) => {
-          const current = group.current === n.key;
-          const open = current && n.sections && n.sections.length > 0;
-          return (
-            <li key={n.key}>
-              <Link
-                href={n.href as Route}
-                aria-current={current ? "page" : undefined}
-                className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${current ? "bg-background font-medium shadow-xs" : "text-muted-foreground hover:bg-background/60 hover:text-foreground"}`}
-              >
-                <n.icon className="size-4 shrink-0" /> <span className="truncate">{n.label}</span>
-              </Link>
-              {open ? (
-                <ul className="mt-0.5 mb-1 ml-[15px] flex flex-col gap-0.5 border-l pl-3">
-                  {n.sections!.map((s) => {
-                    const on = section === s.value;
-                    return (
-                      <li key={s.value}>
-                        <Link
-                          href={sectionHref(n.href, s.value) as Route}
-                          aria-current={on ? "location" : undefined}
-                          className={`block rounded-md px-2 py-1 text-[13px] ${on ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}
-                        >
-                          {s.label}
-                        </Link>
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : null}
-            </li>
-          );
-        })}
+        {group.items.map((n) => (
+          <SidebarItem key={n.key} href={n.href} label={n.label} icon={<n.icon className="size-4 shrink-0" />} sections={n.sections} current={group.current === n.key} section={section} />
+        ))}
       </ul>
     </div>
   );
@@ -160,7 +131,8 @@ function buildGroups({ user, active, site, page, org }: { user: SessionUser; act
     current: page === "connectors" ? "connectors" : active === "ops" ? "ops" : undefined,
     items: [
       { key: "connectors", href: site ? `/app/sites/${site.id}/connectors` : "/settings/connectors", label: "Connectors", icon: Plug },
-      ...(user.isStaff ? [{ key: "ops", href: "/ops", label: "Ops", icon: ShieldCheck }] : []),
+      // Ops follows the project too: from a project it opens the console scoped to that project.
+      ...(user.isStaff ? [{ key: "ops", href: opsHref(site?.id), label: "Ops", icon: ShieldCheck }] : []),
     ],
   };
   const groups: NavGroup[] = [];
@@ -173,8 +145,9 @@ function buildGroups({ user, active, site, page, org }: { user: SessionUser; act
       icon: PAGE_ICONS[p.key],
       sections: p.sections,
     }));
-    if (canManage(user, site.org_id)) items.push({ key: "org", href: `/app/orgs/${site.org_id}`, label: "Organisation", icon: Building2 });
-    groups.push({ key: "project", title: site.name, items, current: page && page !== "connectors" && page in PAGE_ICONS ? page : undefined });
+    // The organisation page keeps the project in the sidebar (and in the URL) so nothing disappears when it opens.
+    if (canManage(user, site.org_id)) items.push({ key: "org", href: `/app/orgs/${site.org_id}?site=${site.id}`, label: "Organisation", icon: Building2, sections: ORG_SECTIONS });
+    groups.push({ key: "project", title: site.name, items, current: page === "org" ? "org" : page && page !== "connectors" && page in PAGE_ICONS ? page : undefined });
   }
 
   if (org && !site) {
@@ -188,8 +161,9 @@ function buildGroups({ user, active, site, page, org }: { user: SessionUser; act
 
   if (user.isStaff && active === "ops") {
     const items: NavItem[] = [
-      { key: "console", href: "/ops", label: "Console", icon: ShieldCheck, sections: OPS_SECTIONS },
-      { key: "setup", href: "/ops/setup", label: "Setup checklist", icon: ListChecks },
+      // Staff management is platform-wide; it has no project view.
+      { key: "console", href: opsHref(site?.id), label: site ? `Console · ${site.name}` : "Console", icon: ShieldCheck, sections: site ? OPS_SECTIONS.filter((s) => s.value !== "staff") : OPS_SECTIONS },
+      { key: "setup", href: opsHref(site?.id, "setup"), label: "Setup checklist", icon: ListChecks },
     ];
     if (site && page === "theme") items.push({ key: "theme", href: `/ops/sites/${site.id}/theme`, label: `Theme · ${site.name}`, icon: Palette });
     groups.push({ key: "ops", title: "Ops", items, current: page === "console" || page === "setup" || page === "theme" ? page : undefined });

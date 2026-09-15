@@ -8,37 +8,55 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
-import { OPS_SECTIONS, resolveTab } from "@/lib/app/nav";
+import { OPS_SECTIONS, opsHref, resolveTab } from "@/lib/app/nav";
 import { runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
-import { opsFailedSyncs, opsLlmSpend, opsOrganizations, opsSites, opsStaff } from "@/lib/app/queries";
+import { opsFailedSyncs, opsLlmSpend, opsLlmSpendForSite, opsOrganizations, opsSites, opsStaff, type SiteSpendRow } from "@/lib/app/queries";
 import { auditLog } from "@/lib/app/org";
+import { loadSite } from "@/lib/app/store";
 import { requireStaff } from "@/lib/auth/session";
 import { StaffForm } from "./staff-form";
 
 export const dynamic = "force-dynamic";
 
-/** Staff-only. Every action here is audited; nothing runs as a raw service client from the browser. */
-export default async function OpsPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
-  const { tab: requestedTab } = await searchParams;
+/**
+ * Staff-only. Every action here is audited; nothing runs as a raw service
+ * client from the browser. With `?site=` the console is scoped to one
+ * project: its row, its organisation, the syncs of its connections, its
+ * model spend by task, and the audit entries about it. Staff management is
+ * platform-wide and only shows unscoped.
+ */
+export default async function OpsPage({ searchParams }: { searchParams: Promise<{ tab?: string; site?: string }> }) {
+  const { tab: requestedTab, site: siteParam } = await searchParams;
   const user = await requireStaff();
-  const tab = resolveTab(OPS_SECTIONS, requestedTab, "sites");
-  const [orgs, sites, failed, spend, staff, audit] = await Promise.all([opsOrganizations(), opsSites(), opsFailedSyncs(), opsLlmSpend(), opsStaff(), auditLog(null, 200)]);
+  const site = siteParam ? await loadSite(siteParam) : null;
+  const scope = site ? { siteId: site.id, orgId: site.org_id } : {};
+  const sections = site ? OPS_SECTIONS.filter((s) => s.value !== "staff") : OPS_SECTIONS;
+  const tab = resolveTab(sections, requestedTab, "sites");
+  const [orgs, sites, failed, spend, siteSpend, staff, audit] = await Promise.all([
+    opsOrganizations(scope),
+    opsSites(scope),
+    opsFailedSyncs(7, scope),
+    site ? Promise.resolve([]) : opsLlmSpend(),
+    site ? opsLlmSpendForSite(site.id) : Promise.resolve([] as SiteSpendRow[]),
+    site ? Promise.resolve({ staff: [], bootstrap: [] }) : opsStaff(),
+    auditLog(site?.org_id ?? null, 200, undefined, site?.id ?? null),
+  ]);
   const failingSites = sites.filter((s) => s.last_health_ok === false).length;
   return (
-    <AppShell user={user} active="ops" page="console" section={tab}>
-      <PageHeader title="Ops console" description="Every tenant, every site, and what each one is costing us.">
-        <Badge variant="secondary">{orgs.length} orgs</Badge>
-        <Badge variant="secondary">{sites.length} sites</Badge>
-        {failingSites ? <Badge variant="destructive">{failingSites} failing</Badge> : <Badge variant="success">all healthy</Badge>}
+    <AppShell user={user} active="ops" site={site} page="console" section={tab}>
+      <PageHeader title={site ? `Ops · ${site.name}` : "Ops console"} eyebrow={site ? "Project view" : undefined} description={site ? `Only what belongs to ${site.canonical_domain}: its site row, its organisation, the syncs of its connections, its model spend and its audit trail.` : "Every tenant, every site, and what each one is costing us."}>
+        {site ? <Link className="text-sm underline-offset-2 hover:underline" href={opsHref(null) as Route}>Show all projects</Link> : <Badge variant="secondary">{orgs.length} orgs</Badge>}
+        {site ? null : <Badge variant="secondary">{sites.length} sites</Badge>}
+        {failingSites ? <Badge variant="destructive">{site ? "proxy failing" : `${failingSites} failing`}</Badge> : <Badge variant="success">{site ? "proxy healthy" : "all healthy"}</Badge>}
         {failed.length ? <Badge variant="warning">{failed.length} failed syncs / 7d</Badge> : null}
       </PageHeader>
-      <UrlTabs defaultValue="sites" values={OPS_SECTIONS.map((s) => s.value)}>
+      <UrlTabs defaultValue="sites" values={sections.map((s) => s.value)}>
         <TabsList>
-          <TabsTrigger value="sites">Sites</TabsTrigger>
-          <TabsTrigger value="orgs">Organisations</TabsTrigger>
+          <TabsTrigger value="sites">{site ? "Site" : "Sites"}</TabsTrigger>
+          <TabsTrigger value="orgs">{site ? "Organisation" : "Organisations"}</TabsTrigger>
           <TabsTrigger value="health">Connector health</TabsTrigger>
           <TabsTrigger value="spend">LLM spend</TabsTrigger>
-          <TabsTrigger value="staff">Staff</TabsTrigger>
+          {site ? null : <TabsTrigger value="staff">Staff</TabsTrigger>}
           <TabsTrigger value="audit">Audit log</TabsTrigger>
         </TabsList>
 
@@ -106,8 +124,8 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
             <CardContent>
               {failed.length === 0 ? <p className="text-muted-foreground text-sm">No failed syncs.</p> : (
                 <Table>
-                  <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Org</TableHead><TableHead>Provider</TableHead><TableHead>Kind</TableHead><TableHead>Error</TableHead></TableRow></TableHeader>
-                  <TableBody>{failed.map((f) => <TableRow key={f.id}><TableCell>{when(f.started_at)}</TableCell><TableCell>{f.org_name}</TableCell><TableCell>{f.provider}</TableCell><TableCell>{f.kind}</TableCell><TableCell className="max-w-md truncate text-xs">{f.error}</TableCell></TableRow>)}</TableBody>
+                  <TableHeader><TableRow><TableHead>When</TableHead><TableHead>{site ? "Scope" : "Org"}</TableHead><TableHead>Provider</TableHead><TableHead>Kind</TableHead><TableHead>Error</TableHead></TableRow></TableHeader>
+                  <TableBody>{failed.map((f) => <TableRow key={f.id}><TableCell>{when(f.started_at)}</TableCell><TableCell>{site ? (f.site_name ?? "organisation-wide") : f.org_name}</TableCell><TableCell>{f.provider}</TableCell><TableCell>{f.kind}</TableCell><TableCell className="max-w-md truncate text-xs">{f.error}</TableCell></TableRow>)}</TableBody>
                 </Table>
               )}
             </CardContent>
@@ -116,17 +134,26 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
 
         <TabsContent value="spend" className="pt-4">
           <Card>
-            <CardHeader><CardTitle>Model spend by organisation, last 30 days</CardTitle><CardDescription>From ops.llm_calls. Billing truth is the provider invoice; this is the per-tenant view.</CardDescription></CardHeader>
+            <CardHeader><CardTitle>{site ? "Model spend by pipeline task, last 30 days" : "Model spend by organisation, last 30 days"}</CardTitle><CardDescription>From ops.llm_calls. Billing truth is the provider invoice; this is the {site ? "per-project" : "per-tenant"} view.</CardDescription></CardHeader>
             <CardContent>
-              <Table>
-                <TableHeader><TableRow><TableHead>Org</TableHead><TableHead>Calls</TableHead><TableHead>Estimated USD</TableHead></TableRow></TableHeader>
-                <TableBody>{spend.map((s) => <TableRow key={s.org_name}><TableCell>{s.org_name}</TableCell><TableCell>{s.calls}</TableCell><TableCell className="font-mono">${s.cost_usd.toFixed(2)}</TableCell></TableRow>)}</TableBody>
-              </Table>
+              {site ? (
+                siteSpend.length === 0 ? <p className="text-muted-foreground text-sm">No model calls for this project in the last 30 days.</p> : (
+                  <Table>
+                    <TableHeader><TableRow><TableHead>Task</TableHead><TableHead>Calls</TableHead><TableHead>Estimated USD</TableHead></TableRow></TableHeader>
+                    <TableBody>{siteSpend.map((s) => <TableRow key={s.task_key}><TableCell className="font-mono text-xs">{s.task_key}</TableCell><TableCell>{s.calls}</TableCell><TableCell className="font-mono">${s.cost_usd.toFixed(2)}</TableCell></TableRow>)}</TableBody>
+                  </Table>
+                )
+              ) : (
+                <Table>
+                  <TableHeader><TableRow><TableHead>Org</TableHead><TableHead>Calls</TableHead><TableHead>Estimated USD</TableHead></TableRow></TableHeader>
+                  <TableBody>{spend.map((s) => <TableRow key={s.org_name}><TableCell>{s.org_name}</TableCell><TableCell>{s.calls}</TableCell><TableCell className="font-mono">${s.cost_usd.toFixed(2)}</TableCell></TableRow>)}</TableBody>
+                </Table>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
 
-        <TabsContent value="staff" className="grid gap-4 pt-4">
+        {site ? null : <TabsContent value="staff" className="grid gap-4 pt-4">
           <Card>
             <CardHeader><CardTitle>Internal staff</CardTitle><CardDescription>A separate axis from customer memberships. Staff read every org and use this console.</CardDescription></CardHeader>
             <CardContent className="grid gap-4">
@@ -140,10 +167,10 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
               <StaffForm />
             </CardContent>
           </Card>
-        </TabsContent>
+        </TabsContent>}
         <TabsContent value="audit" className="pt-4">
           <Card>
-            <CardHeader><CardTitle>Audit log</CardTitle><CardDescription>Every staff and owner action on any organisation, newest first. Billing webhooks land here too.</CardDescription></CardHeader>
+            <CardHeader><CardTitle>Audit log</CardTitle><CardDescription>{site ? "Staff and owner actions about this project, newest first." : "Every staff and owner action on any organisation, newest first. Billing webhooks land here too."}</CardDescription></CardHeader>
             <CardContent>
               {audit.length === 0 ? <p className="text-muted-foreground text-sm">Nothing recorded yet.</p> : (
                 <Table>
