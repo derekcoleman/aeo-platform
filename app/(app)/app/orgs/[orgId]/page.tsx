@@ -1,5 +1,3 @@
-import type { Route } from "next";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/app/action-button";
 import { InviteForm, SettingsForm } from "@/components/app/org-forms";
@@ -7,10 +5,11 @@ import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UrlTabs } from "@/components/app/url-tabs";
+import { ORG_SECTIONS, resolveTab } from "@/lib/app/nav";
 import { auditLog, listInvites, listMembers, loadOrg } from "@/lib/app/org";
 import { openPortalAction, removeMemberAction, revokeInviteAction, setMemberRoleAction, startCheckoutAction } from "@/lib/app/org-actions";
 import { requireUser, roleIn } from "@/lib/auth/session";
@@ -19,9 +18,9 @@ import { PLANS, stripeConfigured } from "@/lib/billing/stripe";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export default async function OrgPage({ params, searchParams }: { params: Promise<{ orgId: string }>; searchParams: Promise<{ checkout?: string }> }) {
+export default async function OrgPage({ params, searchParams }: { params: Promise<{ orgId: string }>; searchParams: Promise<{ checkout?: string; tab?: string }> }) {
   const { orgId } = await params;
-  const { checkout } = await searchParams;
+  const { checkout, tab: requestedTab } = await searchParams;
   const user = await requireUser(`/app/orgs/${orgId}`);
   const role = roleIn(user, orgId);
   if (!role) notFound();
@@ -30,17 +29,17 @@ export default async function OrgPage({ params, searchParams }: { params: Promis
   const isOwner = role === "owner" || user.isStaff;
   const isAdmin = isOwner || role === "admin";
   const billingOn = stripeConfigured();
+  const tab = resolveTab(ORG_SECTIONS, requestedTab, checkout ? "billing" : "members");
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={org.name} description={`Organisation settings · ${org.plan} (${org.plan_status})`}>
+    <AppShell user={user} org={org} section={tab}>
+      <PageHeader title={org.name} eyebrow="Organisation settings" description={`${org.plan} (${org.plan_status})`}>
         <Badge variant={org.plan_status === "active" ? "success" : org.plan_status === "past_due" ? "destructive" : "secondary"}>{org.plan_status}</Badge>
         <Badge variant="secondary">{members.length} members</Badge>
-        <Button asChild variant="outline" size="sm"><Link href={"/app" as Route}>Projects</Link></Button>
       </PageHeader>
       {checkout === "success" ? <Alert variant="success" className="mb-4"><AlertTitle>Thanks</AlertTitle><AlertDescription>Your subscription is being confirmed; the plan updates as soon as Stripe notifies us.</AlertDescription></Alert> : null}
       {checkout === "cancel" ? <Alert className="mb-4"><AlertTitle>Checkout cancelled</AlertTitle><AlertDescription>No changes were made.</AlertDescription></Alert> : null}
 
-      <Tabs defaultValue="members">
+      <UrlTabs defaultValue={checkout ? "billing" : "members"} values={ORG_SECTIONS.map((s) => s.value)}>
         <TabsList>
           <TabsTrigger value="members">Members</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
@@ -163,7 +162,7 @@ export default async function OrgPage({ params, searchParams }: { params: Promis
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
+      </UrlTabs>
     </AppShell>
   );
 }

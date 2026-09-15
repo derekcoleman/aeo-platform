@@ -1,12 +1,9 @@
-import type { Route } from "next";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DecisionForm } from "@/components/app/decision-form";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { loadApprovalDetail, loadQaResults } from "@/lib/app/content";
 import { loadSite } from "@/lib/app/store";
@@ -35,10 +32,9 @@ export default async function ApprovalPage({ params }: { params: Promise<{ appro
   const decided = approval.status !== "pending";
 
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={version?.title ?? brief?.spec.title ?? "Approval"} description={`${site.name} · ${approval.kind === "brief" ? "Brief approval" : "Draft approval"} · requested ${when(approval.requested_at)}`}>
+    <AppShell user={user} site={site} page="content">
+      <PageHeader title={version?.title ?? brief?.spec.title ?? "Approval"} eyebrow={site.name} description={`${approval.kind === "brief" ? "Brief approval" : "Draft approval"} · requested ${when(approval.requested_at)}`}>
         <Badge variant={approval.status === "pending" ? "warning" : approval.status === "approve" ? "success" : "secondary"}>{approval.status}</Badge>
-        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${site.id}/content` as Route}>All content</Link></Button>
       </PageHeader>
 
       {decided ? (

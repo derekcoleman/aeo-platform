@@ -7,10 +7,11 @@ import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UrlTabs } from "@/components/app/url-tabs";
+import { resolveTab, sitePage } from "@/lib/app/nav";
 import { demandCounts, listSiteQuestions, serpSpendSummary } from "@/lib/app/demand";
 import { setTrackingAction, snapshotNowAction, trackTopAction } from "@/lib/app/demand-actions";
 import { loadSite } from "@/lib/app/store";
@@ -25,8 +26,9 @@ export const runtime = "nodejs";
 
 const TIERS = ["daily", "weekly", "monthly", "none"] as const;
 
-export default async function DemandPage({ params }: { params: Promise<{ siteId: string }> }) {
+export default async function DemandPage({ params, searchParams }: { params: Promise<{ siteId: string }>; searchParams: Promise<{ tab?: string }> }) {
   const { siteId } = await params;
+  const { tab: requestedTab } = await searchParams;
   const user = await requireUser(`/app/sites/${siteId}/demand`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
@@ -44,15 +46,17 @@ export default async function DemandPage({ params }: { params: Promise<{ siteId:
   const locale = mineLocale(site.locale);
   const providerConfigured = !!(process.env.DATAFORSEO_LOGIN || process.env.SERPAPI_KEY);
   const budgetPct = spend.budget_usd > 0 ? Math.min(100, Math.round((spend.org_month_usd / spend.budget_usd) * 100)) : 0;
+  const sections = sitePage("demand").sections!;
+  const defaultTab = gaps.length ? "gaps" : counts.questions ? "questions" : "mine";
+  const tab = resolveTab(sections, requestedTab, defaultTab);
   const share = visibility.aio_triggered ? Math.round((visibility.aio_cited / visibility.aio_triggered) * 100) : 0;
 
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={`${site.name} · Demand & AI Overviews`} description="What buyers actually ask, phrased how they ask it, and whether an AI Overview cites you when they do.">
+    <AppShell user={user} site={site} page="demand" section={tab}>
+      <PageHeader title="Demand & AI Overviews" eyebrow={site.name} description="What buyers actually ask, phrased how they ask it, and whether an AI Overview cites you when they do.">
         <Badge variant="secondary">{counts.questions} questions</Badge>
         <Badge variant="secondary">{counts.tracked} tracked</Badge>
         <Badge variant={budgetPct >= 90 ? "destructive" : "outline"}>SERP spend ${spend.org_month_usd.toFixed(2)} / ${spend.budget_usd.toFixed(0)}</Badge>
-        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}` as Route}>Back to project</Link></Button>
       </PageHeader>
 
       {!providerConfigured ? (
@@ -69,7 +73,7 @@ export default async function DemandPage({ params }: { params: Promise<{ siteId:
         <Card><CardHeader className="pb-2"><CardDescription>Top competitors cited</CardDescription><CardTitle className="text-base">{visibility.top_competitors.slice(0, 3).map((c) => `${c.domain} (${c.citations})`).join(", ") || "—"}</CardTitle></CardHeader><CardContent className="text-muted-foreground text-xs">{counts.snapshots_7d} snapshots in 7d</CardContent></Card>
       </div>
 
-      <Tabs defaultValue={gaps.length ? "gaps" : counts.questions ? "questions" : "mine"}>
+      <UrlTabs defaultValue={defaultTab} values={sections.map((s) => s.value)}>
         <TabsList>
           <TabsTrigger value="gaps">Citation gaps {gaps.length ? <Badge variant="warning">{gaps.length}</Badge> : null}</TabsTrigger>
           <TabsTrigger value="questions">Questions</TabsTrigger>
@@ -155,7 +159,7 @@ export default async function DemandPage({ params }: { params: Promise<{ siteId:
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
+      </UrlTabs>
     </AppShell>
   );
 }

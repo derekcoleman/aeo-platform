@@ -1,8 +1,5 @@
-import type { Route } from "next";
-import Link from "next/link";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { requireStaff } from "@/lib/auth/session";
@@ -37,11 +34,10 @@ export default async function SetupPage() {
   }
   const report = await runSetupChecks({ claims });
   return (
-    <AppShell user={user} active="ops">
+    <AppShell user={user} active="ops" page="setup">
       <PageHeader title="Setup checklist" description="Live checks against this deployment. Each failure names the dashboard toggle or variable that fixes it.">
         {report.failing ? <Badge variant="destructive">{report.failing} failing</Badge> : <Badge variant="success">all required checks pass</Badge>}
         {report.warnings ? <Badge variant="warning">{report.warnings} to confirm</Badge> : null}
-        <Button asChild variant="outline" size="sm"><Link href={"/ops" as Route}>Back to ops</Link></Button>
       </PageHeader>
       <div className="grid gap-4">
         {GROUPS.map((g) => {

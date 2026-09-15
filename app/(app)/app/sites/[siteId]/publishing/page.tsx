@@ -1,5 +1,3 @@
-import type { Route } from "next";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/app/action-button";
 import { FieldMapForm, TargetPicker, WebflowConnectForm, type SiteOption } from "@/components/app/publishing-forms";
@@ -7,7 +5,6 @@ import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { listContentItems } from "@/lib/app/content";
@@ -63,11 +60,10 @@ export default async function PublishingPage({ params }: { params: Promise<{ sit
   for (const p of publications) pubByItem.set(p.content_item_id, [...(pubByItem.get(p.content_item_id) ?? []), p]);
 
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={`${site.name} · Publishing`} description="Where articles go. The proxy serves them on your domain; a Webflow target pushes each one into your CMS as a blog post and keeps it updated.">
+    <AppShell user={user} site={site} page="publishing">
+      <PageHeader title="Publishing" eyebrow={site.name} description="Where articles go. The proxy serves them on your domain; a Webflow target pushes each one into your CMS as a blog post and keeps it updated.">
         <Badge variant="secondary">{targets.filter((t) => t.enabled).length} target{targets.filter((t) => t.enabled).length === 1 ? "" : "s"}</Badge>
         <Badge variant={publications.some((p) => p.status === "failed") ? "destructive" : "outline"}>{publications.filter((p) => p.status === "published").length} pushed · {publications.filter((p) => p.status === "failed").length} failed</Badge>
-        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}` as Route}>Back to project</Link></Button>
       </PageHeader>
 
       {lookupErrors.length ? <Alert variant="warning" className="mb-4"><AlertTitle>Webflow lookup failed</AlertTitle><AlertDescription>{lookupErrors.join(" · ")}</AlertDescription></Alert> : null}

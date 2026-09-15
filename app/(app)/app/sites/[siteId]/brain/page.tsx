@@ -10,7 +10,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UrlTabs } from "@/components/app/url-tabs";
+import { resolveTab, sitePage } from "@/lib/app/nav";
 import { FACT_TYPE_LABEL, brainCounts, brainSources, listManifests, listSignals } from "@/lib/app/brain";
 import { activateManifestAction, dismissSignalAction, draftManifestAction, extractFactsAction, ingestNowAction, rejectFactAction, scanSignalsAction, verifyFactAction } from "@/lib/app/brain-actions";
 import { loadSite } from "@/lib/app/store";
@@ -38,8 +40,9 @@ function FactLine({ f }: { f: FactRow }) {
   );
 }
 
-export default async function BrainPage({ params }: { params: Promise<{ siteId: string }> }) {
+export default async function BrainPage({ params, searchParams }: { params: Promise<{ siteId: string }>; searchParams: Promise<{ tab?: string }> }) {
   const { siteId } = await params;
+  const { tab: requestedTab } = await searchParams;
   const user = await requireUser(`/app/sites/${siteId}/brain`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
@@ -57,20 +60,22 @@ export default async function BrainPage({ params }: { params: Promise<{ siteId: 
   const active = manifests.find((m) => m.status === "active") ?? null;
   const brandName = entities.find((e) => e.type === "brand")?.name ?? site.name;
   const template = JSON.stringify(active?.doc ?? manifestDocSchema.parse({ brand: { name: brandName, oneLiner: "", category: "" } }), null, 2);
+  const sections = sitePage("brain").sections!;
+  const defaultTab = counts.candidates ? "verify" : "facts";
+  const tab = resolveTab(sections, requestedTab, defaultTab);
   const byType = new Map<string, FactRow[]>();
   for (const f of verified) byType.set(f.type, [...(byType.get(f.type) ?? []), f]);
 
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={`${site.name} · Brand brain`} description="What the company actually knows: verified facts, named entities, and the manifesto every brief and draft is pinned to.">
+    <AppShell user={user} site={site} page="brain" section={tab}>
+      <PageHeader title="Brand brain" eyebrow={site.name} description="What the company actually knows: verified facts, named entities, and the manifesto every brief and draft is pinned to.">
         <Badge variant={counts.candidates ? "warning" : "secondary"}>{counts.candidates} to verify</Badge>
         <Badge variant="secondary">{counts.verified} verified</Badge>
         <Badge variant="secondary">{counts.entities} entities</Badge>
         <Badge variant="secondary">{counts.chunks} chunks</Badge>
-        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}` as Route}>Back to project</Link></Button>
       </PageHeader>
 
-      <Tabs defaultValue={counts.candidates ? "verify" : "facts"}>
+      <UrlTabs defaultValue={defaultTab} values={sections.map((s) => s.value)}>
         <TabsList>
           <TabsTrigger value="verify">Verify {counts.candidates ? <Badge variant="warning">{counts.candidates}</Badge> : null}</TabsTrigger>
           <TabsTrigger value="facts">Facts</TabsTrigger>
@@ -236,7 +241,7 @@ export default async function BrainPage({ params }: { params: Promise<{ siteId: 
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
+      </UrlTabs>
     </AppShell>
   );
 }

@@ -7,10 +7,11 @@ import { when } from "@/components/app/status";
 import { ContentRequestForm, EditTopic, KeywordsForm, ProfoundConnectForm, PromptForm, TopicForm } from "@/components/app/strategy-forms";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UrlTabs } from "@/components/app/url-tabs";
+import { resolveTab, sitePage } from "@/lib/app/nav";
 import { loadSite } from "@/lib/app/store";
 import { competitorDomains, listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
 import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
@@ -23,9 +24,9 @@ export const runtime = "nodejs";
 
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
 
-export default async function StrategyPage({ params, searchParams }: { params: Promise<{ siteId: string }>; searchParams: Promise<{ topic?: string }> }) {
+export default async function StrategyPage({ params, searchParams }: { params: Promise<{ siteId: string }>; searchParams: Promise<{ topic?: string; tab?: string }> }) {
   const { siteId } = await params;
-  const { topic: topicFilter } = await searchParams;
+  const { topic: topicFilter, tab: requestedTab } = await searchParams;
   const user = await requireUser(`/app/sites/${siteId}/strategy`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
@@ -44,19 +45,20 @@ export default async function StrategyPage({ params, searchParams }: { params: P
   const target = structuralTargetFrom(pages);
   const topicName = (id: string | null) => topics.find((t) => t.id === id)?.name ?? null;
   const activeTopics = topics.filter((t) => t.status !== "archived");
+  const sections = sitePage("strategy").sections!;
+  const tab = resolveTab(sections, requestedTab, "topics");
 
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={`${site.name} · Strategy`} description="What you want to be known for, what buyers ask about it, who gets cited instead of you, and what their content looks like. Everything here steers the queue and the briefs.">
+    <AppShell user={user} site={site} page="strategy" section={tab}>
+      <PageHeader title="Strategy" eyebrow={site.name} description="What you want to be known for, what buyers ask about it, who gets cited instead of you, and what their content looks like. Everything here steers the queue and the briefs.">
         <Badge variant="secondary">{activeTopics.length} topics</Badge>
         <Badge variant="secondary">{prompts.filter((p) => p.is_tracked && !p.excluded).length} tracked prompts</Badge>
         {profound ? <Badge variant={profound.status === "active" ? "success" : "destructive"}>Profound {profound.mode}</Badge> : <Badge variant="outline">Profound not connected</Badge>}
-        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}` as Route}>Back to project</Link></Button>
       </PageHeader>
 
       {topicFilter ? <p className="text-muted-foreground mb-3 text-sm">Filtered to topic <span className="font-medium">{topicName(topicFilter) ?? topicFilter}</span> · <Link className="underline-offset-2 hover:underline" href={`/app/sites/${siteId}/strategy` as Route}>show all</Link></p> : null}
 
-      <Tabs defaultValue={activeTopics.length ? "topics" : "topics"}>
+      <UrlTabs defaultValue="topics" values={sections.map((s) => s.value)}>
         <TabsList>
           <TabsTrigger value="topics">Topics</TabsTrigger>
           <TabsTrigger value="prompts">Prompts & questions</TabsTrigger>
@@ -239,7 +241,7 @@ export default async function StrategyPage({ params, searchParams }: { params: P
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
+      </UrlTabs>
     </AppShell>
   );
 }

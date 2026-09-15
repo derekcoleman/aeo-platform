@@ -1,11 +1,8 @@
-import type { Route } from "next";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { assetAttribution, signalsAgreeing, siteSignals } from "@/lib/app/attribution";
@@ -30,11 +27,10 @@ export default async function AttributionPage({ params }: { params: Promise<{ si
   const [assets, signals, visibility] = await Promise.all([assetAttribution(siteId), siteSignals(siteId), visibilitySummary(siteId)]);
   const agreeing = assets.filter((a) => signalsAgreeing(a) >= 2).length;
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={`${site.name} · Attribution`} description="Three independent signals per published asset. A claim needs at least two of them to agree; one alone is a vanity metric.">
+    <AppShell user={user} site={site} page="attribution">
+      <PageHeader title="Attribution" eyebrow={site.name} description="Three independent signals per published asset. A claim needs at least two of them to agree; one alone is a vanity metric.">
         <Badge variant="secondary">{assets.length} published</Badge>
         <Badge variant={agreeing ? "success" : "outline"}>{agreeing} with 2+ signals</Badge>
-        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}` as Route}>Back to project</Link></Button>
       </PageHeader>
 
       {!signals.has_ga4 && !signals.has_gsc ? (
