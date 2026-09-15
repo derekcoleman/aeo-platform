@@ -176,3 +176,24 @@ describe("profoundConnector", () => {
     expect(new ConnectorError("profound", "x").name).toBe("ConnectorError");
   });
 });
+
+describe("backfill windows", () => {
+  it("walks a long backfill in fixed windows and stops at today", async () => {
+    const { backfillWindow, BACKFILL_WINDOW_DAYS } = await import("@/lib/connectors/profound");
+    expect(BACKFILL_WINDOW_DAYS).toBe(30);
+    expect(backfillWindow("2026-06-17", "2026-09-15")).toEqual({ start: "2026-06-17", end: "2026-07-16", next: "2026-07-17" });
+    expect(backfillWindow("2026-07-17", "2026-09-15")).toEqual({ start: "2026-07-17", end: "2026-08-15", next: "2026-08-16" });
+    expect(backfillWindow("2026-08-16", "2026-09-15")).toEqual({ start: "2026-08-16", end: "2026-09-14", next: "2026-09-15" });
+    expect(backfillWindow("2026-09-15", "2026-09-15")).toEqual({ start: "2026-09-15", end: "2026-09-15", next: null });
+    expect(backfillWindow("2026-09-20", "2026-09-15")).toEqual({ start: "2026-09-15", end: "2026-09-15", next: null });
+    expect(backfillWindow("2026-09-10", "2026-09-15", 7)).toEqual({ start: "2026-09-10", end: "2026-09-15", next: null });
+  });
+
+  it("only resumes from a well-formed date in the payload", async () => {
+    const { backfillResumeFrom } = await import("@/lib/connectors/profound");
+    expect(backfillResumeFrom({ from: "2026-07-17" })).toBe("2026-07-17");
+    expect(backfillResumeFrom({ from: "yesterday" })).toBeNull();
+    expect(backfillResumeFrom({ csv: "x" })).toBeNull();
+    expect(backfillResumeFrom(undefined)).toBeNull();
+  });
+});

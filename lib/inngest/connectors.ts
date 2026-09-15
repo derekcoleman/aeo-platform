@@ -1,5 +1,5 @@
 import { connectorContext, getConnector } from "@/lib/connectors";
-import { errorMessage, getConnection, lastSuccessfulCursor, listConnections, markWebhookProcessed, withSyncRun } from "@/lib/connectors/store";
+import { errorMessage, expireStaleSyncRuns, getConnection, lastSuccessfulCursor, listConnections, markWebhookProcessed, withSyncRun } from "@/lib/connectors/store";
 import { ConnectorError, type SyncKind } from "@/lib/connectors/types";
 import { ZodError } from "zod";
 import { connectorSyncCompleted, connectorSyncRequested, connectorWebhookReceived, inngest } from "./client";
@@ -42,6 +42,9 @@ export const connectorSyncFunction = inngest.createFunction(
     const outcome = await step.run("sync", async () => {
       const ctx = connectorContext();
       const connector = getConnector(conn.provider);
+      // A run left "running" by a killed function is closed as failed first,
+      // so the health board and the card never show a spinner that never ends.
+      await expireStaleSyncRuns(conn.id, ctx.sql);
       const cursor = await lastSuccessfulCursor(conn.id, ctx.sql);
       try {
         const r = await withSyncRun(conn, kind as SyncKind, () => connector.sync({ connection: conn as never, kind: kind as SyncKind, cursor, payload }, ctx), ctx.sql);
@@ -54,6 +57,13 @@ export const connectorSyncFunction = inngest.createFunction(
         return { ok: false as const, documentsIngested: 0, metricsIngested: 0, error: errorMessage(e), detail: null };
       }
     });
+
+    // A windowed backfill (Profound) reports where the next window starts;
+    // queue it as its own run so no single invocation outlives the limit.
+    const next = outcome.ok && outcome.detail && typeof outcome.detail === "object" ? (outcome.detail as { next?: { from?: unknown } | null }).next : null;
+    if (next && typeof next.from === "string") {
+      await step.sendEvent("continue-backfill", connectorSyncRequested.create({ connectionId, orgId, kind: "backfill", payload: { from: next.from } }));
+    }
 
     await step.sendEvent(
       "notify",

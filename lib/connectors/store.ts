@@ -151,6 +151,50 @@ export async function lastSuccessfulCursor(connectionId: string, sql: postgres.S
   return row?.cursor ?? null;
 }
 
+/** The most recent run for a connection, whatever its state; what the connection card reports. */
+export interface SyncRunRow {
+  id: string;
+  kind: SyncKind;
+  status: "running" | "succeeded" | "failed";
+  started_at: string | Date;
+  finished_at: string | Date | null;
+  documents_ingested: number;
+  metrics_ingested: number;
+  error: string | null;
+  detail: Record<string, unknown>;
+}
+
+export async function latestSyncRun(connectionId: string, sql: postgres.Sql = appDb()): Promise<SyncRunRow | null> {
+  const [row] = await sql<SyncRunRow[]>`
+    select id, kind, status, started_at, finished_at, documents_ingested, metrics_ingested, error, detail
+    from context.context_sync_runs where connection_id = ${connectionId}
+    order by started_at desc limit 1`;
+  return row ?? null;
+}
+
+/** Record that a sync was asked for and the event accepted, so the UI can notice when nothing runs. */
+export async function markSyncRequested(connectionId: string, kind: SyncKind, sql: postgres.Sql = appDb()): Promise<void> {
+  await sql`update context.context_connections set sync_requested_at = now(), sync_requested_kind = ${kind}, updated_at = now() where id = ${connectionId}`;
+}
+
+/** A run still "running" this long after it started was killed (the platform's function limit, a crash); Inngest retries write new rows. */
+export const STALE_RUN_MINUTES = 20;
+
+/**
+ * Close runs that started long ago and never reported back, so the health
+ * board and the connection card show a failure with a reason rather than a
+ * spinner that never stops. Returns how many were closed.
+ */
+export async function expireStaleSyncRuns(connectionId: string, sql: postgres.Sql = appDb(), minutes = STALE_RUN_MINUTES): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    update context.context_sync_runs
+    set status = 'failed', finished_at = now(),
+        error = 'Timed out: the run started ' || to_char(started_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC and never finished (the function likely exceeded its time limit)'
+    where connection_id = ${connectionId} and status = 'running' and started_at < now() - make_interval(mins => ${minutes})
+    returning id`;
+  return rows.length;
+}
+
 export async function startSyncRun(conn: Pick<ConnectionRow, "id" | "org_id">, kind: SyncKind, sql: postgres.Sql = appDb()): Promise<SyncRunHandle> {
   const [row] = await sql<{ id: string }[]>`
     insert into context.context_sync_runs (org_id, connection_id, kind) values (${conn.org_id}, ${conn.id}, ${kind}) returning id`;
