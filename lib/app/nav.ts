@@ -103,9 +103,18 @@ export function sitePageHref(siteId: string, page: SitePageDef | SitePageKey): s
   return def.segment ? `/app/sites/${siteId}/${def.segment}` : `/app/sites/${siteId}`;
 }
 
+/** The ops console (or one of its pages) scoped to a project, or platform-wide when there is no project. */
+export function opsHref(siteId: string | null | undefined, path: "" | "setup" = ""): string {
+  const base = path ? `/ops/${path}` : "/ops";
+  return siteId ? `${base}?site=${encodeURIComponent(siteId)}` : base;
+}
+
 /** Where another project's copy of the current page lives, so switching projects keeps the page you are on. */
 export function pageHrefForSite(siteId: string, page: string | undefined): string {
   if (page === "connectors") return `/app/sites/${siteId}/connectors`;
+  if (page === "console") return opsHref(siteId);
+  if (page === "setup") return opsHref(siteId, "setup");
+  if (page === "theme") return `/ops/sites/${siteId}/theme`;
   const def = SITE_PAGES.find((p) => p.key === page);
   return def ? sitePageHref(siteId, def) : `/app/sites/${siteId}`;
 }
@@ -116,7 +125,7 @@ export function sitePage(key: SitePageKey): SitePageDef {
 
 /** The deep link to one section of a page. Always explicit: a page's default section depends on its data. */
 export function sectionHref(href: string, value: string): string {
-  return `${href}?tab=${encodeURIComponent(value)}`;
+  return `${href}${href.includes("?") ? "&" : "?"}tab=${encodeURIComponent(value)}`;
 }
 
 /** Resolve a `?tab=` value against a page's sections, falling back to the default. */

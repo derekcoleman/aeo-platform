@@ -12,26 +12,30 @@ import { UrlTabs } from "@/components/app/url-tabs";
 import { ORG_SECTIONS, resolveTab } from "@/lib/app/nav";
 import { auditLog, listInvites, listMembers, loadOrg } from "@/lib/app/org";
 import { openPortalAction, removeMemberAction, revokeInviteAction, setMemberRoleAction, startCheckoutAction } from "@/lib/app/org-actions";
+import { loadSite } from "@/lib/app/store";
 import { requireUser, roleIn } from "@/lib/auth/session";
 import { PLANS, stripeConfigured } from "@/lib/billing/stripe";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export default async function OrgPage({ params, searchParams }: { params: Promise<{ orgId: string }>; searchParams: Promise<{ checkout?: string; tab?: string }> }) {
+export default async function OrgPage({ params, searchParams }: { params: Promise<{ orgId: string }>; searchParams: Promise<{ checkout?: string; tab?: string; site?: string }> }) {
   const { orgId } = await params;
-  const { checkout, tab: requestedTab } = await searchParams;
+  const { checkout, tab: requestedTab, site: siteParam } = await searchParams;
   const user = await requireUser(`/app/orgs/${orgId}`);
   const role = roleIn(user, orgId);
   if (!role) notFound();
   const [org, members, invites, audit] = await Promise.all([loadOrg(orgId), listMembers(orgId), listInvites(orgId), auditLog(orgId, 50)]);
+  // Opened from a project: keep that project in the sidebar. Only a project of this organisation counts.
+  const siteCandidate = siteParam ? await loadSite(siteParam) : null;
+  const site = siteCandidate && siteCandidate.org_id === orgId ? siteCandidate : null;
   if (!org) notFound();
   const isOwner = role === "owner" || user.isStaff;
   const isAdmin = isOwner || role === "admin";
   const billingOn = stripeConfigured();
   const tab = resolveTab(ORG_SECTIONS, requestedTab, checkout ? "billing" : "members");
   return (
-    <AppShell user={user} org={org} section={tab}>
+    <AppShell user={user} org={org} site={site} page={site ? "org" : undefined} section={tab}>
       <PageHeader title={org.name} eyebrow="Organisation settings" description={`${org.plan} (${org.plan_status})`}>
         <Badge variant={org.plan_status === "active" ? "success" : org.plan_status === "past_due" ? "destructive" : "secondary"}>{org.plan_status}</Badge>
         <Badge variant="secondary">{members.length} members</Badge>

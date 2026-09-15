@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, pageHrefForSite, resolveTab, sectionHref, sitePage, sitePageHref } from "@/lib/app/nav";
+import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, opsHref, pageHrefForSite, resolveTab, sectionHref, sitePage, sitePageHref } from "@/lib/app/nav";
 
 describe("app navigation model", () => {
   it("routes every project page under the site and keeps the overview on the bare path", () => {
@@ -22,14 +22,19 @@ describe("app navigation model", () => {
     expect(pageHrefForSite("s2", "strategy")).toBe("/app/sites/s2/strategy");
     expect(pageHrefForSite("s2", "overview")).toBe("/app/sites/s2");
     expect(pageHrefForSite("s2", "connectors")).toBe("/app/sites/s2/connectors");
-    expect(pageHrefForSite("s2", "console")).toBe("/app/sites/s2");
+    expect(pageHrefForSite("s2", "console")).toBe("/ops?site=s2");
+    expect(pageHrefForSite("s2", "setup")).toBe("/ops/setup?site=s2");
+    expect(pageHrefForSite("s2", "theme")).toBe("/ops/sites/s2/theme");
     expect(pageHrefForSite("s2", undefined)).toBe("/app/sites/s2");
+    expect(opsHref(null)).toBe("/ops");
+    expect(opsHref("s2", "setup")).toBe("/ops/setup?site=s2");
     expect(SITE_PAGES.some((p) => p.key === "connectors")).toBe(false);
   });
 
   it("deep links to a section with an explicit tab query", () => {
     expect(sectionHref("/app/sites/s1", "checks")).toBe("/app/sites/s1?tab=checks");
     expect(sectionHref("/ops", "LLM spend")).toBe("/ops?tab=LLM%20spend");
+    expect(sectionHref("/ops?site=s1", "health")).toBe("/ops?site=s1&tab=health");
   });
 
   it("resolves a requested tab only when the page has it", () => {

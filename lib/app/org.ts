@@ -107,12 +107,14 @@ export interface AuditRow {
   at: string | Date;
 }
 
-export async function auditLog(orgId: string | null, limit = 100, sql: postgres.Sql = appDb()): Promise<AuditRow[]> {
+/** With `siteId`, only the entries about that project: its own target id, or a payload that names it. */
+export async function auditLog(orgId: string | null, limit = 100, sql: postgres.Sql = appDb(), siteId: string | null = null): Promise<AuditRow[]> {
   return sql<AuditRow[]>`
     select a.id, a.org_id, o.name as org_name, u.email as actor_email, a.action, a.target_type, a.target_id, a.after, a.at
     from app.audit_log a
     left join app.organizations o on o.id = a.org_id
     left join app.users u on u.id = a.actor_user_id
     where (${orgId}::uuid is null or a.org_id = ${orgId}::uuid)
+      and (${siteId}::text is null or a.target_id = ${siteId}::text or a.after->>'siteId' = ${siteId}::text or a.before->>'siteId' = ${siteId}::text)
     order by a.at desc limit ${limit}`;
 }
