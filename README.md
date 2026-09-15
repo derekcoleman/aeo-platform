@@ -17,6 +17,7 @@ The foundation and the render/proxy vertical slice.
 | ✅ | Host → site resolution and the proxy contract |
 | ✅ | Zero-JS article renderer + AEO artifacts (sitemap, llms.txt, feed, `.md`) |
 | ✅ | Install config generation for all four proxy modes |
+| ✅ | Content refresh: Webflow inventory × Search Console × citations → ranked, updated in place (`docs/REFRESH.md`) |
 | ⬜ | Ops console, publish pipeline, brand brain, audit port |
 
 ## Architecture in one diagram

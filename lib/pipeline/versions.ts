@@ -17,6 +17,8 @@ export interface ContentItemRow {
   title: string | null;
   status: string;
   current_version_id: string | null;
+  /** 'pipeline' for articles we serve through the proxy; 'cms' for an existing CMS post refreshed in place. */
+  origin: "pipeline" | "cms";
 }
 
 /** Slug conflicts get a numeric suffix rather than failing the run; the check constraint bounds the shape. */
@@ -33,12 +35,12 @@ export async function reserveSlug(siteId: string, base: string, sql: postgres.Sq
 }
 
 export async function createContentItem(
-  input: { siteId: string; slug: string; title: string; briefId: string | null; authorId: string | null; opportunityId: string | null; type?: string },
+  input: { siteId: string; slug: string; title: string; briefId: string | null; authorId: string | null; opportunityId: string | null; type?: string; origin?: "pipeline" | "cms" },
   sql: postgres.Sql = appDb(),
 ): Promise<{ id: string }> {
   const [row] = await sql<{ id: string }[]>`
-    insert into content.content_items (site_id, slug, type, status, title, brief_id, author_id, opportunity_id)
-    values (${input.siteId}, ${input.slug}, ${input.type ?? "article"}, 'draft', ${input.title}, ${input.briefId}, ${input.authorId}, ${input.opportunityId})
+    insert into content.content_items (org_id, site_id, slug, type, status, title, brief_id, author_id, opportunity_id, origin)
+    values ((select org_id from app.sites where id = ${input.siteId}), ${input.siteId}, ${input.slug}, ${input.type ?? "article"}, 'draft', ${input.title}, ${input.briefId}, ${input.authorId}, ${input.opportunityId}, ${input.origin ?? "pipeline"})
     returning id`;
   if (!row) throw new Error("content item insert returned no row");
   return row;
@@ -46,7 +48,7 @@ export async function createContentItem(
 
 export async function loadContentItem(id: string, sql: postgres.Sql = appDb()): Promise<ContentItemRow | null> {
   const [row] = await sql<ContentItemRow[]>`
-    select id, org_id, site_id, slug, title, status, current_version_id from content.content_items where id = ${id}`;
+    select id, org_id, site_id, slug, title, status, current_version_id, origin from content.content_items where id = ${id}`;
   return row ?? null;
 }
 

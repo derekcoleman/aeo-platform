@@ -246,6 +246,11 @@ export const strategyCompetitorsAnalyzeRequested = eventType("strategy/competito
   schema: z.object({ siteId: z.guid(), orgId: z.guid(), topicId: z.guid().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }),
 });
 
+/** Score the CMS inventory against traffic and citations and open refresh opportunities for the top candidates. */
+export const refreshScanRequested = eventType("content/refresh.scan.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
+});
+
 /** Push a published item to its external publish targets (one, or every enabled one). */
 export const publishingPushRequested = eventType("publishing/push.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid(), contentItemId: z.guid(), targetId: z.guid().nullable().optional(), force: z.boolean().optional() }),

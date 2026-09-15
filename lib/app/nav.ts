@@ -11,7 +11,7 @@ export interface NavSection {
   label: string;
 }
 
-export type SitePageKey = "overview" | "strategy" | "demand" | "brain" | "content" | "publishing" | "attribution";
+export type SitePageKey = "overview" | "strategy" | "demand" | "brain" | "content" | "refresh" | "publishing" | "attribution";
 
 export interface SitePageDef {
   key: SitePageKey;
@@ -69,6 +69,15 @@ export const SITE_PAGES: SitePageDef[] = [
     ],
   },
   { key: "content", label: "Content", segment: "content" },
+  {
+    key: "refresh",
+    label: "Refresh",
+    segment: "refresh",
+    sections: [
+      { value: "candidates", label: "Needs a refresh" },
+      { value: "inventory", label: "All CMS content" },
+    ],
+  },
   { key: "publishing", label: "Publishing", segment: "publishing" },
   { key: "attribution", label: "Attribution", segment: "attribution" },
 ];

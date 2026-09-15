@@ -57,9 +57,23 @@ export interface WebflowItem {
   id: string;
   isDraft: boolean;
   isArchived: boolean;
+  createdOn?: string | null;
+  lastUpdated?: string | null;
   lastPublished?: string | null;
   fieldData: Record<string, unknown>;
 }
+
+export interface WebflowItemPage {
+  items: WebflowItem[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+/** Webflow's maximum page size for collection items. */
+export const WEBFLOW_ITEMS_PAGE = 100;
+/** Hard ceiling per collection per sync; a blog with more posts than this is paged over several nights by offset. */
+export const WEBFLOW_MAX_ITEMS = 5000;
 
 export class WebflowApi {
   constructor(
@@ -140,6 +154,40 @@ export class WebflowApi {
   }
 
   async getItem(collectionId: string, itemId: string): Promise<WebflowItem> {
-    return this.call<WebflowItem>(`/collections/${collectionId}/items/${itemId}`);
+    return normalizeItem(await this.call<Record<string, unknown>>(`/collections/${collectionId}/items/${itemId}`));
   }
+
+  /** One page of a collection's items (staged, i.e. including drafts), oldest first as Webflow returns them. */
+  async listItems(collectionId: string, opts: { offset?: number; limit?: number } = {}): Promise<WebflowItemPage> {
+    const limit = Math.min(WEBFLOW_ITEMS_PAGE, Math.max(1, opts.limit ?? WEBFLOW_ITEMS_PAGE));
+    const offset = Math.max(0, opts.offset ?? 0);
+    const json = await this.call<{ items?: Record<string, unknown>[]; pagination?: { limit?: number; offset?: number; total?: number } }>(`/collections/${collectionId}/items?offset=${offset}&limit=${limit}`);
+    const items = (json.items ?? []).map(normalizeItem);
+    return { items, total: Number(json.pagination?.total ?? offset + items.length), offset: Number(json.pagination?.offset ?? offset), limit: Number(json.pagination?.limit ?? limit) };
+  }
+
+  /** Every item in a collection, paging by offset until the reported total or `maxItems` is reached. */
+  async listAllItems(collectionId: string, opts: { maxItems?: number } = {}): Promise<WebflowItem[]> {
+    const max = Math.max(1, opts.maxItems ?? WEBFLOW_MAX_ITEMS);
+    const out: WebflowItem[] = [];
+    for (let offset = 0; out.length < max; offset += WEBFLOW_ITEMS_PAGE) {
+      const page = await this.listItems(collectionId, { offset, limit: Math.min(WEBFLOW_ITEMS_PAGE, max - out.length) });
+      out.push(...page.items);
+      if (page.items.length === 0 || out.length >= page.total) break;
+    }
+    return out;
+  }
+}
+
+function normalizeItem(i: Record<string, unknown>): WebflowItem {
+  const ts = (v: unknown) => (typeof v === "string" && v ? v : null);
+  return {
+    id: String(i.id),
+    isDraft: i.isDraft === true,
+    isArchived: i.isArchived === true,
+    createdOn: ts(i.createdOn),
+    lastUpdated: ts(i.lastUpdated),
+    lastPublished: ts(i.lastPublished),
+    fieldData: (i.fieldData && typeof i.fieldData === "object" ? i.fieldData : {}) as Record<string, unknown>,
+  };
 }

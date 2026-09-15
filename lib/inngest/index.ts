@@ -29,6 +29,7 @@ export {
   siteOnboardingRequested,
   strategyCompetitorsAnalyzeRequested,
   publishingPushRequested,
+  refreshScanRequested,
 } from "./client";
 import { analyticsFunctions } from "./analytics";
 import { auditFunction } from "./audit";
@@ -37,9 +38,10 @@ import { contextFunctions } from "./context";
 import { demandFunctions } from "./demand";
 import { pipelineFunctions } from "./pipeline";
 import { publishingFunctions } from "./publishing";
+import { refreshFunctions } from "./refresh";
 import { retentionFunctions } from "./retention";
 import { strategyFunctions } from "./strategy";
 import { siteFunctions } from "./site";
 
 /** Every function served from /api/inngest. Add new jobs here. */
-export const functions = [auditFunction, ...demandFunctions, ...connectorFunctions, ...pipelineFunctions, ...contextFunctions, ...siteFunctions, ...analyticsFunctions, ...retentionFunctions, ...strategyFunctions, ...publishingFunctions];
+export const functions = [auditFunction, ...demandFunctions, ...connectorFunctions, ...pipelineFunctions, ...contextFunctions, ...siteFunctions, ...analyticsFunctions, ...retentionFunctions, ...strategyFunctions, ...publishingFunctions, ...refreshFunctions];

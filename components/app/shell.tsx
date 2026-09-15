@@ -1,6 +1,6 @@
 import type { Route } from "next";
 import Link from "next/link";
-import { BarChart3, Brain, Building2, Compass, FileText, LayoutDashboard, LayoutGrid, ListChecks, LogOut, Palette, Plug, Search, Send, ShieldCheck } from "lucide-react";
+import { BarChart3, Brain, Building2, Compass, FileText, LayoutDashboard, LayoutGrid, ListChecks, LogOut, Palette, Plug, RefreshCw, Search, Send, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, sectionHref, sitePageHref, type NavSection, type SitePageKey } from "@/lib/app/nav";
 import { canManage } from "@/lib/auth/roles";
@@ -31,6 +31,7 @@ const PAGE_ICONS: Record<SitePageKey, Icon> = {
   demand: Search,
   brain: Brain,
   content: FileText,
+  refresh: RefreshCw,
   publishing: Send,
   attribution: BarChart3,
 };

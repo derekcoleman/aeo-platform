@@ -1,7 +1,7 @@
 import { upsertExternalMetrics, type ExternalMetricInput } from "../store";
 import { ConnectorError, type Connector, type ConnectionRef, type ConnectionRow, type ConnectorContext, type SyncInput, type SyncResult } from "../types";
 import { normalizeGa4Rows, queryGa4AiReferrals } from "./ga4";
-import { GSC_LAG_DAYS, normalizeGscRows, queryGsc } from "./gsc";
+import { GSC_LAG_DAYS, GSC_PAGE_WINDOW_MAX_ROWS, gscPageWindows, normalizeGscPageWindow, normalizeGscRows, queryGsc } from "./gsc";
 import { refreshAccessToken, type GoogleOAuthConfig } from "./oauth";
 
 export * from "./ga4";
@@ -104,6 +104,18 @@ export const googleConnector: Connector<GoogleConfig> = {
       const n = await upsertExternalMetrics(siteConn, gsc, ctx.sql);
       metrics += n;
       detail.gsc = { rows: gsc.length, written: n };
+
+      // Site-wide per-page totals for the refresh scan: the current and the
+      // previous window, unfiltered by prefix, so CMS posts outside the proxy
+      // path have traffic and trend data.
+      const pageRows: ExternalMetricInput[] = [];
+      for (const w of gscPageWindows(window.endDate)) {
+        const rows = await queryGsc(ctx.fetchImpl, accessToken, { property: conn.config.gscProperty, startDate: w.startDate, endDate: w.endDate, dimensions: ["page"], maxRows: GSC_PAGE_WINDOW_MAX_ROWS });
+        pageRows.push(...normalizeGscPageWindow(rows, w));
+      }
+      const pn = await upsertExternalMetrics(siteConn, pageRows, ctx.sql);
+      metrics += pn;
+      detail.gscPageWindow = { rows: pageRows.length, written: pn };
     }
 
     if (conn.config.ga4PropertyId) {

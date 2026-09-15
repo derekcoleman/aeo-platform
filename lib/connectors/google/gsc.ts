@@ -29,6 +29,8 @@ export interface GscQueryInput {
   pathPrefix?: string | null;
   /** Restrict to a single page URL — for `dimensions: ["date","query"]` per published page. */
   pageEquals?: string | null;
+  /** Stop paging after this many rows (GSC orders by clicks, so the head is the part that matters). */
+  maxRows?: number | null;
 }
 
 interface SearchAnalyticsResponse { rows?: GscRow[] }
@@ -53,8 +55,58 @@ export async function queryGsc(fetchImpl: typeof fetch, accessToken: string, q: 
     const rows = page.rows ?? [];
     out.push(...rows);
     if (rows.length < ROW_LIMIT) break;
+    if (q.maxRows && out.length >= q.maxRows) break;
+  }
+  return q.maxRows ? out.slice(0, q.maxRows) : out;
+}
+
+/** Rolling-window length for the site-wide per-page totals the refresh scan reads. */
+export const GSC_PAGE_WINDOW_DAYS = 28;
+/** Pages per window per sync; a site with more indexed URLs than this keeps its long tail out of the refresh queue. */
+export const GSC_PAGE_WINDOW_MAX_ROWS = 5000;
+
+export interface GscPageWindow {
+  /** `current` is the trailing window ending at the lag boundary; `previous` the window before it. */
+  window: "current" | "previous";
+  startDate: string;
+  endDate: string;
+}
+
+/**
+ * Site-wide per-page totals over one window (dimensions: ["page"]) →
+ * external_metrics rows on the `gsc_page_window` surface. Unlike the daily
+ * rows these are NOT filtered to the proxy prefix: the point is to see how a
+ * CMS post at /blog/x performs, so a refresh can be prioritised. `date` is the
+ * window's end date; the scan reads the latest date per page.
+ */
+export function normalizeGscPageWindow(rows: GscRow[], w: GscPageWindow): ExternalMetricInput[] {
+  const out: ExternalMetricInput[] = [];
+  for (const r of rows) {
+    const page = r.keys[0];
+    if (!page) continue;
+    out.push({
+      provider: "gsc",
+      surface: "gsc_page_window",
+      dimension: { page, window: w.window, days: GSC_PAGE_WINDOW_DAYS },
+      date: w.endDate,
+      metrics: { clicks: r.clicks, impressions: r.impressions, ctr: round(r.ctr, 4), position: round(r.position, 2), start_date: w.startDate },
+    });
   }
   return out;
+}
+
+/** The current and previous windows ending at `endDate` (inclusive). */
+export function gscPageWindows(endDate: string, days = GSC_PAGE_WINDOW_DAYS): GscPageWindow[] {
+  const end = new Date(`${endDate}T00:00:00Z`);
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  const shift = (d: Date, n: number) => new Date(d.getTime() + n * 86_400_000);
+  const currentStart = shift(end, -(days - 1));
+  const previousEnd = shift(currentStart, -1);
+  const previousStart = shift(previousEnd, -(days - 1));
+  return [
+    { window: "current", startDate: iso(currentStart), endDate },
+    { window: "previous", startDate: iso(previousStart), endDate: iso(previousEnd) },
+  ];
 }
 
 /** `contains` matching is substring, so a prefix of `/res` would also match `/resources-old`; tighten client-side. */
