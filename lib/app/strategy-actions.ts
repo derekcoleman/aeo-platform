@@ -37,6 +37,7 @@ const refresh = (siteId: string) => {
   revalidatePath(`/app/sites/${siteId}/strategy`);
   revalidatePath(`/app/sites/${siteId}/demand`);
   revalidatePath(`/app/sites/${siteId}`);
+  revalidatePath("/settings/connectors");
 };
 
 export async function saveTopicAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
