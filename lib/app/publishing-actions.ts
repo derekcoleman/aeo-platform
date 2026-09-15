@@ -24,6 +24,7 @@ async function guard(siteId: string) {
 const refresh = (siteId: string) => {
   revalidatePath(`/app/sites/${siteId}/publishing`);
   revalidatePath(`/app/sites/${siteId}/content`);
+  revalidatePath("/settings/connectors");
 };
 
 export async function connectWebflowAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {

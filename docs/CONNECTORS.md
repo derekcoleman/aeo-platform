@@ -1,7 +1,44 @@
-# Connectors: Profound API and Webflow
+# Connectors
 
-Both are configured per project from the app; tokens go to Vault and the
-connection row keeps only a reference.
+Tokens go to Vault; the connection row keeps only a reference. Every sync
+writes a `context.context_sync_runs` row, so a failing connector is a red
+row, never silence.
+
+## The Connectors page
+
+`/settings/connectors` lists **every** connector the product offers, per
+organisation, connected or not, in three groups:
+
+| Group | Connectors | Scope |
+|---|---|---|
+| Measure | Google Search Console, Google Analytics 4, Profound | per project |
+| Publish | Webflow | per project |
+| Brand brain sources | Your website, Slack, Custom source (API or MCP) | website per project; Slack and custom for the organisation (a custom source can also be pinned to one project) |
+
+Each card says what the connector feeds, shows the rows that exist (project,
+account, state, last sync, the live sync state from the run ledger, *Sync
+now*, *Disconnect*), and offers the way to connect another. The catalogue is
+`lib/connectors/catalog.ts`; the read model that joins it with the org's rows
+and the option lists is `lib/app/connectors.ts`.
+
+States: **connected**, **needs setup** (a token exists and nothing is being
+read: a Google grant with no property chosen, a Slack install with no
+channels), **error** (the last sync failed; the reason is on the card),
+**not connected**.
+
+**Google** is one OAuth grant per project that serves two cards: Search
+Console (pick the property) and GA4 (pick the property). Until a property is
+chosen the grant is *pending* and the sync is a no-op. The OAuth client comes
+from `GOOGLE_OAUTH_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI`; the card says
+so when they are missing.
+
+**Slack** is one install per organisation. The card lists the channels the
+app can see; nothing is read until channels are ticked. The same form sets
+the approvals channel (brief/draft decisions with buttons) and the alerts
+channel (proxy health). Private channels need the app invited first.
+
+**Your website** is created with the project; the card shows the crawl and
+recreates it if it was disconnected.
 
 ## Profound (Enterprise API)
 
@@ -84,6 +121,9 @@ Refresh page) lists every item of every collection the token can see into
 existing posts can be scored for a refresh against Search Console and AI
 citations and updated in place. See `docs/REFRESH.md`.
 
+**Where else:** Connectors → Webflow lists every project's connection and
+connects another (pick the project, paste the token).
+
 **API:** Webflow Data API v2 (`/v2/sites`, `/v2/sites/{id}/collections`,
 `/v2/collections/{id}`, `/v2/collections/{id}/items` (list + create),
 `/items/{id}`, `/items/publish`). Rate limit 60/min; a 429 is retried once
@@ -104,3 +144,37 @@ run of the same connection.
 A Profound API backfill is walked in 30-day windows: each window is its own
 run and cursor, and the job queues the next window from `detail.next.from`, so
 no single invocation outlives Vercel's 300-second limit.
+
+## Custom source (API or MCP)
+
+**Where:** Connectors → Custom source. Owners and admins only.
+
+A source the customer defines instead of one we ship. Both kinds land in
+`context.context_documents` exactly like Slack messages and the website
+crawl, so redaction, chunking, fact extraction and retrieval see them with
+no extra plumbing. Provider `custom`; adapter `lib/connectors/custom`.
+
+**HTTP API.** A URL that returns either a JSON list of records or a page of
+text (Markdown, HTML, plain text). Records are found at the configured
+*items path* or under a common key (`items`, `data`, `results`, …); each
+record becomes a document through a small field map (id, title, text,
+updated-at) whose blanks fall back to common names (`id`/`url`/`slug`,
+`title`/`name`, `text`/`content`/`body`/`markdown`/`description`, …). HTML
+text is converted to Markdown. A non-JSON response becomes one document.
+
+**MCP server.** A Model Context Protocol endpoint over Streamable HTTP. The
+connector runs `initialize` (protocol `2025-06-18`, honouring
+`Mcp-Session-Id`), then `resources/list` (paged) and `resources/read` for
+every resource, optionally only those whose URI starts with a prefix. Text
+contents become documents; binary blobs are skipped. Responses may be JSON
+or SSE; both are parsed.
+
+**Auth.** None, a bearer token, or an API key in a named header. The secret
+goes to Vault; config holds the URL, the kind and the mapping only.
+
+**Safety.** Every request goes through `safeFetch`: URLs that resolve to
+private networks, link-local or loopback addresses are refused, responses
+are capped at 8 MB, and *Test and connect* performs a real probe (the
+endpoint must yield at least one document, or the server at least one
+matching resource) before anything is saved. Documents are capped at 60k
+characters and 500 records / resources per sync.

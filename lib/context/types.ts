@@ -60,7 +60,7 @@ export interface ContextDocument {
   id: string;
   org_id: string;
   site_id: string | null;
-  provider: "slack" | "google" | "profound";
+  provider: "slack" | "google" | "profound" | "webflow" | "website" | "custom";
   kind: string;
   title: string | null;
   text: string;

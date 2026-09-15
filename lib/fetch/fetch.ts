@@ -14,6 +14,9 @@ import { RetryableError, parseRetryAfter, withRetry } from "./retry";
  */
 
 export interface FetchOptions {
+  /** Defaults to GET. A body is only sent with POST/PUT/PATCH. */
+  method?: "GET" | "POST" | "PUT" | "PATCH";
+  body?: string;
   timeoutMs?: number;
   maxBytes?: number;
   maxRedirects?: number;
@@ -101,6 +104,8 @@ async function readCapped(res: Response, maxBytes: number): Promise<{ text: stri
 
 export async function safeFetch(input: string, opts: FetchOptions = {}): Promise<FetchResult> {
   const {
+    method = "GET",
+    body,
     timeoutMs = 15_000,
     maxBytes = 5 * 1024 * 1024,
     maxRedirects = 5,
@@ -124,7 +129,8 @@ export async function safeFetch(input: string, opts: FetchOptions = {}): Promise
         let res: Response;
         try {
           res = await fetchImpl(current.href, {
-            method: "GET",
+            method,
+            ...(body !== undefined && method !== "GET" ? { body } : {}),
             redirect: "manual",
             signal: controller.signal,
             headers: {

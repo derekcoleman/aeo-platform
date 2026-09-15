@@ -292,9 +292,10 @@ export default async function SitePage({ params, searchParams }: { params: Promi
                   </TableBody>
                 </Table>
               )}
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <a className="inline-flex h-9 items-center rounded-md border px-4 text-sm font-medium hover:bg-accent" href={`/api/connectors/slack/start?orgId=${site.org_id}&returnTo=/app/sites/${siteId}`}>Connect Slack</a>
                 <a className="inline-flex h-9 items-center rounded-md border px-4 text-sm font-medium hover:bg-accent" href={`/api/connectors/google/start?orgId=${site.org_id}&siteId=${siteId}&returnTo=/app/sites/${siteId}`}>Connect Google (GSC + GA4)</a>
+                <Link className="text-sm underline-offset-2 hover:underline" href={"/settings/connectors" as Route}>All connectors: Profound, Webflow, custom sources, and property / channel setup</Link>
               </div>
             </CardContent>
           </Card>

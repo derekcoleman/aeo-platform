@@ -104,7 +104,7 @@ export const connectorSyncCompleted = eventType("connector/sync.completed", {
   schema: z.object({
     connectionId: z.guid(),
     orgId: z.guid(),
-    provider: z.enum(["slack", "google", "profound", "webflow", "website"]),
+    provider: z.enum(["slack", "google", "profound", "webflow", "website", "custom"]),
     kind: syncKindSchema,
     ok: z.boolean(),
     documentsIngested: z.number().int(),
@@ -116,7 +116,7 @@ export const connectorSyncCompleted = eventType("connector/sync.completed", {
 /** A verified, deduped inbound webhook. The route wrote ops.webhook_events and returned 200 already. */
 export const connectorWebhookReceived = eventType("connector/webhook.received", {
   schema: z.object({
-    provider: z.enum(["slack", "google", "profound", "webflow", "website"]),
+    provider: z.enum(["slack", "google", "profound", "webflow", "website", "custom"]),
     externalId: z.string().min(1),
     connectionId: z.guid().nullable().optional(),
     orgId: z.guid().nullable().optional(),
