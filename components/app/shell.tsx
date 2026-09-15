@@ -34,6 +34,7 @@ const PAGE_ICONS: Record<SitePageKey, Icon> = {
   refresh: RefreshCw,
   publishing: Send,
   attribution: BarChart3,
+  connectors: Plug,
 };
 
 export interface ShellSite {
@@ -151,7 +152,6 @@ function buildGroups({ user, active, site, page, org }: { user: SessionUser; act
     current: active,
     items: [
       { key: "projects", href: "/app", label: "Projects", icon: LayoutGrid },
-      { key: "connectors", href: "/settings/connectors", label: "Connectors", icon: Plug },
       ...(user.isStaff ? [{ key: "ops", href: "/ops", label: "Ops", icon: ShieldCheck }] : []),
     ],
   };

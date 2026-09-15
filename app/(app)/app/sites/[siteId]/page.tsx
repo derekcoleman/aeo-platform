@@ -15,7 +15,7 @@ import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { resolveTab, sitePage } from "@/lib/app/nav";
 import { decideApprovalAction, dismissOpportunityAction, runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setSiteStatusAction, startPipelineAction } from "@/lib/app/actions";
-import { listConnectionsForOrg, listHealthChecks, listOpportunities, listPendingApprovals, listPreflights, listPublished } from "@/lib/app/queries";
+import { listHealthChecks, listOpportunities, listPendingApprovals, listPreflights, listPublished } from "@/lib/app/queries";
 import { loadSite } from "@/lib/app/store";
 import { canManage, requireUser, roleIn } from "@/lib/auth/session";
 import { buildInstall } from "@/lib/proxy/install";
@@ -35,12 +35,11 @@ export default async function SitePage({ params, searchParams }: { params: Promi
   const user = await requireUser(`/app/sites/${siteId}`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
-  const [preflights, health, opportunities, approvals, connections, published, crawl, topics] = await Promise.all([
+  const [preflights, health, opportunities, approvals, published, crawl, topics] = await Promise.all([
     listPreflights(siteId),
     listHealthChecks(siteId),
     listOpportunities(siteId),
     listPendingApprovals(siteId),
-    listConnectionsForOrg(site.org_id),
     listPublished(siteId),
     crawlSummary(siteId),
     listTopics(siteId),
@@ -95,7 +94,6 @@ export default async function SitePage({ params, searchParams }: { params: Promi
           <TabsTrigger value="checks">Checks</TabsTrigger>
           <TabsTrigger value="content">Queue {opportunities.length + approvals.length ? <Badge variant="secondary">{opportunities.length + approvals.length}</Badge> : null}</TabsTrigger>
           <TabsTrigger value="crawlers">Crawlers {crawl.byPurpose.some((p) => p.purpose === "live_fetch" && p.hits24h > 0) ? <Badge variant="success">live</Badge> : null}</TabsTrigger>
-          <TabsTrigger value="connectors">Connectors</TabsTrigger>
         </TabsList>
 
         <TabsContent value="install" className="grid gap-4 pt-4">
@@ -273,33 +271,6 @@ export default async function SitePage({ params, searchParams }: { params: Promi
           <CrawlersPanel crawl={crawl} proxyMode={site.proxy_mode} />
         </TabsContent>
 
-        <TabsContent value="connectors" className="pt-4">
-          <Card>
-            <CardHeader><CardTitle>Connectors for {site.name}&apos;s organisation</CardTitle><CardDescription>Slack feeds the brand brain and receives approvals; Google Search Console and GA4 give real demand and AI-referral traffic; Profound is enrichment.</CardDescription></CardHeader>
-            <CardContent className="grid gap-3">
-              {connections.length === 0 ? <p className="text-muted-foreground text-sm">Nothing connected.</p> : (
-                <Table>
-                  <TableHeader><TableRow><TableHead>Provider</TableHead><TableHead>Account</TableHead><TableHead>Status</TableHead><TableHead>Last sync</TableHead></TableRow></TableHeader>
-                  <TableBody>
-                    {connections.map((c) => (
-                      <TableRow key={c.id}>
-                        <TableCell className="font-medium">{c.provider}</TableCell>
-                        <TableCell>{c.external_account_name ?? c.external_account_id ?? "—"}</TableCell>
-                        <TableCell><Badge variant={c.status === "active" ? "success" : c.status === "error" ? "destructive" : "secondary"}>{c.status}</Badge>{c.last_error ? <span className="text-destructive ml-2 text-xs">{c.last_error.slice(0, 80)}</span> : null}</TableCell>
-                        <TableCell>{when(c.last_synced_at)}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-              <div className="flex flex-wrap items-center gap-2">
-                <a className="inline-flex h-9 items-center rounded-md border px-4 text-sm font-medium hover:bg-accent" href={`/api/connectors/slack/start?orgId=${site.org_id}&returnTo=/app/sites/${siteId}`}>Connect Slack</a>
-                <a className="inline-flex h-9 items-center rounded-md border px-4 text-sm font-medium hover:bg-accent" href={`/api/connectors/google/start?orgId=${site.org_id}&siteId=${siteId}&returnTo=/app/sites/${siteId}`}>Connect Google (GSC + GA4)</a>
-                <Link className="text-sm underline-offset-2 hover:underline" href={"/settings/connectors" as Route}>All connectors: Profound, Webflow, custom sources, and property / channel setup</Link>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
       </UrlTabs>
     </AppShell>
   );

@@ -11,7 +11,7 @@ export interface NavSection {
   label: string;
 }
 
-export type SitePageKey = "overview" | "strategy" | "demand" | "brain" | "content" | "refresh" | "publishing" | "attribution";
+export type SitePageKey = "overview" | "strategy" | "demand" | "brain" | "content" | "refresh" | "publishing" | "attribution" | "connectors";
 
 export interface SitePageDef {
   key: SitePageKey;
@@ -31,7 +31,6 @@ export const SITE_PAGES: SitePageDef[] = [
       { value: "checks", label: "Checks" },
       { value: "content", label: "Queue" },
       { value: "crawlers", label: "Crawlers" },
-      { value: "connectors", label: "Connectors" },
     ],
   },
   {
@@ -80,6 +79,7 @@ export const SITE_PAGES: SitePageDef[] = [
   },
   { key: "publishing", label: "Publishing", segment: "publishing" },
   { key: "attribution", label: "Attribution", segment: "attribution" },
+  { key: "connectors", label: "Connectors", segment: "connectors" },
 ];
 
 export const ORG_SECTIONS: NavSection[] = [
