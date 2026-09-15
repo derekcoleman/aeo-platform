@@ -2,7 +2,9 @@ import type { Route } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/app/action-button";
+import { LiveRefresh } from "@/components/app/live-refresh";
 import { AppShell, PageHeader } from "@/components/app/shell";
+import { SyncStatus } from "@/components/app/sync-status";
 import { when } from "@/components/app/status";
 import { ContentRequestForm, EditTopic, KeywordsForm, ProfoundConnectForm, PromptForm, TopicForm } from "@/components/app/strategy-forms";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -16,6 +18,8 @@ import { loadSite } from "@/lib/app/store";
 import { competitorDomains, listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
 import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
 import { canEdit, canManage, requireUser, roleIn } from "@/lib/auth/session";
+import { latestSyncRun } from "@/lib/connectors/store";
+import { describeSyncState } from "@/lib/connectors/sync-status";
 import { listCompetitorPages, structuralTargetFrom } from "@/lib/strategy/competitors";
 import { listTopics, topicStats } from "@/lib/strategy/topics";
 
@@ -42,6 +46,8 @@ export default async function StrategyPage({ params, searchParams }: { params: P
     profoundByTopic(siteId),
     profoundConnection(siteId, site.org_id),
   ]);
+  const latestRun = profound ? await latestSyncRun(profound.id) : null;
+  const sync = profound && profound.mode === "api" ? describeSyncState({ now: new Date(), requestedAt: profound.sync_requested_at, requestedKind: profound.sync_requested_kind, latestRun }) : null;
   const target = structuralTargetFrom(pages);
   const topicName = (id: string | null) => topics.find((t) => t.id === id)?.name ?? null;
   const activeTopics = topics.filter((t) => t.status !== "archived");
@@ -222,19 +228,23 @@ export default async function StrategyPage({ params, searchParams }: { params: P
           <Card>
             <CardHeader>
               <CardTitle>Profound {profound ? <Badge variant={profound.status === "active" ? "success" : "destructive"}>{profound.status} · {profound.mode}</Badge> : null}</CardTitle>
-              <CardDescription>{profound ? `${profound.category ?? "category"} · last sync ${when(profound.last_synced_at)}${profound.last_error ? ` · ${profound.last_error.slice(0, 120)}` : ""}${profound.mode === "api" ? " · syncs daily at 05:00 UTC; the first sync backfills 90 days" : ""}` : "Profound tracks where you and competitors appear across ChatGPT, Perplexity, Gemini and Copilot. Connect the Enterprise API to pull it in; every number from it is labelled as Profound's."}</CardDescription>
+              <CardDescription>{profound ? `${profound.category ?? "category"} · last successful sync ${when(profound.last_synced_at)}${profound.mode === "api" ? " · syncs daily at 05:00 UTC; the first sync backfills 90 days in 30-day windows" : ""}` : "Profound tracks where you and competitors appear across ChatGPT, Perplexity, Gemini and Copilot. Connect the Enterprise API to pull it in; every number from it is labelled as Profound's."}</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
+              {sync ? <SyncStatus state={sync} setupHref={user.isStaff ? "/ops/setup" : null} /> : null}
+              {sync ? <LiveRefresh active={sync.live} intervalMs={5000} maxMs={15 * 60 * 1000} /> : null}
               {engines.length ? (
                 <Table>
                   <TableHeader><TableRow><TableHead>Platform</TableHead><TableHead className="text-right">Prompts</TableHead><TableHead className="text-right">Answers 30d</TableHead><TableHead className="text-right">Mentioned</TableHead><TableHead className="text-right">Visibility</TableHead><TableHead className="text-right">We are cited</TableHead></TableRow></TableHeader>
                   <TableBody>{engines.map((e) => <TableRow key={e.engine}><TableCell className="font-medium">{e.engine}</TableCell><TableCell className="text-right tabular-nums">{e.prompts}</TableCell><TableCell className="text-right tabular-nums">{e.answers}</TableCell><TableCell className="text-right tabular-nums">{pct(e.mention_rate)}</TableCell><TableCell className="text-right tabular-nums">{e.visibility === null ? "—" : Math.round(e.visibility)}</TableCell><TableCell className="text-right tabular-nums">{pct(e.owned_citation_rate)}</TableCell></TableRow>)}</TableBody>
                 </Table>
               ) : <p className="text-muted-foreground text-sm">No Profound data in the last 30 days.</p>}
-              {manager && profound && profound.mode === "api" && profound.status === "active" ? (
+              {manager && profound && profound.mode === "api" && sync && (profound.status === "active" || profound.status === "error") ? (
                 <div className="flex flex-wrap items-center gap-2">
-                  <ActionButton size="sm" variant="outline" action={syncConnectionNowAction.bind(null, siteId, profound.id)} done="Queued">{profound.last_synced_at ? "Sync now" : "Run the 90-day backfill now"}</ActionButton>
-                  <span className="text-muted-foreground text-xs">Reload this page in a few minutes to see the results.</span>
+                  <ActionButton size="sm" variant="outline" disabled={sync.live} action={syncConnectionNowAction.bind(null, siteId, profound.id)} done="Queued">
+                    {sync.phase === "failed" || sync.phase === "stalled" || sync.phase === "lost" ? (profound.last_synced_at ? "Retry the sync" : "Retry the 90-day backfill") : profound.last_synced_at ? "Sync now" : "Run the 90-day backfill now"}
+                  </ActionButton>
+                  {sync.live ? <span className="text-muted-foreground text-xs">This page refreshes itself while the sync runs.</span> : null}
                 </div>
               ) : null}
               {manager && (!profound || profound.mode !== "api") ? <ProfoundConnectForm siteId={siteId} /> : null}

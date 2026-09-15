@@ -32,6 +32,9 @@ export interface ConnectionRow<Config = Record<string, unknown>> {
   external_account_name: string | null;
   last_synced_at: string | null;
   last_error: string | null;
+  /** When a sync was last requested and accepted by the job runner; null before any manual request. */
+  sync_requested_at?: string | null;
+  sync_requested_kind?: SyncKind | null;
 }
 
 /** The config-independent identity of a connection — what the store needs to write on its behalf. */
