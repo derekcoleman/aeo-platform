@@ -6,8 +6,12 @@ import {
   googleOAuthFromEnv,
   googleWindow,
   normalizeGa4Rows,
+  GSC_PAGE_WINDOW_DAYS,
+  gscPageWindows,
+  normalizeGscPageWindow,
   normalizeGscRows,
   pageUnderPrefix,
+  queryGsc,
 } from "@/lib/connectors/google";
 import { ConnectorError } from "@/lib/connectors/types";
 
@@ -64,6 +68,36 @@ describe("Search Console normalisation", () => {
     });
     expect(normalizeGscRows([{ keys: ["2026-08-20", "q"], clicks: 1, impressions: 1, ctr: 1, position: 1 }], ["date", "query"])[0]?.surface).toBe("gsc_query");
     expect(() => normalizeGscRows([], ["query"])).toThrow(/date dimension/);
+  });
+});
+
+describe("Search Console page windows", () => {
+  it("cuts two back-to-back windows ending at the lag boundary", () => {
+    expect(GSC_PAGE_WINDOW_DAYS).toBe(28);
+    expect(gscPageWindows("2026-08-29")).toEqual([
+      { window: "current", startDate: "2026-08-02", endDate: "2026-08-29" },
+      { window: "previous", startDate: "2026-07-05", endDate: "2026-08-01" },
+    ]);
+  });
+
+  it("keeps pages outside the proxy prefix and dates the row at the window end", () => {
+    const rows = normalizeGscPageWindow([{ keys: ["https://acme.com/blog/sso"], clicks: 12, impressions: 900, ctr: 0.0133, position: 6.789 }], { window: "previous", startDate: "2026-07-05", endDate: "2026-08-01" });
+    expect(rows).toEqual([{ provider: "gsc", surface: "gsc_page_window", dimension: { page: "https://acme.com/blog/sso", window: "previous", days: 28 }, date: "2026-08-01", metrics: { clicks: 12, impressions: 900, ctr: 0.0133, position: 6.79, start_date: "2026-07-05" } }]);
+  });
+
+  it("stops paging at maxRows", async () => {
+    const bodies: { startRow: number; dimensions: string[] }[] = [];
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      const rows = Array.from({ length: 25_000 }, (_, i) => ({ keys: [`https://acme.com/p${body.startRow + i}`], clicks: 1, impressions: 1, ctr: 1, position: 1 }));
+      return new Response(JSON.stringify({ rows }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const rows = await queryGsc(fetchImpl, "tok", { property: "sc-domain:acme.com", startDate: "2026-08-02", endDate: "2026-08-29", dimensions: ["page"], maxRows: 30_000 });
+    expect(rows).toHaveLength(30_000);
+    expect(bodies.map((b) => b.startRow)).toEqual([0, 25_000]);
+    expect(bodies[0]!.dimensions).toEqual(["page"]);
+    expect(bodies[0]).not.toHaveProperty("dimensionFilterGroups");
   });
 });
 

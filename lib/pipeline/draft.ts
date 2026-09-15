@@ -23,6 +23,8 @@ export interface DraftContext {
   feedback?: string[];
   note?: string | null;
   previous?: DraftOutput | null;
+  /** Set when `previous` is the live article being refreshed rather than an earlier attempt. */
+  refresh?: { url: string | null; lastUpdated: string | null; reasons: string[] } | null;
 }
 
 export function draftSystemPrompt(): string {
@@ -62,7 +64,18 @@ export function draftPrompt(ctx: DraftContext): string {
       ? `Verified brand facts you may state (key → fact; mark each use with {{fact:key}}):\n${publicFacts(b).map((f) => `- {{fact:${f.key}}} ${f.text}`).join("\n")}`
       : "Verified brand facts: NONE provided. Therefore make no claims about what the company supports, ships, integrates with or has proven; write about the topic, not the company.",
   ].filter(Boolean);
-  if (ctx.previous) parts.push(`Previous draft (revise it; keep what works):\n${JSON.stringify(ctx.previous)}`);
+  if (ctx.refresh) {
+    parts.push(
+      [
+        `This is a REFRESH of an article that is already live${ctx.refresh.url ? ` at ${ctx.refresh.url}` : ""}${ctx.refresh.lastUpdated ? ` (last updated ${ctx.refresh.lastUpdated})` : ""}.`,
+        ctx.refresh.reasons.length ? `It was selected because:\n${ctx.refresh.reasons.map((r) => `- ${r}`).join("\n")}` : "",
+        "Keep what already works (structure, sections that answer real questions, the voice); rewrite what is stale or thin; every number must now carry a {{src:key}} marker to a provided source, so drop figures no source supports rather than keeping them. The result replaces the live article under the same URL.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
+  if (ctx.previous) parts.push(`${ctx.refresh ? "Current live article" : "Previous draft"} (revise it; keep what works):\n${JSON.stringify(ctx.previous)}`);
   if (ctx.feedback?.length) parts.push(`Fix every item below before returning:\n${ctx.feedback.map((f) => `- ${f}`).join("\n")}`);
   if (ctx.note) parts.push(`Reviewer note — this takes priority:\n${ctx.note}`);
   parts.push('Return JSON: { "title": string, "description": string, "bodyMd": string, "faq": [{ "question": string, "answer": string }] }');

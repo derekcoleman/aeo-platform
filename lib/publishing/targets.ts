@@ -104,18 +104,19 @@ export interface ArticleSource {
   canonical_url: string | null;
   author_name: string | null;
   version_id: string | null;
+  origin: "pipeline" | "cms";
 }
 
 export async function loadArticleForPush(contentItemId: string, sql: postgres.Sql = appDb()): Promise<ArticleSource | null> {
-  const [row] = await sql<{ id: string; site_id: string; slug: string; title: string; description: string | null; body_html: string; frontmatter: { faq?: { question: string; answer: string }[] } | null; published_at: Date | null; canonical_url: string | null; author_name: string | null; version_id: string | null }[]>`
+  const [row] = await sql<{ id: string; site_id: string; slug: string; title: string; description: string | null; body_html: string; frontmatter: { faq?: { question: string; answer: string }[] } | null; published_at: Date | null; canonical_url: string | null; author_name: string | null; version_id: string | null; origin: "pipeline" | "cms" }[]>`
     select ci.id, ci.site_id, ci.slug, coalesce(v.title, ci.title, ci.slug) as title, v.description, v.body_html, v.frontmatter, ci.published_at, ci.canonical_url,
-           a.name as author_name, v.id as version_id
+           a.name as author_name, v.id as version_id, coalesce(ci.origin, 'pipeline') as origin
     from content.content_items ci
     left join content.content_versions v on v.id = ci.current_version_id
     left join content.authors a on a.id = ci.author_id
     where ci.id = ${contentItemId}`;
   if (!row || !row.body_html) return null;
-  return { ...row, faq: row.frontmatter?.faq ?? [] };
+  return { ...row, origin: row.origin === "cms" ? "cms" : "pipeline", faq: row.frontmatter?.faq ?? [] };
 }
 
 /** The body Webflow gets: the sanitised article HTML plus the FAQ as headings, so the post is complete without our renderer. */
@@ -144,6 +145,8 @@ export async function pushItemToTarget(contentItemId: string, target: PublishTar
   if (!target.enabled) return { ok: false, skipped: "target disabled" };
   const article = await loadArticleForPush(contentItemId, sql);
   if (!article) return { ok: false, error: "content item has no current version" };
+  // An imported CMS post is refreshed in place by lib/refresh/publish; creating it again here would duplicate it and re-slug it.
+  if (article.origin === "cms") return { ok: false, skipped: "cms-origin item is refreshed in place, never pushed as a new post" };
   const conn = target.connection_id ? await getConnection(target.connection_id, sql) : null;
   if (!conn || conn.status !== "active") return await recordFailure(sql, target, article, "webflow connection is missing or inactive");
 

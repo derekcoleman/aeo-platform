@@ -4,6 +4,7 @@ import { factKey, renderFact } from "@/lib/context/facts";
 import { manifestPromptBlock } from "@/lib/context/manifest";
 import { formatContextBlock, retrieveContext } from "@/lib/context/retrieve";
 import { appDb } from "@/lib/db/app";
+import { loadExistingContent, type ExistingContent } from "@/lib/refresh/publish";
 import { structuralTargetBlock as structuralTargetBlock_, structuralTargetFor } from "@/lib/strategy/competitors";
 import { runJsonTask } from "./model";
 import { briefSpecSchema, type BriefFact, type BriefSpec, type ModelRun } from "./types";
@@ -52,6 +53,8 @@ export interface BriefContext {
   /** Prompt block describing the currently-cited pages (lib/strategy/competitors). */
   structuralTargetBlock?: string | null;
   structuralTarget?: Record<string, unknown> | null;
+  /** For a refresh: the article as it stands today, so the brief improves it rather than starting over. */
+  existingContent?: ExistingContent | null;
 }
 
 const FORMAT_GUIDE: Record<NonNullable<BriefContext["format"]>, string> = {
@@ -110,10 +113,25 @@ export function briefPrompt(ctx: BriefContext): string {
     parts.push(`Verified brand facts (key → fact; only public ones may be cited in the article):\n${ctx.brain.facts.map((f) => `- ${f.key} [${f.type}, ${f.visibility}] ${f.text}`).join("\n")}`);
   }
   if (ctx.brain?.contextBlock) parts.push(ctx.brain.contextBlock);
+  if (ctx.existingContent) parts.push(existingContentBlock(ctx.existingContent));
   if (ctx.previous) parts.push(`Previous brief (revise it, do not start over):\n${JSON.stringify(ctx.previous)}`);
   if (ctx.note) parts.push(`Reviewer note — this takes priority over everything above:\n${ctx.note}`);
   parts.push(`Return JSON with exactly this shape:\n${JSON.stringify(schema, null, 2)}`);
   return parts.join("\n\n");
+}
+
+/** The prompt block for a refresh: what exists, why it was picked, and the rules a refresh follows. */
+export function existingContentBlock(e: ExistingContent): string {
+  return [
+    `THIS IS A REFRESH of an article that is already published${e.url ? ` at ${e.url}` : ""}${e.lastUpdated ? ` (last updated ${e.lastUpdated})` : ""}, ${e.wordCount} words.`,
+    e.reasons.length ? `Why it was selected for a refresh:\n${e.reasons.map((r) => `- ${r}`).join("\n")}` : "",
+    "Refresh rules: keep the same head question and URL; keep the sections that already answer buyer questions well; replace stale figures with sourced current ones (or remove them); add the questions buyers now ask that it does not cover; tighten the opening so the first paragraph is the quotable answer. The title may be improved but must stay on the same topic.",
+    `Current title: ${e.title}`,
+    e.description ? `Current summary: ${e.description}` : "",
+    `Current article (Markdown):\n${e.bodyMd}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 export async function generateBrief(
@@ -160,7 +178,7 @@ export async function loadBriefBrain(scope: { orgId: string; siteId: string }, q
 }
 
 export async function loadBriefContext(
-  opportunity: { org_id: string; site_id: string; question_id: string | null; title: string; target_query: string; source: string; evidence: Record<string, unknown>; topic_id?: string | null; format?: BriefContext["format"] },
+  opportunity: { org_id: string; site_id: string; question_id: string | null; title: string; target_query: string; source: string; evidence: Record<string, unknown>; topic_id?: string | null; format?: BriefContext["format"]; content_item_id?: string | null },
   sql: postgres.Sql = appDb(),
 ): Promise<BriefContext> {
   const [site] = await sql<{ canonical_domain: string; path_prefix: string; organization: { name?: string } | null }[]>`
@@ -198,11 +216,13 @@ export async function loadBriefContext(
   } catch (e) {
     console.warn(`[pipeline] structural target unavailable for site ${opportunity.site_id}: ${e instanceof Error ? e.message : String(e)}`);
   }
+  const existingContent = opportunity.source === "refresh" ? await loadExistingContent(opportunity, sql) : null;
   return {
     topic: topic ?? null,
     format,
     structuralTarget,
     structuralTargetBlock,
+    existingContent,
     opportunity: { title: opportunity.title, targetQuery: opportunity.target_query, source: opportunity.source, evidence: opportunity.evidence },
     site: { domain: site.canonical_domain, pathPrefix: site.path_prefix, organizationName: site.organization?.name ?? site.canonical_domain },
     relatedQuestions: related.map((r) => r.text),

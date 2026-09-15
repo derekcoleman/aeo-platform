@@ -22,6 +22,7 @@ import { modelFor } from "@/lib/pipeline/model";
 import { loadOpportunity, markOpportunity, openRefreshOpportunity, scanSite } from "@/lib/pipeline/opportunities";
 import { loadSiteOrganization, loadSiteRoute, publishVersion } from "@/lib/pipeline/publish";
 import { runQaGates } from "@/lib/pipeline/qa";
+import { importCmsItem, loadExistingContent, publishRefreshToCms } from "@/lib/refresh/publish";
 import type { BriefSpec, DraftOutput } from "@/lib/pipeline/types";
 import {
   createContentItem,
@@ -189,18 +190,32 @@ export const contentPipelineFunction = inngest.createFunction(
       const approvedBriefId = briefId;
 
       // ── content item ──────────────────────────────────────────────────
+      // Three cases: an item of ours being refreshed, a CMS post being
+      // imported for its first refresh (cms origin: published back to the
+      // CMS in place, never to the proxy), or a brand-new article.
       const item = await step.run("content-item", async () => {
+        const sql = appDb();
         if (opp.content_item_id) {
-          const existing = await loadContentItem(opp.content_item_id);
+          const existing = await loadContentItem(opp.content_item_id, sql);
           if (existing) {
-            await appDb()`update content.content_items set brief_id = ${approvedBriefId}, updated_at = now() where id = ${existing.id}`;
-            return { id: existing.id, slug: existing.slug, refresh: true };
+            await sql`update content.content_items set brief_id = ${approvedBriefId}, updated_at = now() where id = ${existing.id}`;
+            return { id: existing.id, slug: existing.slug, refresh: true, origin: existing.origin };
           }
         }
-        const slug = await reserveSlug(siteId, slugify(approvedBrief.title));
-        const { id } = await createContentItem({ siteId, slug, title: approvedBrief.title, briefId: approvedBriefId, authorId: site.author?.id ?? null, opportunityId });
-        return { id, slug, refresh: false };
+        const cmsItemId = typeof opp.evidence.cmsItemId === "string" ? opp.evidence.cmsItemId : null;
+        if (cmsItemId) {
+          const imported = await importCmsItem(cmsItemId, { opportunityId, authorId: site.author?.id ?? null }, sql);
+          await sql`update content.content_items set brief_id = ${approvedBriefId}, updated_at = now() where id = ${imported.id}`;
+          await sql`update content.opportunities set content_item_id = ${imported.id}, updated_at = now() where id = ${opportunityId}`;
+          return { id: imported.id, slug: imported.slug, refresh: true, origin: "cms" as const };
+        }
+        const slug = await reserveSlug(siteId, slugify(approvedBrief.title), sql);
+        const { id } = await createContentItem({ siteId, slug, title: approvedBrief.title, briefId: approvedBriefId, authorId: site.author?.id ?? null, opportunityId }, sql);
+        return { id, slug, refresh: false, origin: "pipeline" as const };
       });
+
+      // A refresh drafts from the live article, not from a blank page.
+      const existing = item.refresh ? await step.run("load-existing", () => loadExistingContent({ content_item_id: item.id, evidence: opp.evidence })) : null;
 
       // The manifesto the brief was written under is the one the draft is written under.
       const manifest = await step.run("load-manifest", async () => {
@@ -212,7 +227,8 @@ export const contentPipelineFunction = inngest.createFunction(
       // ── draft → QA → (gate) ───────────────────────────────────────────
       let versionId: string | null = null;
       let reviewNote: string | null = null;
-      let previousDraft: DraftOutput | null = null;
+      let previousDraft: DraftOutput | null = existing ? { title: existing.title, description: existing.description ?? approvedBrief.description, bodyMd: existing.bodyMd, faq: [] } : null;
+      const refresh = existing ? { url: existing.url, lastUpdated: existing.lastUpdated, reasons: existing.reasons } : null;
       let attemptNo = 0;
       rounds: for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
         let feedback: string[] = [];
@@ -233,6 +249,7 @@ export const contentPipelineFunction = inngest.createFunction(
                 feedback,
                 note: reviewNote,
                 previous: previousDraft,
+                refresh: previousDraft && refresh && attemptNo === 1 ? refresh : null,
               },
               { orgId, siteId, contentItemId: item.id },
               sql,
@@ -307,6 +324,12 @@ export const contentPipelineFunction = inngest.createFunction(
         const sql = appDb();
         const version = await loadVersion(finalVersionId, sql);
         if (!version) throw new Error(`version ${finalVersionId} vanished`);
+        if (item.origin === "cms") {
+          // Back to the CMS, same item, same slug. The proxy never serves this one.
+          const r = await publishRefreshToCms({ contentItemId: item.id, versionId: finalVersionId, now: new Date() }, connectorContext({ sql }));
+          await markOpportunity(opportunityId, "published", sql);
+          return { path: r.url ? new URL(r.url).pathname : `/${item.slug}`, canonicalUrl: r.url, etag: null, cms: true };
+        }
         const [dates] = await sql<{ first_published_at: Date | null }[]>`select first_published_at from content.content_items where id = ${item.id}`;
         const now = new Date();
         const composed = composeVersion({
@@ -321,9 +344,9 @@ export const contentPipelineFunction = inngest.createFunction(
         });
         const result = await publishVersion({ contentItemId: item.id, versionId: finalVersionId, siteId, page: composed.page, now }, sql);
         await markOpportunity(opportunityId, "published", sql);
-        return result;
+        return { ...result, cms: false };
       });
-      await step.sendEvent("published", contentPublished.create({ contentItemId: item.id, versionId: finalVersionId, siteId, orgId, path: published.path, canonicalUrl: published.canonicalUrl }));
+      if (published.canonicalUrl) await step.sendEvent("published", contentPublished.create({ contentItemId: item.id, versionId: finalVersionId, siteId, orgId, path: published.path, canonicalUrl: published.canonicalUrl }));
 
       // ── post-publish loop ─────────────────────────────────────────────
       if (!opp.question_id) return { ok: true as const, contentItemId: item.id, versionId: finalVersionId, path: published.path, windows: [] };

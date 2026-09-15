@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { WebflowApi, WebflowApiError, articleFieldData, suggestFieldMap, type WebflowField } from "@/lib/connectors/webflow";
+import { WebflowApi, WebflowApiError, articleFieldData, suggestFieldMap, syncWebflowInventory, type WebflowField } from "@/lib/connectors/webflow";
+import { cmsItemFromWebflow, pickPublicDomain, urlKey, webflowItemUrl } from "@/lib/refresh/inventory";
 import { memorySecrets } from "@/lib/secrets/vault";
 import { payloadHash, pushItemToTarget, webflowBodyHtml, type PublishTargetRow } from "@/lib/publishing/targets";
 import { fakeSql } from "./helpers/fake-sql";
@@ -33,7 +34,7 @@ describe("articleFieldData", () => {
   });
 });
 
-function fakeWebflow() {
+function fakeWebflow(existingItems: Record<string, unknown>[] = []) {
   const calls: { method: string; path: string; body: unknown }[] = [];
   const items = new Map<string, Record<string, unknown>>();
   let n = 0;
@@ -45,7 +46,14 @@ function fakeWebflow() {
     const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
     if (path === "/sites") return json({ sites: [{ id: "site1", displayName: "Acme", shortName: "acme", customDomains: [{ url: "acme.com" }] }] });
     if (path === "/sites/site1/collections") return json({ collections: [{ id: "col1", displayName: "Blog Posts", slug: "blog" }] });
-    if (path === "/collections/col1") return json({ id: "col1", displayName: "Blog Posts", slug: "blog", fields: [{ id: "1", slug: "name", displayName: "Name", type: "PlainText", isRequired: true }, { id: "2", slug: "slug", displayName: "Slug", type: "PlainText" }, { id: "3", slug: "post-body", displayName: "Post Body", type: "RichText" }] });
+    if (path === "/collections/col1") return json({ id: "col1", displayName: "Blog Posts", slug: "blog", fields: [{ id: "1", slug: "name", displayName: "Name", type: "PlainText", isRequired: true }, { id: "2", slug: "slug", displayName: "Slug", type: "PlainText" }, { id: "3", slug: "post-body", displayName: "Post Body", type: "RichText" }, { id: "4", slug: "post-summary", displayName: "Post Summary", type: "PlainText" }] });
+    if (method === "GET" && path.startsWith("/collections/col1/items?")) {
+      const u = new URL(`https://x${path}`);
+      const offset = Number(u.searchParams.get("offset") ?? 0);
+      const limit = Number(u.searchParams.get("limit") ?? 100);
+      const all = [...existingItems, ...[...items.entries()].map(([id, fieldData]) => ({ id, isDraft: false, isArchived: false, fieldData }))];
+      return json({ items: all.slice(offset, offset + limit), pagination: { offset, limit, total: all.length } });
+    }
     if (method === "POST" && path === "/collections/col1/items") {
       const id = `item${++n}`;
       items.set(id, body.fieldData);
@@ -71,7 +79,7 @@ describe("WebflowApi", () => {
     expect((await api.sites())[0]).toMatchObject({ id: "site1", displayName: "Acme", customDomains: ["acme.com"] });
     expect((await api.collections("site1"))[0]!.slug).toBe("blog");
     const col = await api.collection("col1");
-    expect(col.fields.map((x) => x.slug)).toEqual(["name", "slug", "post-body"]);
+    expect(col.fields.map((x) => x.slug)).toEqual(["name", "slug", "post-body", "post-summary"]);
     const item = await api.createItem("col1", { fieldData: { name: "A", slug: "a", "post-body": "<p>a</p>" }, isDraft: false });
     expect(item.id).toBe("item1");
     await api.updateItem("col1", item.id, { fieldData: { name: "B", slug: "a", "post-body": "<p>b</p>" } });
@@ -82,16 +90,78 @@ describe("WebflowApi", () => {
   });
 });
 
+describe("collection items", () => {
+  const seed = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `old${i + 1}`, isDraft: i === 0, isArchived: false, createdOn: "2024-01-01T00:00:00Z", lastUpdated: `2025-0${(i % 9) + 1}-10T00:00:00Z`, lastPublished: i === 0 ? null : "2025-02-01T00:00:00Z", fieldData: { name: `Post ${i + 1}`, slug: `post-${i + 1}`, "post-body": "<h2>Why</h2><p>one two three</p>", "post-summary": "s" } }));
+
+  it("pages through every item by offset and normalises the timestamps", async () => {
+    const wf = fakeWebflow(seed(230));
+    const api = new WebflowApi("tok", wf.fetchImpl);
+    const page = await api.listItems("col1", { offset: 0, limit: 100 });
+    expect(page.total).toBe(230);
+    expect(page.items[0]).toMatchObject({ id: "old1", isDraft: true, lastPublished: null, createdOn: "2024-01-01T00:00:00Z" });
+    const all = await api.listAllItems("col1");
+    expect(all).toHaveLength(230);
+    expect(wf.calls.filter((c) => c.path.startsWith("/collections/col1/items?")).map((c) => c.path)).toEqual(["/collections/col1/items?offset=0&limit=100", "/collections/col1/items?offset=0&limit=100", "/collections/col1/items?offset=100&limit=100", "/collections/col1/items?offset=200&limit=100"]);
+    expect(await api.listAllItems("col1", { maxItems: 150 })).toHaveLength(150);
+  });
+
+  it("maps an item through the collection's field map into an inventory row", () => {
+    const [item] = seed(1);
+    const map = suggestFieldMap([f("name", "PlainText"), f("slug", "PlainText"), f("post-body", "RichText", "Post Body"), f("post-summary", "PlainText", "Post Summary")]);
+    const api = new WebflowApi("tok", fakeWebflow().fetchImpl);
+    void api;
+    const row = cmsItemFromWebflow({ ...item!, isDraft: true, isArchived: false } as never, { id: "col1", displayName: "Blog Posts", slug: "blog" }, map, "site1", "acme.com");
+    expect(row).toMatchObject({ externalId: "old1", slug: "post-1", title: "Post 1", url: "https://acme.com/blog/post-1", summary: "s", wordCount: 4, headingCount: 1, isDraft: true, lastPublished: null, collectionSlug: "blog" });
+    expect(row.bodyHtml).toContain("<h2>Why</h2>");
+    const noBody = cmsItemFromWebflow(item as never, { id: "c2", displayName: "Categories", slug: "cat" }, { name: "name", slug: "slug", body: "" }, "site1", "acme.com");
+    expect(noBody.bodyHtml).toBeNull();
+    expect(noBody.wordCount).toBe(0);
+  });
+
+  it("derives the public domain and a join key that ignores scheme, www and trailing slashes", () => {
+    expect(pickPublicDomain({ customDomains: ["www.acme.com", "acme.co"], shortName: "acme" }, ["acme.com"])).toBe("www.acme.com");
+    expect(pickPublicDomain({ customDomains: ["blog.acme.com"], shortName: "acme" }, ["acme.com"])).toBe("blog.acme.com");
+    expect(pickPublicDomain({ customDomains: ["other.io"], shortName: "acme" }, ["acme.com"])).toBe("other.io");
+    expect(pickPublicDomain({ customDomains: [], shortName: "acme" }, ["acme.com"])).toBe("acme.webflow.io");
+    expect(webflowItemUrl("acme.com", "blog", "x")).toBe("https://acme.com/blog/x");
+    expect(webflowItemUrl(null, "blog", "x")).toBeNull();
+    expect(urlKey("https://www.Acme.com/blog/x/?utm=1#top")).toBe("acme.com/blog/x");
+    expect(urlKey("https://acme.com/blog/x")).toBe(urlKey("http://acme.com/blog/x/"));
+    expect(urlKey("nope")).toBeNull();
+  });
+
+  it("syncWebflowInventory upserts every item of every collection and flags the missing ones", async () => {
+    const wf = fakeWebflow(seed(3));
+    const secrets = memorySecrets();
+    await secrets.put("vault:conn1", "tok");
+    const sql = fakeSql([
+      [/select id, org_id, canonical_domain, path_prefix from app\.sites/, () => [{ id: "s1", org_id: "o1", canonical_domain: "acme.com", path_prefix: "/resources" }]],
+      [/^insert into content\.cms_items/, () => [{ id: "x" }]],
+      [/^update content\.cms_items set missing_since/, () => [{ id: "gone" }]],
+    ]);
+    const conn = { id: "conn1", org_id: "o1", site_id: "s1", provider: "webflow" as const, status: "active" as const, enabled: true, config: {}, scope: [], secret_ref: "vault:conn1", external_account_id: null, external_account_name: null, last_synced_at: null, last_error: null };
+    const summary = await syncWebflowInventory(conn, { sql, secrets, fetchImpl: wf.fetchImpl, now: () => new Date("2026-09-04T12:00:00Z"), env: {} as NodeJS.ProcessEnv });
+    expect(summary).toMatchObject({ sites: 1, collections: 1, items: 3, written: 3, missing: 1, skipped: [] });
+    const inserts = sql.queries.filter((q) => q.text.startsWith("insert into content.cms_items"));
+    expect(inserts).toHaveLength(3);
+    expect(inserts[1]!.values).toContain("https://acme.com/blog/post-2");
+    expect(inserts[1]!.values).toContain("acme.com/blog/post-2");
+    const missing = sql.queries.find((q) => q.text.startsWith("update content.cms_items set missing_since"))!;
+    expect(missing.values).toContainEqual(["old1", "old2", "old3"]);
+    expect(sql.queries.some((q) => q.text.startsWith("update content.cms_items c set content_item_id"))).toBe(true);
+  });
+});
+
 describe("pushItemToTarget", () => {
   const target: PublishTargetRow = {
     id: "tgt1", org_id: "o1", site_id: "s1", kind: "webflow", connection_id: "conn1", name: "Acme blog", enabled: true, created_at: "",
     config: { siteId: "site1", siteName: "Acme", collectionId: "col1", collectionName: "Blog Posts", fieldMap: { name: "name", slug: "slug", body: "post-body" }, publishLive: true, canonicalMode: "proxy", autoPush: true },
   };
-  const article = { id: "ci1", site_id: "s1", slug: "sso-vs-scim", title: "SSO vs SCIM", description: "d", body_html: "<p>body</p>", frontmatter: { faq: [{ question: "Q?", answer: "A" }] }, published_at: new Date("2026-09-04T00:00:00Z"), canonical_url: "https://acme.com/resources/sso-vs-scim", author_name: null, version_id: "v1" };
-  function ctxWith(fetchImpl: typeof fetch, existing: Record<string, unknown>[] = []) {
+  const article = { id: "ci1", site_id: "s1", slug: "sso-vs-scim", title: "SSO vs SCIM", description: "d", body_html: "<p>body</p>", frontmatter: { faq: [{ question: "Q?", answer: "A" }] }, published_at: new Date("2026-09-04T00:00:00Z"), canonical_url: "https://acme.com/resources/sso-vs-scim", author_name: null, version_id: "v1", origin: "pipeline" };
+  function ctxWith(fetchImpl: typeof fetch, existing: Record<string, unknown>[] = [], origin: "pipeline" | "cms" = "pipeline") {
     const secrets = memorySecrets();
     const sql = fakeSql([
-      [/from content\.content_items ci/, () => [article]],
+      [/from content\.content_items ci/, () => [{ ...article, origin }]],
       [/from context\.context_connections where id/, () => [{ id: "conn1", org_id: "o1", site_id: "s1", provider: "webflow", status: "active", enabled: true, config: {}, scope: [], secret_ref: "vault:conn1", external_account_id: null, external_account_name: null, last_synced_at: null, last_error: null }]],
       [/select id, external_id, payload_hash, status from content\.external_publications/, () => existing],
     ]);
@@ -122,6 +192,15 @@ describe("pushItemToTarget", () => {
     expect(forced).toMatchObject({ ok: true, externalId: "item7" });
     expect(wf.calls.filter((c) => c.method === "PATCH")).toHaveLength(1);
     expect(wf.calls.filter((c) => c.method === "POST" && c.path === "/collections/col1/items")).toHaveLength(0);
+  });
+  it("never pushes a cms-origin item as a new post", async () => {
+    const wf = fakeWebflow();
+    const { ctx, secrets } = ctxWith(wf.fetchImpl, [], "cms");
+    await secrets.put("vault:conn1", "tok");
+    const r = await pushItemToTarget("ci1", target, ctx, { force: true });
+    expect(r.ok).toBe(false);
+    expect(r.skipped).toMatch(/refreshed in place/);
+    expect(wf.calls.filter((c) => c.method === "POST" || c.method === "PATCH")).toHaveLength(0);
   });
   it("records a failure row when Webflow rejects the item", async () => {
     const failing = (async () => new Response(JSON.stringify({ message: "Validation Error", code: "validation_error", details: [{ param: "fieldData.name" }] }), { status: 400 })) as typeof fetch;

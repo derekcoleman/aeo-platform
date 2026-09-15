@@ -16,6 +16,10 @@ and the visibility score lands in `measure.external_metrics` (surface
 `profound_visibility`). Native metrics never read Profound rows; the UI labels
 Profound numbers as Profound's.
 
+**Refresh:** Profound citations of a CMS URL feed the refresh score
+(`docs/REFRESH.md`) alongside the native trackers, and are labelled as
+Profound's on the Refresh page.
+
 **Endpoints:** the client follows Profound's official TypeScript SDK
 (`@profoundai/client`): base `https://api.tryprofound.com`, the API key in
 the `X-API-Key` header, `GET /v1/org/categories` for the category list (one
@@ -74,10 +78,17 @@ told which copy is the original. If Webflow is the only destination, pick
 the last error if any, and a re-push button. Failures never affect the
 pipeline's own run; they are rows you can act on.
 
+**Inventory:** the connection's daily sync (and *Sync inventory now* on the
+Refresh page) lists every item of every collection the token can see into
+`content.cms_items` — collection, last modified, last published, body — so
+existing posts can be scored for a refresh against Search Console and AI
+citations and updated in place. See `docs/REFRESH.md`.
+
 **API:** Webflow Data API v2 (`/v2/sites`, `/v2/sites/{id}/collections`,
-`/v2/collections/{id}`, `/v2/collections/{id}/items`, `/items/{id}`,
-`/items/publish`). Rate limit 60/min; a 429 is retried once after the
-requested delay. Set `WEBFLOW_API_BASE` only to point at a test double.
+`/v2/collections/{id}`, `/v2/collections/{id}/items` (list + create),
+`/items/{id}`, `/items/publish`). Rate limit 60/min; a 429 is retried once
+after the requested delay. Set `WEBFLOW_API_BASE` only to point at a test
+double.
 
 ## Sync status and errors
 
