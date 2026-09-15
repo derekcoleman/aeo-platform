@@ -110,11 +110,13 @@ export interface ProfoundConnectionSummary {
   category: string | null;
   last_synced_at: string | Date | null;
   last_error: string | null;
+  sync_requested_at: string | Date | null;
+  sync_requested_kind: string | null;
 }
 
 export async function profoundConnection(siteId: string, orgId: string, sql: postgres.Sql = appDb()): Promise<ProfoundConnectionSummary | null> {
   const [row] = await sql<ProfoundConnectionSummary[]>`
-    select id, status, coalesce(config->>'mode', 'csv') as mode, coalesce(config->>'categoryName', external_account_name) as category, last_synced_at, last_error
+    select id, status, coalesce(config->>'mode', 'csv') as mode, coalesce(config->>'categoryName', external_account_name) as category, last_synced_at, last_error, sync_requested_at, sync_requested_kind::text as sync_requested_kind
     from context.context_connections
     where org_id = ${orgId} and provider = 'profound' and (site_id = ${siteId} or site_id is null) and status <> 'disconnected'
     order by (site_id = ${siteId}) desc, created_at desc limit 1`;

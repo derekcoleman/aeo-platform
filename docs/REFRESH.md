@@ -99,4 +99,4 @@ existing content, and publish through the proxy as before.
 - `lib/refresh/inventory.ts` mapping + persistence, `lib/refresh/scan.ts`
   signals + scoring + opportunities, `lib/refresh/publish.ts` import + the
   in-place publish, `lib/inngest/refresh.ts` scheduling.
-- Migration `0014_content_refresh.sql`.
+- Migration `0015_content_refresh.sql`.

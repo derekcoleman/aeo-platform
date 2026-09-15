@@ -89,3 +89,18 @@ citations and updated in place. See `docs/REFRESH.md`.
 `/items/{id}`, `/items/publish`). Rate limit 60/min; a 429 is retried once
 after the requested delay. Set `WEBFLOW_API_BASE` only to point at a test
 double.
+
+## Sync status and errors
+
+Every run is a `context.context_sync_runs` row. The Visibility card reads the
+latest row plus `context_connections.sync_requested_at` (set when a manager
+queues a sync and the event is accepted) and reports one of: queued, running,
+lost (accepted, grace period passed, nothing ran: the job runner is not
+receiving events or the app is not synced), stalled (a run "running" past 20
+minutes was killed by the function limit), failed (with the recorded error), or
+succeeded (rows, metrics, window). Killed runs are closed as failed by the next
+run of the same connection.
+
+A Profound API backfill is walked in 30-day windows: each window is its own
+run and cursor, and the job queues the next window from `detail.next.from`, so
+no single invocation outlives Vercel's 300-second limit.

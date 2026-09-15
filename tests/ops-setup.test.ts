@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authHookCheck, envChecks, jobsEndpointCheck, jwtClaims } from "@/lib/ops/setup";
+import { authHookCheck, envChecks, inngestSignature, jobsEndpointCheck, jwtClaims } from "@/lib/ops/setup";
 
 const env = (o: Record<string, string>) => o as unknown as NodeJS.ProcessEnv;
 
@@ -58,6 +58,33 @@ describe("jobsEndpointCheck", () => {
     const c = await jobsEndpointCheck(env, respond(200, JSON.stringify({ function_count: 27, mode: "dev", has_event_key: false, has_signing_key: false })));
     expect(c.state).toBe("fail");
     expect(c.fix).toContain("Redeploy");
+  });
+
+  it("signs the request with the deployment's key, ignoring the signkey prefix", async () => {
+    const seen: Record<string, string>[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      seen.push({ ...(init?.headers as Record<string, string>) });
+      return new Response(JSON.stringify({ function_count: 3, mode: "cloud", has_event_key: true, has_signing_key: true }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const c = await jobsEndpointCheck({ APP_URL: "https://app.example.test", INNGEST_SIGNING_KEY: "signkey-prod-abc123" } as unknown as NodeJS.ProcessEnv, fetchImpl);
+    expect(c.state).toBe("ok");
+    expect(seen[0]?.["x-inngest-signature"]).toMatch(/^t=\d+&s=[0-9a-f]{64}$/);
+    const at = 1_789_479_538_000;
+    expect(inngestSignature("signkey-prod-abc123", undefined, at)).toBe(inngestSignature("abc123", undefined, at));
+    expect(inngestSignature("abc123", undefined, at)).not.toBe(inngestSignature("abc123", "", at));
+  });
+
+  it("tells the SDK's own 401 apart from Deployment Protection", async () => {
+    const sdk401 = respond(401, JSON.stringify({ message: "Unauthorized" }), { "x-inngest-sdk-handled": "true" });
+    const noKey = await jobsEndpointCheck(env, sdk401);
+    expect(noKey.state).toBe("fail");
+    expect(noKey.detail).toContain("INNGEST_SIGNING_KEY is not set");
+    const wrongKey = await jobsEndpointCheck({ APP_URL: "https://app.example.test", INNGEST_SIGNING_KEY: "signkey-prod-x" } as unknown as NodeJS.ProcessEnv, sdk401);
+    expect(wrongKey.state).toBe("warn");
+    expect(wrongKey.fix).toContain("Signing key");
+    const gate = await jobsEndpointCheck(env, respond(401, "denied"));
+    expect(gate.state).toBe("fail");
+    expect(gate.fix).toContain("Only Preview Deployments");
   });
 
   it("skips without APP_URL and fails on a network error", async () => {

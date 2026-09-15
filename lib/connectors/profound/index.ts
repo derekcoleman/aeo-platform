@@ -164,12 +164,24 @@ export const profoundConnector: Connector<ProfoundConfig> = {
       const api = await profoundApiFor(conn, cfg, ctx);
       const today = ctx.now().toISOString().slice(0, 10);
       const through = typeof input.cursor?.through === "string" ? input.cursor.through : null;
-      const start = input.kind === "backfill" || !through ? isoDaysAgo(ctx.now(), cfg.backfillDays) : through;
-      const { records, dropped, pages } = await api.answers({ categoryId: cfg.categoryId, startDate: start, endDate: today });
+      // A backfill is walked in windows so no single run outlives the
+      // platform's function limit: each window is one run with its own
+      // cursor, and `detail.next` tells the job to queue the following one.
+      // An incremental sync covers the gap since the last cursor in one go.
+      const resume = backfillResumeFrom(input.payload);
+      const backfill = input.kind === "backfill" || !through;
+      const start = resume ?? (backfill ? isoDaysAgo(ctx.now(), cfg.backfillDays) : through!);
+      const { end, next } = backfill ? backfillWindow(start, today) : { end: today, next: null };
+      const { records, dropped, pages } = await api.answers({ categoryId: cfg.categoryId, startDate: start, endDate: end });
       const own = await loadSiteOwnership(conn.site_id, ctx.sql);
       if (!own) throw new ConnectorError("profound", "site_not_found");
       const r = records.length ? await ingestProfoundRecords(own, { ...conn, site_id: conn.site_id }, records, ctx.sql) : { questionsInserted: 0, questionsMatched: 0, snapshots: 0, citations: 0, ownedCitations: 0, metrics: 0 };
-      return { documentsIngested: 0, metricsIngested: r.metrics, cursor: { through: today }, detail: { ...r, mode: "api", rows: records.length, dropped, pages, window: { start, end: today } } };
+      return {
+        documentsIngested: 0,
+        metricsIngested: r.metrics,
+        cursor: { through: end },
+        detail: { ...r, mode: "api", rows: records.length, dropped, pages, window: { start, end }, next: next ? { from: next } : null },
+      };
     }
     if (input.kind !== "upload") {
       // A scheduled sync on a CSV-only connection is a no-op, not a failure.
@@ -201,4 +213,29 @@ async function profoundApiFor(conn: SyncInput<ProfoundConfig>["connection"], cfg
 
 function isoDaysAgo(now: Date, days: number): string {
   return new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Days of answers one backfill run fetches. A 90-day category in one call can outlive the function limit. */
+export const BACKFILL_WINDOW_DAYS = 30;
+
+/**
+ * The window a backfill run covers starting at `from` (inclusive), and where
+ * the next run starts, or null when this window reaches `today`.
+ */
+export function backfillWindow(from: string, today: string, days = BACKFILL_WINDOW_DAYS): { start: string; end: string; next: string | null } {
+  const start = from > today ? today : from;
+  const last = addDays(start, days - 1);
+  const end = last < today ? last : today;
+  return { start, end, next: end < today ? addDays(end, 1) : null };
+}
+
+function addDays(iso: string, days: number): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** The `from` a chained backfill run carries in its payload; anything else means start from the configured depth. */
+export function backfillResumeFrom(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const from = (payload as { from?: unknown }).from;
+  return typeof from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(from) ? from : null;
 }

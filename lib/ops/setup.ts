@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { promises as dns } from "node:dns";
 import postgres from "postgres";
 import { appDatabaseUrl, rendererDatabaseUrl, supabasePublishableKey, supabaseServiceRoleKey, supabaseUrl } from "@/lib/db/env";
@@ -129,11 +130,26 @@ async function edgeDnsCheck(env: Env): Promise<SetupCheck> {
 }
 
 /**
+ * Sign a request the way Inngest's SDK verifies it: HMAC-SHA256 over the
+ * body followed by the unix-seconds timestamp, keyed by the signing key
+ * without its `signkey-<env>-` prefix. A GET carries no body; the SDK hashes
+ * the literal string "undefined" for it, so this does too.
+ */
+export function inngestSignature(signingKey: string, body: string | undefined, nowMs = Date.now()): string {
+  const ts = Math.round(nowMs / 1000).toString();
+  const key = signingKey.replace(/^signkey-[\w]+-/, "");
+  const data = typeof body === "string" ? body : "undefined";
+  return `t=${ts}&s=${createHmac("sha256", key).update(data + ts).digest("hex")}`;
+}
+
+/**
  * Can Inngest reach us? It registers and invokes every function through
- * GET/PUT/POST on /api/inngest, so the endpoint must answer JSON to an
- * anonymous request. Vercel Deployment Protection answers a redirect to
- * vercel.com/sso-api instead, which is the single most common reason
- * "Queued" never turns into a run.
+ * GET/PUT/POST on /api/inngest, so the endpoint must answer the SDK's own
+ * JSON. Vercel Deployment Protection answers a redirect to vercel.com/sso-api
+ * instead, which is the single most common reason "Queued" never turns into
+ * a run. In cloud mode the SDK only answers a signed request, so the check
+ * signs with the deployment's own key; a 401 that the SDK itself sent means
+ * the handler is live but the key it runs with is not the one we signed with.
  */
 export async function jobsEndpointCheck(env: Env, fetchImpl: typeof fetch): Promise<SetupCheck> {
   const key = "jobs.endpoint";
@@ -142,14 +158,22 @@ export async function jobsEndpointCheck(env: Env, fetchImpl: typeof fetch): Prom
   if (!base) return { key, group: "jobs", label, state: "skip", detail: "APP_URL unset" };
   const url = `${base}/api/inngest`;
   const protectionFix = "Vercel → Project → Settings → Deployment Protection → Vercel Authentication: choose \"Only Preview Deployments\" (or add a Protection Bypass for Automation secret to the Inngest integration). Then sync the app in the Inngest dashboard.";
+  const signingKey = env.INNGEST_SIGNING_KEY;
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (signingKey) headers["x-inngest-signature"] = inngestSignature(signingKey, undefined);
   try {
-    const res = await fetchImpl(url, { headers: { accept: "application/json" }, redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(6000) });
+    const res = await fetchImpl(url, { headers, redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(6000) });
     const location = res.headers.get("location") ?? "";
     if (res.status >= 300 && res.status < 400) {
       const sso = /vercel\.com\/sso-api/.test(location);
       return { key, group: "jobs", label, state: "fail", detail: `${url} redirects to ${sso ? "Vercel SSO" : location || "another URL"}`, fix: sso ? protectionFix : "The endpoint must answer directly; check rewrites and APP_URL." };
     }
-    if (res.status === 401 || res.status === 403) return { key, group: "jobs", label, state: "fail", detail: `${url} answered ${res.status}`, fix: protectionFix };
+    if (res.status === 401 || res.status === 403) {
+      const sdk = res.headers.get("x-inngest-sdk-handled") === "true";
+      if (!sdk) return { key, group: "jobs", label, state: "fail", detail: `${url} answered ${res.status} before reaching the Inngest handler`, fix: protectionFix };
+      if (!signingKey) return { key, group: "jobs", label, state: "fail", detail: `${url} is served by the Inngest handler, but INNGEST_SIGNING_KEY is not set on this deployment so nothing can authenticate to it`, fix: "Install the Inngest Vercel integration (it sets INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY) or copy the signing key from Inngest → Manage → Signing key, then redeploy." };
+      return { key, group: "jobs", label, state: "warn", detail: `${url} is served by the Inngest handler in cloud mode, but it rejected this check's signed request`, fix: "The INNGEST_SIGNING_KEY this deployment runs with may not be Inngest's current signing key: compare Inngest → Manage → Signing key with the Vercel environment variable and redeploy. The Inngest dashboard's Apps page shows whether this app is synced either way." };
+    }
     if (!res.ok) return { key, group: "jobs", label, state: "fail", detail: `${url} answered ${res.status}`, fix: "The Inngest serve route is failing; check the runtime logs for /api/inngest." };
     let body: Record<string, unknown> | null = null;
     try {

@@ -8,6 +8,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { canEdit, canManage, requireUser } from "@/lib/auth/session";
 import { connectorContext, createConnection, getConnection, setFeature } from "@/lib/connectors";
+import { markSyncRequested } from "@/lib/connectors/store";
 import { PROFOUND_FEATURE } from "@/lib/connectors/profound";
 import { PROFOUND_DEFAULT_BASE, ProfoundApi, ProfoundApiError, ProfoundDiscoveryError, type DiscoveryAttempt } from "@/lib/connectors/profound/api";
 import { appDb } from "@/lib/db/app";
@@ -149,8 +150,9 @@ export async function syncConnectionNowAction(siteId: string, connectionId: stri
   const kind = conn.last_synced_at ? "incremental" : "backfill";
   const jobError = await queueJob(connectorSyncRequested.create({ connectionId: conn.id, orgId: site.org_id, kind }), undefined, `${conn.provider} sync`);
   if (jobError) return fail(jobError);
+  await markSyncRequested(conn.id, kind);
   refresh(siteId);
-  return { ok: true, note: kind === "backfill" ? "Backfill queued; it pages through the report and lands in a few minutes." : "Incremental sync queued." };
+  return { ok: true, note: kind === "backfill" ? "The status below updates as the backfill runs." : "The status below updates as it runs." };
 }
 
 // ── Profound API connection ─────────────────────────────────────────────────
@@ -249,5 +251,6 @@ export async function connectProfoundAction(_prev: ActionResult | null, form: Fo
   // The connection is saved whatever happens next; a queue failure is a note, not a failure.
   const jobError = await queueJob(connectorSyncRequested.create({ connectionId: conn.id, orgId: site.org_id, kind: "backfill" }), undefined, "Profound backfill");
   if (jobError) return { ok: true, id: conn.id, note: [note, `Saved as "${chosen.name}", but the 90-day backfill did not start and the daily sync will not run until the job runner is connected: ${jobError}`].filter(Boolean).join(" ") };
+  await markSyncRequested(conn.id, "backfill");
   return { ok: true, id: conn.id, note: [note, "The 90-day backfill is queued."].filter(Boolean).join(" ") };
 }
