@@ -49,8 +49,8 @@ const MODES: { value: string; label: string; note: string }[] = [
   { value: "subdomain", label: "Subdomain (last resort)", note: "Weaker for AI search than a subfolder." },
 ];
 
-export function CreateSiteDialog({ orgs, defaultOrgId }: { orgs: { id: string; name: string }[]; defaultOrgId?: string }) {
-  const [open, setOpen] = useState(false);
+export function CreateSiteDialog({ orgs, defaultOrgId, defaultOpen = false }: { orgs: { id: string; name: string }[]; defaultOrgId?: string; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
   const [mode, setMode] = useState("cloudflare_worker");
   const [state, action, pending] = useActionState(createSiteAction, null);
   const note = MODES.find((m) => m.value === mode)?.note;

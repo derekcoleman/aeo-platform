@@ -2,9 +2,11 @@ import type { Route } from "next";
 import Link from "next/link";
 import { BarChart3, Brain, Building2, Compass, FileText, LayoutDashboard, LayoutGrid, ListChecks, LogOut, Palette, Plug, RefreshCw, Search, Send, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, sectionHref, sitePageHref, type NavSection, type SitePageKey } from "@/lib/app/nav";
+import { ProjectSwitcher, type SwitcherProject } from "@/components/app/project-switcher";
+import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, pageHrefForSite, sectionHref, sitePageHref, type NavSection, type SitePageKey } from "@/lib/app/nav";
+import { listSites } from "@/lib/app/store";
 import { canManage } from "@/lib/auth/roles";
-import type { SessionUser } from "@/lib/auth/session";
+import { visibleOrgIds, type SessionUser } from "@/lib/auth/session";
 
 type Icon = typeof LayoutGrid;
 
@@ -61,19 +63,22 @@ export interface AppShellProps {
 }
 
 /**
- * The signed-in frame. Server component; nothing interactive lives here.
- * All navigation between pages lives in the sidebar: the workspace entries,
- * then the current project's pages with the open page's sections nested
- * under it, then the organisation and (for staff) the ops console.
+ * The signed-in frame. Server component; the only interactive piece is the
+ * project switcher. The sidebar is: the project switcher, then Connectors
+ * (for the current project) and Ops, then the current project's pages with
+ * the open page's sections nested under it, then the organisation.
  */
-export function AppShell({ user, active = "projects", site, page, org, section, children }: AppShellProps) {
+export async function AppShell({ user, active = "projects", site, page, org, section, children }: AppShellProps) {
   const { workspace, context } = buildGroups({ user, active, site: site ?? null, page, org: org ?? null });
   const groups = [workspace, ...context];
+  const projects: SwitcherProject[] = (await listSites(visibleOrgIds(user))).map((s) => ({ id: s.id, name: s.name, domain: s.canonical_domain, href: pageHrefForSite(s.id, page) }));
+  const switcher = <ProjectSwitcher projects={projects} currentId={site?.id ?? null} />;
   return (
     <div className="flex min-h-screen">
       <aside className="bg-muted/40 hidden w-60 shrink-0 flex-col border-r px-3 py-5 md:sticky md:top-0 md:flex md:h-screen md:overflow-y-auto">
         <Link href={"/app" as Route} className="px-2 text-sm font-semibold tracking-tight">AEO Platform</Link>
-        <nav className="mt-6 flex flex-col gap-6" aria-label="Main">
+        <div className="mt-4">{switcher}</div>
+        <nav className="mt-4 flex flex-col gap-6" aria-label="Main">
           {groups.map((g) => <SidebarGroup key={g.key} group={g} section={section} />)}
         </nav>
         <div className="mt-auto flex flex-col gap-2 px-2 pt-6">
@@ -85,8 +90,9 @@ export function AppShell({ user, active = "projects", site, page, org, section, 
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="border-b md:hidden">
-          <div className="flex items-center gap-4 px-4 py-3">
+          <div className="flex items-center gap-3 px-4 py-3">
             <Link href={"/app" as Route} className="shrink-0 text-sm font-semibold">AEO Platform</Link>
+            <ProjectSwitcher projects={projects} currentId={site?.id ?? null} compact />
             <nav className="flex min-w-0 flex-1 justify-end gap-3 overflow-x-auto text-sm whitespace-nowrap" aria-label="Workspace">
               {workspace.items.map((n) => <Link key={n.key} href={n.href as Route} className={workspace.current === n.key ? "font-medium" : "text-muted-foreground"}>{n.label}</Link>)}
             </nav>
@@ -147,11 +153,13 @@ function SidebarGroup({ group, section }: { group: NavGroup; section?: string })
 }
 
 function buildGroups({ user, active, site, page, org }: { user: SessionUser; active: "projects" | "connectors" | "ops"; site: ShellSite | null; page?: AppShellProps["page"]; org: { id: string; name: string } | null }): { workspace: NavGroup; context: NavGroup[] } {
+  // Connectors follow the project: the entry always opens the current
+  // project's connectors (or the redirect that picks one when none is open).
   const workspace: NavGroup = {
     key: "workspace",
-    current: active,
+    current: page === "connectors" ? "connectors" : active === "ops" ? "ops" : undefined,
     items: [
-      { key: "projects", href: "/app", label: "Projects", icon: LayoutGrid },
+      { key: "connectors", href: site ? `/app/sites/${site.id}/connectors` : "/settings/connectors", label: "Connectors", icon: Plug },
       ...(user.isStaff ? [{ key: "ops", href: "/ops", label: "Ops", icon: ShieldCheck }] : []),
     ],
   };
@@ -166,7 +174,7 @@ function buildGroups({ user, active, site, page, org }: { user: SessionUser; act
       sections: p.sections,
     }));
     if (canManage(user, site.org_id)) items.push({ key: "org", href: `/app/orgs/${site.org_id}`, label: "Organisation", icon: Building2 });
-    groups.push({ key: "project", title: site.name, items, current: page && page in PAGE_ICONS ? page : undefined });
+    groups.push({ key: "project", title: site.name, items, current: page && page !== "connectors" && page in PAGE_ICONS ? page : undefined });
   }
 
   if (org && !site) {

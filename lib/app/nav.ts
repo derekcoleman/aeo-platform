@@ -11,6 +11,7 @@ export interface NavSection {
   label: string;
 }
 
+/** "connectors" is a project page too, but it sits in the workspace group of the sidebar rather than the project list. */
 export type SitePageKey = "overview" | "strategy" | "demand" | "brain" | "content" | "refresh" | "publishing" | "attribution" | "connectors";
 
 export interface SitePageDef {
@@ -79,7 +80,6 @@ export const SITE_PAGES: SitePageDef[] = [
   },
   { key: "publishing", label: "Publishing", segment: "publishing" },
   { key: "attribution", label: "Attribution", segment: "attribution" },
-  { key: "connectors", label: "Connectors", segment: "connectors" },
 ];
 
 export const ORG_SECTIONS: NavSection[] = [
@@ -101,6 +101,13 @@ export const OPS_SECTIONS: NavSection[] = [
 export function sitePageHref(siteId: string, page: SitePageDef | SitePageKey): string {
   const def = typeof page === "string" ? SITE_PAGES.find((p) => p.key === page)! : page;
   return def.segment ? `/app/sites/${siteId}/${def.segment}` : `/app/sites/${siteId}`;
+}
+
+/** Where another project's copy of the current page lives, so switching projects keeps the page you are on. */
+export function pageHrefForSite(siteId: string, page: string | undefined): string {
+  if (page === "connectors") return `/app/sites/${siteId}/connectors`;
+  const def = SITE_PAGES.find((p) => p.key === page);
+  return def ? sitePageHref(siteId, def) : `/app/sites/${siteId}`;
 }
 
 export function sitePage(key: SitePageKey): SitePageDef {
