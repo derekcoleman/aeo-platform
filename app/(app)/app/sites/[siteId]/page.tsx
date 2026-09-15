@@ -11,7 +11,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UrlTabs } from "@/components/app/url-tabs";
+import { resolveTab, sitePage } from "@/lib/app/nav";
 import { decideApprovalAction, dismissOpportunityAction, runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setSiteStatusAction, startPipelineAction } from "@/lib/app/actions";
 import { listConnectionsForOrg, listHealthChecks, listOpportunities, listPendingApprovals, listPreflights, listPublished } from "@/lib/app/queries";
 import { loadSite } from "@/lib/app/store";
@@ -27,8 +29,9 @@ import { listTopics } from "@/lib/strategy/topics";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export default async function SitePage({ params }: { params: Promise<{ siteId: string }> }) {
+export default async function SitePage({ params, searchParams }: { params: Promise<{ siteId: string }>; searchParams: Promise<{ tab?: string }> }) {
   const { siteId } = await params;
+  const { tab: requestedTab } = await searchParams;
   const user = await requireUser(`/app/sites/${siteId}`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
@@ -52,6 +55,9 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
   const latestPreflight = preflights.find((p) => p.kind === "preflight");
   const latestReport = preflights.find((p) => p.crawler_access)?.crawler_access ?? null;
   const manage = canManage(user, site.org_id);
+  const sections = sitePage("overview").sections!;
+  const defaultTab = site.status === "active" ? "content" : "install";
+  const tab = resolveTab(sections, requestedTab, defaultTab);
   const nextStep =
     site.status === "provisioning"
       ? "Install the rewrite from the Install tab, then run the preflight. A passing preflight activates the project."
@@ -62,16 +68,10 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
           : null;
 
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={site.name} description={`${site.canonical_domain}${site.path_prefix} · ${site.proxy_mode.replace("_", " ")}`}>
+    <AppShell user={user} site={site} page="overview" section={tab}>
+      <PageHeader title={site.name} eyebrow="Overview" description={`${site.canonical_domain}${site.path_prefix} · ${site.proxy_mode.replace("_", " ")}`}>
         <SiteStatusBadge status={site.status} />
         <HealthBadge ok={site.last_health_ok} failures={site.health_failures} />
-        <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/brain` as Route}>Brand brain</Link></Button>
-        <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/content` as Route}>Content</Link></Button>
-        <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/demand` as Route}>Demand</Link></Button>
-        <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/attribution` as Route}>Attribution</Link></Button>
-        <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/strategy` as Route}>Strategy</Link></Button>
-        <Button asChild size="sm" variant="outline"><Link href={`/app/sites/${siteId}/publishing` as Route}>Publishing</Link></Button>
         {manage && site.status === "active" ? <ActionButton size="sm" variant="outline" action={setSiteStatusAction.bind(null, siteId, "paused")}>Pause</ActionButton> : null}
         {manage && site.status === "paused" ? <ActionButton size="sm" variant="outline" action={setSiteStatusAction.bind(null, siteId, "active")}>Resume</ActionButton> : null}
         {manage ? <DeleteSiteDialog siteId={siteId} domain={site.canonical_domain} name={site.name} published={published.length} /> : null}
@@ -89,11 +89,11 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
         <BusinessProfileCard site={site} trackedKeywords={trackedKeywords} canEdit={canEdit(user, site.org_id)} />
       </div>
 
-      <Tabs defaultValue={site.status === "active" ? "content" : "install"}>
+      <UrlTabs defaultValue={defaultTab} values={sections.map((s) => s.value)}>
         <TabsList>
           <TabsTrigger value="install">Install</TabsTrigger>
           <TabsTrigger value="checks">Checks</TabsTrigger>
-          <TabsTrigger value="content">Content {opportunities.length + approvals.length ? <Badge variant="secondary">{opportunities.length + approvals.length}</Badge> : null}</TabsTrigger>
+          <TabsTrigger value="content">Queue {opportunities.length + approvals.length ? <Badge variant="secondary">{opportunities.length + approvals.length}</Badge> : null}</TabsTrigger>
           <TabsTrigger value="crawlers">Crawlers {crawl.byPurpose.some((p) => p.purpose === "live_fetch" && p.hits24h > 0) ? <Badge variant="success">live</Badge> : null}</TabsTrigger>
           <TabsTrigger value="connectors">Connectors</TabsTrigger>
         </TabsList>
@@ -299,7 +299,7 @@ export default async function SitePage({ params }: { params: Promise<{ siteId: s
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
+      </UrlTabs>
     </AppShell>
   );
 }

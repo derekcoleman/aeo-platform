@@ -1,12 +1,9 @@
-import type { Route } from "next";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/app/action-button";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { ThemeForm } from "@/components/app/theme-form";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { loadRenderConfig } from "@/lib/app/preview";
 import { loadSite } from "@/lib/app/store";
@@ -23,11 +20,10 @@ export default async function ThemePage({ params }: { params: Promise<{ siteId: 
   if (!site) notFound();
   const tokenCount = Object.keys(config?.theme.tokens ?? {}).length;
   return (
-    <AppShell user={user} active="ops">
-      <PageHeader title={`${site.name} · Theme`} description={`${site.canonical_domain}${site.path_prefix} · tokens, header/footer fragments and custom CSS. Data only; no tenant JavaScript.`}>
+    <AppShell user={user} active="ops" site={site} page="theme">
+      <PageHeader title="Theme" eyebrow={site.name} description={`${site.canonical_domain}${site.path_prefix} · tokens, header/footer fragments and custom CSS. Data only; no tenant JavaScript.`}>
         <Badge variant={tokenCount ? "secondary" : "warning"}>{tokenCount ? `${tokenCount} tokens` : "default theme"}</Badge>
         <ActionButton size="sm" variant="outline" action={extractThemeAction.bind(null, siteId)} done="Extracted; review and save">Extract from homepage</ActionButton>
-        <Button asChild variant="outline" size="sm"><Link href={"/ops" as Route}>Back to ops</Link></Button>
       </PageHeader>
       {!config ? (
         <Alert variant="warning">

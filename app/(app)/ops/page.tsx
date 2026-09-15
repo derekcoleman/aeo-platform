@@ -4,10 +4,11 @@ import { ActionButton } from "@/components/app/action-button";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { HealthBadge, SiteStatusBadge, when } from "@/components/app/status";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UrlTabs } from "@/components/app/url-tabs";
+import { OPS_SECTIONS, resolveTab } from "@/lib/app/nav";
 import { runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
 import { opsFailedSyncs, opsLlmSpend, opsOrganizations, opsSites, opsStaff } from "@/lib/app/queries";
 import { auditLog } from "@/lib/app/org";
@@ -17,20 +18,21 @@ import { StaffForm } from "./staff-form";
 export const dynamic = "force-dynamic";
 
 /** Staff-only. Every action here is audited; nothing runs as a raw service client from the browser. */
-export default async function OpsPage() {
+export default async function OpsPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
+  const { tab: requestedTab } = await searchParams;
   const user = await requireStaff();
+  const tab = resolveTab(OPS_SECTIONS, requestedTab, "sites");
   const [orgs, sites, failed, spend, staff, audit] = await Promise.all([opsOrganizations(), opsSites(), opsFailedSyncs(), opsLlmSpend(), opsStaff(), auditLog(null, 200)]);
   const failingSites = sites.filter((s) => s.last_health_ok === false).length;
   return (
-    <AppShell user={user} active="ops">
+    <AppShell user={user} active="ops" page="console" section={tab}>
       <PageHeader title="Ops console" description="Every tenant, every site, and what each one is costing us.">
         <Badge variant="secondary">{orgs.length} orgs</Badge>
         <Badge variant="secondary">{sites.length} sites</Badge>
         {failingSites ? <Badge variant="destructive">{failingSites} failing</Badge> : <Badge variant="success">all healthy</Badge>}
         {failed.length ? <Badge variant="warning">{failed.length} failed syncs / 7d</Badge> : null}
-        <Button asChild variant="outline" size="sm"><Link href={"/ops/setup" as Route}>Setup checklist</Link></Button>
       </PageHeader>
-      <Tabs defaultValue="sites">
+      <UrlTabs defaultValue="sites" values={OPS_SECTIONS.map((s) => s.value)}>
         <TabsList>
           <TabsTrigger value="sites">Sites</TabsTrigger>
           <TabsTrigger value="orgs">Organisations</TabsTrigger>
@@ -163,7 +165,7 @@ export default async function OpsPage() {
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
+      </UrlTabs>
     </AppShell>
   );
 }

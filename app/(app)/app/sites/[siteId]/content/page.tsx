@@ -32,11 +32,9 @@ export default async function ContentPage({ params }: { params: Promise<{ siteId
   const pushed = new Map<string, typeof publications>();
   for (const p of publications) pushed.set(p.content_item_id, [...(pushed.get(p.content_item_id) ?? []), p]);
   return (
-    <AppShell user={user} active="projects">
-      <PageHeader title={`${site.name} · Content`} description="Every piece the pipeline has produced, its latest version, QA state and where it is published.">
+    <AppShell user={user} site={site} page="content">
+      <PageHeader title="Content" eyebrow={site.name} description="Every piece the pipeline has produced, its latest version, QA state and where it is published.">
         <Badge variant="secondary">{items.length} items</Badge>
-        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}/publishing` as Route}>Publishing</Link></Button>
-        <Button asChild variant="outline" size="sm"><Link href={`/app/sites/${siteId}` as Route}>Back to project</Link></Button>
       </PageHeader>
       <Card>
         <CardHeader><CardTitle>Items</CardTitle><CardDescription>Open a version to preview it in your theme with every fact and source it cites. Gates waiting on you show an approval link.</CardDescription></CardHeader>
