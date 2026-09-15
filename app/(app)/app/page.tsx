@@ -11,9 +11,9 @@ import { canManage, requireUser, visibleOrgIds } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
 
-export default async function ProjectsPage({ searchParams }: { searchParams: Promise<{ denied?: string }> }) {
+export default async function ProjectsPage({ searchParams }: { searchParams: Promise<{ denied?: string; new?: string }> }) {
   const user = await requireUser();
-  const { denied } = await searchParams;
+  const { denied, new: openNew } = await searchParams;
   const scope = visibleOrgIds(user);
   const [orgs, sites] = await Promise.all([listOrganizations(scope), listSites(scope)]);
   const manageable = orgs.filter((o) => canManage(user, o.id));
@@ -21,7 +21,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams: Pro
     <AppShell user={user} active="projects">
       <PageHeader title="Projects" description="One project per domain and path prefix. Each gets its own edge hostname, install guide, health monitor and content queue.">
         <CreateOrgDialog first={orgs.length === 0} />
-        <CreateSiteDialog orgs={manageable.map((o) => ({ id: o.id, name: o.name }))} />
+        <CreateSiteDialog orgs={manageable.map((o) => ({ id: o.id, name: o.name }))} defaultOpen={openNew === "1"} />
       </PageHeader>
       {denied === "ops" ? <Alert variant="warning" className="mb-6"><AlertTitle>Staff only</AlertTitle><AlertDescription>The ops console is limited to internal staff.</AlertDescription></Alert> : null}
       {orgs.length === 0 ? (

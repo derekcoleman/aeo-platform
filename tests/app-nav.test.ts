@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, resolveTab, sectionHref, sitePage, sitePageHref } from "@/lib/app/nav";
+import { ORG_SECTIONS, OPS_SECTIONS, SITE_PAGES, pageHrefForSite, resolveTab, sectionHref, sitePage, sitePageHref } from "@/lib/app/nav";
 
 describe("app navigation model", () => {
   it("routes every project page under the site and keeps the overview on the bare path", () => {
@@ -16,6 +16,15 @@ describe("app navigation model", () => {
       const values = list.map((s) => s.value);
       expect(new Set(values).size).toBe(values.length);
     }
+  });
+
+  it("keeps the current page when switching project, including the connectors page that lives outside the project list", () => {
+    expect(pageHrefForSite("s2", "strategy")).toBe("/app/sites/s2/strategy");
+    expect(pageHrefForSite("s2", "overview")).toBe("/app/sites/s2");
+    expect(pageHrefForSite("s2", "connectors")).toBe("/app/sites/s2/connectors");
+    expect(pageHrefForSite("s2", "console")).toBe("/app/sites/s2");
+    expect(pageHrefForSite("s2", undefined)).toBe("/app/sites/s2");
+    expect(SITE_PAGES.some((p) => p.key === "connectors")).toBe(false);
   });
 
   it("deep links to a section with an explicit tab query", () => {
