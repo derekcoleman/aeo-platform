@@ -36,8 +36,9 @@ export function supabasePublishableKey(env: Env = process.env): string | null {
   return first(env, "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_ANON_KEY");
 }
 
+/** The service role JWT, or one of Supabase's newer `sb_secret_…` keys, which PostgREST treats the same way. */
 export function supabaseServiceRoleKey(env: Env = process.env): string | null {
-  return first(env, "SUPABASE_SERVICE_ROLE_KEY");
+  return first(env, "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY");
 }
 
 /**

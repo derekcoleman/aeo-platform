@@ -1,11 +1,14 @@
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { loadSite } from "@/lib/app/store";
+import { LiveRefresh } from "@/components/app/live-refresh";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { requireStaff } from "@/lib/auth/session";
 import { isAuthConfigured, supabaseServer } from "@/lib/auth/supabase";
 import { jwtClaims, runSetupChecks, type CheckGroup, type CheckState } from "@/lib/ops/setup";
+import { sendJobsPing } from "@/lib/ops/setup-actions";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -15,7 +18,7 @@ const GROUPS: { key: CheckGroup; title: string; blurb: string }[] = [
   { key: "auth", title: "Auth", blurb: "Supabase Auth redirect and the access-token hook that puts org_ids and is_staff into every session." },
   { key: "app", title: "App", blurb: "Deployment identity and who gets the ops console." },
   { key: "edge", title: "Edge", blurb: "The wildcard domain customer rewrites point at. See docs/EDGE_SETUP.md." },
-  { key: "jobs", title: "Jobs and models", blurb: "Inngest runs every pipeline; the model key makes them do something." },
+  { key: "jobs", title: "Jobs and models", blurb: "Inngest runs every pipeline; the model key makes them do something. The endpoint check proves Inngest can call this app, the heartbeat proves it does, and the test event proves an event sent from here comes back as a run." },
   { key: "integrations", title: "Integrations", blurb: "Optional until you connect the first workspace or property." },
 ];
 
@@ -43,13 +46,23 @@ export default async function SetupPage({ searchParams }: { searchParams: Promis
         {report.failing ? <Badge variant="destructive">{report.failing} failing</Badge> : <Badge variant="success">all required checks pass</Badge>}
         {report.warnings ? <Badge variant="warning">{report.warnings} to confirm</Badge> : null}
       </PageHeader>
+      <LiveRefresh active={report.checks.some((c) => c.live)} intervalMs={5000} maxMs={3 * 60 * 1000} />
       <div className="grid gap-4">
         {GROUPS.map((g) => {
           const rows = report.checks.filter((c) => c.group === g.key);
           if (rows.length === 0) return null;
           return (
             <Card key={g.key}>
-              <CardHeader><CardTitle>{g.title}</CardTitle><CardDescription>{g.blurb}</CardDescription></CardHeader>
+              <CardHeader>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div><CardTitle>{g.title}</CardTitle><CardDescription>{g.blurb}</CardDescription></div>
+                  {g.key === "jobs" ? (
+                    <form action={sendJobsPing}>
+                      <Button type="submit" variant="outline" size="sm">Send a test event</Button>
+                    </form>
+                  ) : null}
+                </div>
+              </CardHeader>
               <CardContent>
                 <Table>
                   <TableHeader><TableRow><TableHead className="w-56">Check</TableHead><TableHead className="w-24">State</TableHead><TableHead>Detail</TableHead></TableRow></TableHeader>
