@@ -17,6 +17,7 @@ import {
   recordHealthCheck,
   toHealthSite,
 } from "@/lib/proxy/store";
+import { tryRecordHeartbeat } from "@/lib/jobs/heartbeat";
 import { runSiteOnboarding } from "@/lib/onboarding/run";
 import { inngest, siteHealthChanged, siteHealthCheckRequested, siteOnboardingRequested, sitePreflightCompleted, sitePreflightRequested, siteVerified } from "./client";
 
@@ -83,10 +84,16 @@ export const siteHealthCheckFunction = inngest.createFunction(
   },
 );
 
-/** Every five minutes, every live or verifying site. Two failures in a row → alert; recovery → alert. */
+/**
+ * Every five minutes, every live or verifying site. Two failures in a row →
+ * alert; recovery → alert. Its first step is also the deployment's job-runner
+ * heartbeat: the setup checklist reads it to say whether Inngest schedules
+ * anything here at all, which is why it beats even when there are no sites.
+ */
 export const siteHealthMonitor = inngest.createFunction(
   { id: "site-health-monitor", triggers: [{ cron: "*/5 * * * *" }], retries: 0 },
   async ({ step }) => {
+    await step.run("heartbeat", () => tryRecordHeartbeat("cron", { function: "site-health-monitor" }));
     const sites = await step.run("list-sites", () => listSitesForHealth());
     if (sites.length === 0) return { sites: 0 };
     await step.sendEvent("fan-out", sites.map((s) => siteHealthCheckRequested.create({ siteId: s.id, orgId: s.org_id, kind: "monitor" })));

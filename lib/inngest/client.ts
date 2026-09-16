@@ -255,3 +255,10 @@ export const refreshScanRequested = eventType("content/refresh.scan.requested", 
 export const publishingPushRequested = eventType("publishing/push.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid(), contentItemId: z.guid(), targetId: z.guid().nullable().optional(), force: z.boolean().optional() }),
 });
+
+// ── ops ─────────────────────────────────────────────────────────────────────
+
+/** The setup checklist's round-trip test; see lib/inngest/ops.ts. */
+export const opsPingRequested = eventType("ops/ping.requested", {
+  schema: z.object({ nonce: z.string().min(8), sentAt: z.string() }),
+});
