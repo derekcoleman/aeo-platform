@@ -1,6 +1,6 @@
 import { executeAuditRun } from "@/lib/audit/execute";
 import { markAuditFailed } from "@/lib/audit/store";
-import { auditCompleted, auditFailed, auditRequested, inngest } from "./client";
+import { auditCompleted, auditFailed, auditRequested, concurrencyCap, inngest } from "./client";
 
 /**
  * The audit job. gtm-agents ran 50 pages × (fetch + sequential model call)
@@ -13,7 +13,7 @@ export const auditFunction = inngest.createFunction(
   {
     id: "audit-run",
     triggers: [auditRequested],
-    concurrency: [{ key: "event.data.orgId", limit: 2 }, { limit: 10 }],
+    concurrency: [{ key: "event.data.orgId", limit: 2 }, { limit: concurrencyCap(10) }],
     retries: 1,
     onFailure: async ({ event, error }) => {
       const data = event.data.event.data;

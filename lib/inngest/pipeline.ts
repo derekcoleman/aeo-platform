@@ -36,16 +36,7 @@ import {
   loadVersion,
   reserveSlug,
 } from "@/lib/pipeline/versions";
-import {
-  approvalDecided,
-  approvalRequested,
-  contentPipelineFailed,
-  contentPipelineRequested,
-  contentPublished,
-  inngest,
-  opportunitiesScanRequested,
-  serpTrackRequested,
-} from "./client";
+import { approvalDecided, approvalRequested, concurrencyCap, contentPipelineFailed, contentPipelineRequested, contentPublished, inngest, opportunitiesScanRequested, serpTrackRequested } from "./client";
 
 /**
  * The content pipeline as one durable function: brief → (human gate) → draft
@@ -108,7 +99,7 @@ export const contentPipelineFunction = inngest.createFunction(
   {
     id: "content-pipeline",
     triggers: [contentPipelineRequested],
-    concurrency: [{ key: "event.data.orgId", limit: 2 }, { limit: 10 }],
+    concurrency: [{ key: "event.data.orgId", limit: 2 }, { limit: concurrencyCap(10) }],
     retries: 2,
   },
   async ({ event, step, attempt }) => {

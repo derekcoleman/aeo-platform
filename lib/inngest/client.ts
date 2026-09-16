@@ -37,6 +37,16 @@ export const auditFailed = eventType("audit/failed", {
 
 export const inngest = new Inngest({ id: "aeo-platform" });
 
+/**
+ * Inngest rejects an app sync outright when any function declares a
+ * concurrency limit above the account's plan cap (the free plan allows 5),
+ * and a rejected sync means nothing runs: no cron, no event. Every
+ * function's global limit therefore passes through this cap. Raise
+ * INNGEST_PLAN_CONCURRENCY after upgrading to get the wider limits back.
+ */
+export const PLAN_CONCURRENCY = Math.max(1, Number(process.env.INNGEST_PLAN_CONCURRENCY) || 5);
+export const concurrencyCap = (wanted: number): number => Math.min(wanted, PLAN_CONCURRENCY);
+
 const localeSchema = z.object({ country: z.string().length(2), language: z.string().min(2).max(5) });
 
 /** Mine a question graph for a site from a seed list (brand-brain terms, competitors, ICP pains). */

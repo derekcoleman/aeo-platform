@@ -3,7 +3,7 @@ import { appDb } from "@/lib/db/app";
 import { buildQuestionGraph } from "@/lib/demand/question-graph";
 import { listTrackedQuestions, loadSiteOwnership, recordSnapshot, upsertQuestionGraph, type TrackedQuestion } from "@/lib/demand/store";
 import { BudgetExceededError, serpClientFromEnv } from "@/lib/serp";
-import { demandMineCompleted, demandMineRequested, inngest, serpTrackCompleted, serpTrackRequested } from "./client";
+import { concurrencyCap, demandMineCompleted, demandMineRequested, inngest, serpTrackCompleted, serpTrackRequested } from "./client";
 
 /**
  * Demand mining and AI Overview citation tracking.
@@ -21,7 +21,7 @@ export const demandMineFunction = inngest.createFunction(
   {
     id: "demand-mine",
     triggers: [demandMineRequested],
-    concurrency: [{ key: "event.data.orgId", limit: 1 }, { limit: 5 }],
+    concurrency: [{ key: "event.data.orgId", limit: 1 }, { limit: concurrencyCap(5) }],
     retries: 1,
   },
   async ({ event, step }) => {
@@ -74,7 +74,7 @@ export const serpTrackFunction = inngest.createFunction(
   {
     id: "serp-track",
     triggers: [serpTrackRequested],
-    concurrency: [{ key: "event.data.orgId", limit: 2 }, { limit: 10 }],
+    concurrency: [{ key: "event.data.orgId", limit: 2 }, { limit: concurrencyCap(10) }],
     retries: 2,
   },
   async ({ event, step }) => {

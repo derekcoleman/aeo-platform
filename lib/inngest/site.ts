@@ -19,7 +19,7 @@ import {
 } from "@/lib/proxy/store";
 import { tryRecordHeartbeat } from "@/lib/jobs/heartbeat";
 import { runSiteOnboarding } from "@/lib/onboarding/run";
-import { inngest, siteHealthChanged, siteHealthCheckRequested, siteOnboardingRequested, sitePreflightCompleted, sitePreflightRequested, siteVerified } from "./client";
+import { concurrencyCap, inngest, siteHealthChanged, siteHealthCheckRequested, siteOnboardingRequested, sitePreflightCompleted, sitePreflightRequested, siteVerified } from "./client";
 
 /**
  * Proxy onboarding and health. The monitor fans out every five minutes to
@@ -36,7 +36,7 @@ export const siteHealthCheckFunction = inngest.createFunction(
   {
     id: "site-health-check",
     triggers: [siteHealthCheckRequested],
-    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: 20 }],
+    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: concurrencyCap(20) }],
     retries: 1,
   },
   async ({ event, step }) => {
@@ -105,7 +105,7 @@ export const sitePreflightFunction = inngest.createFunction(
   {
     id: "site-preflight",
     triggers: [sitePreflightRequested],
-    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: 5 }],
+    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: concurrencyCap(5) }],
     retries: 1,
   },
   async ({ event, step }) => {
@@ -167,7 +167,7 @@ export const siteOnboardingFunction = inngest.createFunction(
   {
     id: "site-onboarding",
     triggers: [siteOnboardingRequested],
-    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: 5 }],
+    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: concurrencyCap(5) }],
     retries: 1,
   },
   async ({ event, step }) => {
