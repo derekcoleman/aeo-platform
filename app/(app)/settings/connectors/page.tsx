@@ -4,6 +4,9 @@ import { settingsHref } from "@/lib/app/nav";
 import { listSites } from "@/lib/app/store";
 import { requireUser, visibleOrgIds } from "@/lib/auth/session";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 /**
  * Connectors are a settings tab per project. This path is kept because
  * OAuth callbacks and old links land here: it opens the most recent

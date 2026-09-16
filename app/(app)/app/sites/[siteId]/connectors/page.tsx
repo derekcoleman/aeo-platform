@@ -2,6 +2,9 @@ import type { Route } from "next";
 import { redirect } from "next/navigation";
 import { settingsHref } from "@/lib/app/nav";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 /** Connectors moved to Settings → Connectors; old links and OAuth return URLs land here with their notice query. */
 export default async function SiteConnectorsRedirect({ params, searchParams }: { params: Promise<{ siteId: string }>; searchParams: Promise<Record<string, string | undefined>> }) {
   const { siteId } = await params;
