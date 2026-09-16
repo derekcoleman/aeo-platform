@@ -211,7 +211,7 @@ const ago = (from: Date, to: Date): string => {
 
 const dashboardFix = (env: Env) => {
   const url = `${(env.APP_URL ?? "https://<APP_URL>").replace(/\/+$/, "")}/api/inngest`;
-  return `In the Inngest dashboard: Apps → aeo-platform must be synced at ${url} with no sync error (re-sync it from there if the URL or the function list is stale); Functions → site-health-monitor → Runs should show a run every 5 minutes; a paused environment or an exhausted plan shows a banner. INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY must both belong to that same Inngest environment; the Vercel integration sets a matching pair.`;
+  return `In the Inngest dashboard: Apps → aeo-platform must be synced at ${url} with no sync error: a red "Error" on the app card (for example a function whose concurrency limit exceeds the plan's) means Inngest rejected the whole app and runs nothing; re-sync it from there once the cause is fixed or if the URL or the function list is stale; Functions → site-health-monitor → Runs should show a run every 5 minutes; a paused environment or an exhausted plan shows a banner. INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY must both belong to that same Inngest environment; the Vercel integration sets a matching pair.`;
 };
 
 /**

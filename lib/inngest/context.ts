@@ -9,15 +9,7 @@ import { scanSignals } from "@/lib/context/signals";
 import { listUnchunkedDocuments, listUnextractedDocuments, markFactsExtracted, redactDocument, replaceChunks, type EmbeddedChunk } from "@/lib/context/store";
 import { appDb } from "@/lib/db/app";
 import { modelFor } from "@/lib/pipeline/model";
-import {
-  connectorSyncCompleted,
-  contextFactsExtractCompleted,
-  contextFactsExtractRequested,
-  contextIngestCompleted,
-  contextIngestRequested,
-  contextSignalsScanRequested,
-  inngest,
-} from "./client";
+import { concurrencyCap, connectorSyncCompleted, contextFactsExtractCompleted, contextFactsExtractRequested, contextIngestCompleted, contextIngestRequested, contextSignalsScanRequested, inngest } from "./client";
 
 /**
  * Brand-brain jobs. Ingest runs after every successful connector sync
@@ -39,7 +31,7 @@ export const contextIngestFunction = inngest.createFunction(
       { event: connectorSyncCompleted, if: "event.data.ok == true && event.data.documentsIngested > 0" },
       contextIngestRequested,
     ],
-    concurrency: [{ key: "event.data.orgId", limit: 1 }, { limit: 5 }],
+    concurrency: [{ key: "event.data.orgId", limit: 1 }, { limit: concurrencyCap(5) }],
     retries: 2,
   },
   async ({ event, step }) => {

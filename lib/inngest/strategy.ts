@@ -1,7 +1,7 @@
 import { appDb } from "@/lib/db/app";
 import { analyzeCompetitors } from "@/lib/strategy/competitors";
 import { assignQuestionsToTopics } from "@/lib/strategy/topics";
-import { inngest, strategyCompetitorsAnalyzeRequested } from "./client";
+import { concurrencyCap, inngest, strategyCompetitorsAnalyzeRequested } from "./client";
 
 /**
  * Competitor content analysis: fetch and score the pages currently cited
@@ -13,7 +13,7 @@ export const strategyCompetitorsAnalyze = inngest.createFunction(
   {
     id: "strategy-competitors-analyze",
     triggers: [{ event: strategyCompetitorsAnalyzeRequested }],
-    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: 4 }],
+    concurrency: [{ key: "event.data.siteId", limit: 1 }, { limit: concurrencyCap(4) }],
     retries: 1,
   },
   async ({ event, step }) => {

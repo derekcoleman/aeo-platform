@@ -2,7 +2,7 @@ import { connectorContext, getConnector } from "@/lib/connectors";
 import { errorMessage, expireStaleSyncRuns, getConnection, lastSuccessfulCursor, listConnections, markWebhookProcessed, withSyncRun } from "@/lib/connectors/store";
 import { ConnectorError, type SyncKind } from "@/lib/connectors/types";
 import { ZodError } from "zod";
-import { connectorSyncCompleted, connectorSyncRequested, connectorWebhookReceived, inngest } from "./client";
+import { concurrencyCap, connectorSyncCompleted, connectorSyncRequested, connectorWebhookReceived, inngest } from "./client";
 
 /**
  * Connector jobs. One sync function for every provider (the adapter decides
@@ -26,7 +26,7 @@ export const connectorSyncFunction = inngest.createFunction(
   {
     id: "connector-sync",
     triggers: [connectorSyncRequested],
-    concurrency: [{ key: "event.data.orgId", limit: 1 }, { limit: 10 }],
+    concurrency: [{ key: "event.data.orgId", limit: 1 }, { limit: concurrencyCap(10) }],
     retries: SYNC_RETRIES,
   },
   async ({ event, step, attempt }) => {
@@ -101,7 +101,7 @@ export const connectorWebhookFunction = inngest.createFunction(
   {
     id: "connector-webhook",
     triggers: [connectorWebhookReceived],
-    concurrency: [{ key: "event.data.connectionId", limit: 1 }, { limit: 20 }],
+    concurrency: [{ key: "event.data.connectionId", limit: 1 }, { limit: concurrencyCap(20) }],
     retries: 3,
   },
   async ({ event, step }) => {
