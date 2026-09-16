@@ -82,12 +82,37 @@ export const SITE_PAGES: SitePageDef[] = [
   { key: "attribution", label: "Attribution", segment: "attribution" },
 ];
 
-export const ORG_SECTIONS: NavSection[] = [
+/** The settings hub (/settings): one organisation's people, plan, options and history. */
+export const SETTINGS_SECTIONS: NavSection[] = [
   { value: "members", label: "Members" },
   { value: "billing", label: "Billing" },
-  { value: "settings", label: "Settings" },
+  { value: "organisation", label: "Organisation" },
   { value: "audit", label: "Audit log" },
 ];
+
+/** Every page the shell can show; drives the sidebar highlight, the switcher's links and the breadcrumb. */
+export type ShellPage = SitePageKey | "settings" | "console" | "setup" | "theme";
+
+const SHELL_PAGE_LABELS: Record<Exclude<ShellPage, SitePageKey>, string> = { settings: "Settings", console: "Ops console", setup: "Setup checklist", theme: "Theme" };
+
+export function pageLabel(page: ShellPage): string {
+  if (page === "connectors") return "Connectors";
+  const def = SITE_PAGES.find((p) => p.key === page);
+  return def ? def.label : SHELL_PAGE_LABELS[page as Exclude<ShellPage, SitePageKey>];
+}
+
+/**
+ * The settings hub for a project's organisation (the project stays in the
+ * sidebar) or for one organisation by id; bare /settings picks the caller's
+ * first organisation.
+ */
+export function settingsHref(siteId?: string | null, orgId?: string | null): string {
+  const q = new URLSearchParams();
+  if (siteId) q.set("site", siteId);
+  if (orgId) q.set("org", orgId);
+  const query = q.toString();
+  return query ? `/settings?${query}` : "/settings";
+}
 
 export const OPS_SECTIONS: NavSection[] = [
   { value: "sites", label: "Sites" },
@@ -112,6 +137,7 @@ export function opsHref(siteId: string | null | undefined, path: "" | "setup" = 
 /** Where another project's copy of the current page lives, so switching projects keeps the page you are on. */
 export function pageHrefForSite(siteId: string, page: string | undefined): string {
   if (page === "connectors") return `/app/sites/${siteId}/connectors`;
+  if (page === "settings") return settingsHref(siteId);
   if (page === "console") return opsHref(siteId);
   if (page === "setup") return opsHref(siteId, "setup");
   if (page === "theme") return `/ops/sites/${siteId}/theme`;
