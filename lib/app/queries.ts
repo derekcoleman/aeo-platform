@@ -103,13 +103,21 @@ export interface OpsOrgRow {
   created_at: string | Date;
 }
 
-export async function opsOrganizations(sql: postgres.Sql = appDb()): Promise<OpsOrgRow[]> {
+/** Optional scope for the ops console: one project (and its organisation) instead of every tenant. */
+export interface OpsScope {
+  siteId?: string | null;
+  orgId?: string | null;
+}
+
+export async function opsOrganizations(scope: OpsScope = {}, sql: postgres.Sql = appDb()): Promise<OpsOrgRow[]> {
   return sql<OpsOrgRow[]>`
     select o.id, o.name, o.slug, o.plan, o.status, o.created_at,
            (select count(*) from app.memberships m where m.org_id = o.id)::int as members,
            (select count(*) from app.sites s where s.org_id = o.id)::int as sites,
            app.org_feature_enabled(o.id, 'connector:profound') as profound
-    from app.organizations o order by o.created_at desc`;
+    from app.organizations o
+    where (${scope.orgId ?? null}::uuid is null or o.id = ${scope.orgId ?? null}::uuid)
+    order by o.created_at desc`;
 }
 
 export interface OpsSiteRow {
@@ -128,29 +136,38 @@ export interface OpsSiteRow {
   open_opportunities: number;
 }
 
-export async function opsSites(sql: postgres.Sql = appDb()): Promise<OpsSiteRow[]> {
+export async function opsSites(scope: OpsScope = {}, sql: postgres.Sql = appDb()): Promise<OpsSiteRow[]> {
   return sql<OpsSiteRow[]>`
     select s.id, s.org_id, o.name as org_name, s.name, s.canonical_domain, s.path_prefix, s.proxy_mode::text as proxy_mode, s.status::text as status,
            s.last_health_ok, s.last_health_at, s.health_failures,
            (select count(*) from content.published_pages p where p.site_id = s.id)::int as published,
            (select count(*) from content.opportunities q where q.site_id = s.id and q.status = 'open')::int as open_opportunities
-    from app.sites s join app.organizations o on o.id = s.org_id order by s.created_at desc`;
+    from app.sites s join app.organizations o on o.id = s.org_id
+    where (${scope.siteId ?? null}::uuid is null or s.id = ${scope.siteId ?? null}::uuid)
+    order by s.created_at desc`;
 }
 
 export interface FailedSyncRow {
   id: string;
   org_name: string;
+  site_name: string | null;
   provider: string;
   kind: string;
   started_at: string | Date;
   error: string | null;
 }
 
-export async function opsFailedSyncs(days = 7, sql: postgres.Sql = appDb()): Promise<FailedSyncRow[]> {
+/** Scoped to a project: its own connections plus the organisation-wide ones (Slack, org custom sources) that also serve it. */
+export async function opsFailedSyncs(days = 7, scope: OpsScope = {}, sql: postgres.Sql = appDb()): Promise<FailedSyncRow[]> {
   return sql<FailedSyncRow[]>`
-    select r.id, o.name as org_name, c.provider::text as provider, r.kind::text as kind, r.started_at, r.error
-    from context.context_sync_runs r join context.context_connections c on c.id = r.connection_id join app.organizations o on o.id = r.org_id
-    where r.status = 'failed' and r.started_at >= now() - make_interval(days => ${days}) order by r.started_at desc limit 50`;
+    select r.id, o.name as org_name, s.name as site_name, c.provider::text as provider, r.kind::text as kind, r.started_at, r.error
+    from context.context_sync_runs r
+    join context.context_connections c on c.id = r.connection_id
+    join app.organizations o on o.id = r.org_id
+    left join app.sites s on s.id = c.site_id
+    where r.status = 'failed' and r.started_at >= now() - make_interval(days => ${days})
+      and (${scope.siteId ?? null}::uuid is null or c.site_id = ${scope.siteId ?? null}::uuid or (c.site_id is null and c.org_id = ${scope.orgId ?? null}::uuid))
+    order by r.started_at desc limit 50`;
 }
 
 export interface SpendRow {
@@ -164,6 +181,21 @@ export async function opsLlmSpend(days = 30, sql: postgres.Sql = appDb()): Promi
     select coalesce(o.name, '(no org)') as org_name, count(*)::int as calls, coalesce(sum(l.cost_usd), 0)::float as cost_usd
     from ops.llm_calls l left join app.organizations o on o.id = l.org_id
     where l.created_at >= now() - make_interval(days => ${days}) group by o.name order by cost_usd desc limit 20`;
+}
+
+export interface SiteSpendRow {
+  task_key: string;
+  calls: number;
+  cost_usd: number;
+}
+
+/** One project's model spend by pipeline task, last N days. */
+export async function opsLlmSpendForSite(siteId: string, days = 30, sql: postgres.Sql = appDb()): Promise<SiteSpendRow[]> {
+  return sql<SiteSpendRow[]>`
+    select l.task_key, count(*)::int as calls, coalesce(sum(l.cost_usd), 0)::float as cost_usd
+    from ops.llm_calls l
+    where l.site_id = ${siteId} and l.created_at >= now() - make_interval(days => ${days})
+    group by l.task_key order by cost_usd desc`;
 }
 
 export interface StaffRow {

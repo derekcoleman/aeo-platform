@@ -1,4 +1,5 @@
 import { AppShell, PageHeader } from "@/components/app/shell";
+import { loadSite } from "@/lib/app/store";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -25,8 +26,11 @@ function StateBadge({ state }: { state: CheckState }) {
   return <Badge variant="outline">skipped</Badge>;
 }
 
-export default async function SetupPage() {
+export default async function SetupPage({ searchParams }: { searchParams: Promise<{ site?: string }> }) {
+  const { site: siteParam } = await searchParams;
   const user = await requireStaff();
+  // Deployment checks are platform-wide; the project only keeps the sidebar in context.
+  const site = siteParam ? await loadSite(siteParam) : null;
   let claims: Record<string, unknown> | null = null;
   if (isAuthConfigured()) {
     const { data } = await (await supabaseServer()).auth.getSession();
@@ -34,7 +38,7 @@ export default async function SetupPage() {
   }
   const report = await runSetupChecks({ claims });
   return (
-    <AppShell user={user} active="ops" page="setup">
+    <AppShell user={user} active="ops" site={site} page="setup">
       <PageHeader title="Setup checklist" description="Live checks against this deployment. Each failure names the dashboard toggle or variable that fixes it.">
         {report.failing ? <Badge variant="destructive">{report.failing} failing</Badge> : <Badge variant="success">all required checks pass</Badge>}
         {report.warnings ? <Badge variant="warning">{report.warnings} to confirm</Badge> : null}
