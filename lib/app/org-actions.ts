@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { settingsHref } from "@/lib/app/nav";
 import type { Route } from "next";
 import { z } from "zod";
 import { requireUser, roleIn } from "@/lib/auth/session";
@@ -19,7 +20,7 @@ import { canAssignRole, listMembers, loadOrg, wouldRemoveLastOwner } from "./org
 const fail = (error: string): ActionResult => ({ ok: false, error });
 
 async function guard(orgId: string, level: "admin" | "owner") {
-  const user = await requireUser(`/app/orgs/${orgId}`);
+  const user = await requireUser(settingsHref(null, orgId));
   const role = roleIn(user, orgId);
   const ok = role === "owner" || (level === "admin" && role === "admin");
   return { user, role, error: ok ? null : "Only organisation owners" + (level === "admin" ? " and admins" : "") + " can do this." };
@@ -30,7 +31,7 @@ async function audit(orgId: string, actorId: string, action: string, targetType:
     values (${orgId}, ${actorId}, ${action}, ${targetType}, ${targetId}, ${appDb().json(after as never)})`;
 }
 
-const refresh = (orgId: string) => revalidatePath(`/app/orgs/${orgId}`);
+const refresh = () => revalidatePath("/settings");
 
 const inviteForm = z.object({ orgId: z.guid(), email: z.string().trim().email().max(200), role: z.enum(["admin", "editor", "viewer"]) });
 
@@ -58,7 +59,7 @@ export async function inviteMemberAction(_prev: ActionResult | null, form: FormD
     "The invite expires in 14 days.",
   ].join("\n\n");
   const sent = await sendEmail({ to: [email], subject: `You're invited to ${org.name} on AEO Platform`, text, html: textToHtml(text) });
-  refresh(orgId);
+  refresh();
   return { ok: true, id: invite.id, error: sent.sent ? undefined : `Invite saved; email not sent (${sent.reason}). They can sign in with ${email} to accept.` };
 }
 
@@ -67,7 +68,7 @@ export async function revokeInviteAction(orgId: string, inviteId: string): Promi
   if (error) return fail(error);
   await appDb()`delete from app.org_invites where id = ${inviteId} and org_id = ${orgId} and accepted_at is null`;
   await audit(orgId, user.id, "member.invite.revoke", "org_invite", inviteId, {});
-  refresh(orgId);
+  refresh();
   return { ok: true };
 }
 
@@ -81,7 +82,7 @@ export async function setMemberRoleAction(orgId: string, userId: string, next: "
   if (wouldRemoveLastOwner(members, userId, next)) return fail("An organisation needs at least one owner.");
   await appDb()`update app.memberships set role = ${next} where org_id = ${orgId} and user_id = ${userId}`;
   await audit(orgId, user.id, "member.role", "membership", userId, { from: target.role, to: next });
-  refresh(orgId);
+  refresh();
   return { ok: true };
 }
 
@@ -95,7 +96,7 @@ export async function removeMemberAction(orgId: string, userId: string): Promise
   if (wouldRemoveLastOwner(members, userId, null)) return fail("An organisation needs at least one owner.");
   await appDb()`delete from app.memberships where org_id = ${orgId} and user_id = ${userId}`;
   await audit(orgId, user.id, "member.remove", "membership", userId, { role: target.role });
-  refresh(orgId);
+  refresh();
   return { ok: true };
 }
 
@@ -118,7 +119,7 @@ export async function updateOrgSettingsAction(_prev: ActionResult | null, form: 
   const budget = user.isStaff ? serpBudget : Math.min(serpBudget, 500);
   await appDb()`update app.organizations set name = ${name}, retention_days = ${retentionDays}, billing_email = ${billingEmail || null}, serp_monthly_budget_usd = ${budget} where id = ${orgId}`;
   await audit(orgId, user.id, "org.settings", "organization", orgId, { name, retentionDays, billingEmail: billingEmail || null, serpBudget: budget, before: { name: before.name, retentionDays: before.retention_days, serpBudget: before.serp_monthly_budget_usd } });
-  refresh(orgId);
+  refresh();
   revalidatePath("/app");
   return { ok: true };
 }
@@ -134,7 +135,7 @@ export async function startCheckoutAction(orgId: string, plan: string): Promise<
   const base = process.env.APP_URL ?? "";
   let url: string;
   try {
-    ({ url } = await createCheckoutSession({ orgId, plan: spec.key, customerEmail: org.billing_email ?? user.email, customerId: org.stripe_customer_id, successUrl: `${base}/app/orgs/${orgId}?checkout=success`, cancelUrl: `${base}/app/orgs/${orgId}?checkout=cancel` }));
+    ({ url } = await createCheckoutSession({ orgId, plan: spec.key, customerEmail: org.billing_email ?? user.email, customerId: org.stripe_customer_id, successUrl: `${base}${settingsHref(null, orgId)}&tab=billing&checkout=success`, cancelUrl: `${base}${settingsHref(null, orgId)}&tab=billing&checkout=cancel` }));
   } catch (e) {
     return fail(e instanceof Error ? e.message : String(e));
   }
@@ -150,7 +151,7 @@ export async function openPortalAction(orgId: string): Promise<ActionResult> {
   if (!org?.stripe_customer_id) return fail("No billing account yet; choose a plan first.");
   let url: string;
   try {
-    ({ url } = await createPortalSession(org.stripe_customer_id, `${process.env.APP_URL ?? ""}/app/orgs/${orgId}`));
+    ({ url } = await createPortalSession(org.stripe_customer_id, `${process.env.APP_URL ?? ""}${settingsHref(null, orgId)}&tab=billing`));
   } catch (e) {
     return fail(e instanceof Error ? e.message : String(e));
   }
