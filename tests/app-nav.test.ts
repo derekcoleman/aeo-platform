@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OPS_SECTIONS, SETTINGS_SECTIONS, SITE_PAGES, opsHref, pageHrefForSite, pageLabel, resolveTab, sectionHref, settingsHref, sitePage, sitePageHref } from "@/lib/app/nav";
+import { OPS_SECTIONS, SETTINGS_SECTIONS, SITE_PAGES, STAFF_SETTINGS_SECTIONS, legacySettingsTab, opsHref, pageHrefForSite, pageLabel, resolveTab, sectionHref, settingsHref, settingsSections, sitePage, sitePageHref } from "@/lib/app/nav";
 
 describe("app navigation model", () => {
   it("routes every project page under the site and keeps the overview on the bare path", () => {
@@ -21,14 +21,13 @@ describe("app navigation model", () => {
   it("keeps the current page when switching project, including the connectors page that lives outside the project list", () => {
     expect(pageHrefForSite("s2", "strategy")).toBe("/app/sites/s2/strategy");
     expect(pageHrefForSite("s2", "overview")).toBe("/app/sites/s2");
-    expect(pageHrefForSite("s2", "connectors")).toBe("/app/sites/s2/connectors");
+    expect(pageHrefForSite("s2", "connectors")).toBe("/settings?site=s2&tab=connectors");
     expect(pageHrefForSite("s2", "settings")).toBe("/settings?site=s2");
+    expect(pageHrefForSite("s2", "settings", "billing")).toBe("/settings?site=s2&tab=billing");
     expect(pageHrefForSite("s2", "console")).toBe("/ops?site=s2");
-    expect(pageHrefForSite("s2", "setup")).toBe("/ops/setup?site=s2");
-    expect(pageHrefForSite("s2", "theme")).toBe("/ops/sites/s2/theme");
     expect(pageHrefForSite("s2", undefined)).toBe("/app/sites/s2");
     expect(opsHref(null)).toBe("/ops");
-    expect(opsHref("s2", "setup")).toBe("/ops/setup?site=s2");
+    expect(opsHref("s2")).toBe("/ops?site=s2");
     expect(SITE_PAGES.some((p) => p.key === "connectors")).toBe(false);
   });
 
@@ -36,12 +35,24 @@ describe("app navigation model", () => {
     expect(settingsHref()).toBe("/settings");
     expect(settingsHref("s1")).toBe("/settings?site=s1");
     expect(settingsHref(null, "o1")).toBe("/settings?org=o1");
-    expect(settingsHref("s1", "o1")).toBe("/settings?site=s1&org=o1");
-    expect(sectionHref(settingsHref("s1"), "organisation")).toBe("/settings?site=s1&tab=organisation");
+    expect(settingsHref("s1", "o1", "billing")).toBe("/settings?site=s1&org=o1&tab=billing");
+    expect(sectionHref(settingsHref("s1"), "general")).toBe("/settings?site=s1&tab=general");
     expect(pageLabel("settings")).toBe("Settings");
     expect(pageLabel("connectors")).toBe("Connectors");
     expect(pageLabel("brain")).toBe("Brand brain");
     expect(pageLabel("console")).toBe("Ops console");
+  });
+
+  it("gives staff the deployment and staff tabs, and the theme tab only with a project", () => {
+    expect(settingsSections({ isStaff: false, hasSite: true }).map((s) => s.value)).toEqual(SETTINGS_SECTIONS.map((s) => s.value));
+    expect(settingsSections({ isStaff: true, hasSite: false }).map((s) => s.value)).toEqual([...SETTINGS_SECTIONS.map((s) => s.value), "deployment", "staff"]);
+    expect(settingsSections({ isStaff: true, hasSite: true }).map((s) => s.value)).toEqual([...SETTINGS_SECTIONS.map((s) => s.value), ...STAFF_SETTINGS_SECTIONS.map((s) => s.value)]);
+    expect(SETTINGS_SECTIONS.map((s) => s.value)).toContain("connectors");
+    expect(OPS_SECTIONS.some((s) => s.value === "staff")).toBe(false);
+    expect(legacySettingsTab("settings")).toBe("general");
+    expect(legacySettingsTab("organisation")).toBe("general");
+    expect(legacySettingsTab("billing")).toBe("billing");
+    expect(legacySettingsTab(undefined)).toBeUndefined();
   });
 
   it("deep links to a section with an explicit tab query", () => {

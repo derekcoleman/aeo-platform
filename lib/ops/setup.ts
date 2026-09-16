@@ -5,7 +5,7 @@ import { appDatabaseUrl, rendererDatabaseUrl, supabasePublishableKey, supabaseSe
 import { readHeartbeats, type HeartbeatRow } from "@/lib/jobs/heartbeat";
 
 /**
- * The setup checklist behind /ops/setup: every requirement for a working
+ * The deployment checklist behind Settings → Deployment: every requirement for a working
  * deployment, checked live where it can be, with the exact fix next to each
  * failure. Written so the first operator never has to guess which dashboard
  * toggle is missing.

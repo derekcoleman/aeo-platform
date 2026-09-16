@@ -42,7 +42,7 @@ function SiteSelect({ sites, value, onChange, name, allowNone = false }: { sites
 export function OAuthConnect({ provider, orgId, sites, label, ready, siteScoped, returnTo = "/settings/connectors" }: { provider: "google" | "slack"; orgId: string; sites: SiteOption[]; label: string; ready: boolean; siteScoped: boolean; returnTo?: string }) {
   const [siteId, setSiteId] = useState(sites[0]?.id ?? "");
   const href = `/api/connectors/${provider}/start?orgId=${encodeURIComponent(orgId)}${siteScoped && siteId ? `&siteId=${encodeURIComponent(siteId)}` : ""}&returnTo=${encodeURIComponent(returnTo)}`;
-  if (!ready) return <p className="text-muted-foreground text-xs">This deployment has no {provider === "google" ? "Google" : "Slack"} OAuth client configured ({provider === "google" ? "GOOGLE_OAUTH_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI" : "SLACK_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI"}). Ops → Setup lists what is missing.</p>;
+  if (!ready) return <p className="text-muted-foreground text-xs">This deployment has no {provider === "google" ? "Google" : "Slack"} OAuth client configured ({provider === "google" ? "GOOGLE_OAUTH_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI" : "SLACK_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI"}). Settings → Deployment lists what is missing.</p>;
   if (siteScoped && sites.length === 0) return <p className="text-muted-foreground text-xs">Create a project first; this connector binds to one.</p>;
   return (
     <div className="flex flex-wrap items-end gap-3">

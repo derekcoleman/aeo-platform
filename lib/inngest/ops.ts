@@ -2,7 +2,7 @@ import { tryRecordHeartbeat } from "@/lib/jobs/heartbeat";
 import { inngest, opsPingRequested } from "./client";
 
 /**
- * The setup checklist's test event. Ops → Setup sends `ops/ping.requested`
+ * The setup checklist's test event. Settings → Deployment sends `ops/ping.requested`
  * with a nonce and records the send; this function records the receipt.
  * Matching nonces prove the whole path: event key → Inngest → this app's
  * sync → a function run → the database.

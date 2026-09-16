@@ -13,7 +13,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
-import { resolveTab, sitePage } from "@/lib/app/nav";
+import { resolveTab, settingsHref, sitePage } from "@/lib/app/nav";
 import { loadSite } from "@/lib/app/store";
 import { competitorDomains, listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
 import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
@@ -231,7 +231,7 @@ export default async function StrategyPage({ params, searchParams }: { params: P
               <CardDescription>{profound ? `${profound.category ?? "category"} · last successful sync ${when(profound.last_synced_at)}${profound.mode === "api" ? " · syncs daily at 05:00 UTC; the first sync backfills 90 days in 30-day windows" : ""}` : "Profound tracks where you and competitors appear across ChatGPT, Perplexity, Gemini and Copilot. Connect the Enterprise API to pull it in; every number from it is labelled as Profound's."}</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
-              {sync ? <SyncStatus state={sync} setupHref={user.isStaff ? "/ops/setup" : null} /> : null}
+              {sync ? <SyncStatus state={sync} setupHref={user.isStaff ? settingsHref(site.id, null, "deployment") : null} /> : null}
               {sync ? <LiveRefresh active={sync.live} intervalMs={5000} maxMs={15 * 60 * 1000} /> : null}
               {engines.length ? (
                 <Table>

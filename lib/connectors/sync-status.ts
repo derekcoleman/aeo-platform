@@ -43,7 +43,7 @@ export interface SyncStateInput {
 export const QUEUE_GRACE_MS = 3 * 60 * 1000;
 export const STALE_RUN_MS = 20 * 60 * 1000;
 
-const LOST_FIX = "The job runner (Inngest) is not receiving events from this deployment, or has not synced this app. Ops → Setup runs the live checks and names the fix.";
+const LOST_FIX = "The job runner (Inngest) is not receiving events from this deployment, or has not synced this app. Settings → Deployment runs the live checks and names the fix.";
 const STALLED_FIX = "Retry: a backfill resumes from the last window that finished. If it stalls again, the report window is too large for one run; lower backfillDays on the connection.";
 
 const kindLabel = (k: string | null | undefined) => (k === "backfill" ? "backfill" : k === "incremental" ? "incremental sync" : k ? `${k} sync` : "sync");

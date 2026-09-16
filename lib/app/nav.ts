@@ -82,34 +82,57 @@ export const SITE_PAGES: SitePageDef[] = [
   { key: "attribution", label: "Attribution", segment: "attribution" },
 ];
 
-/** The settings hub (/settings): one organisation's people, plan, options and history. */
+/**
+ * The settings hub (/settings): everything that configures the workspace,
+ * kept apart from the project pages. The first five are for owners and
+ * admins; `settingsSections` adds the staff-only ones.
+ */
 export const SETTINGS_SECTIONS: NavSection[] = [
+  { value: "general", label: "General" },
   { value: "members", label: "Members" },
   { value: "billing", label: "Billing" },
-  { value: "organisation", label: "Organisation" },
+  { value: "connectors", label: "Connectors" },
   { value: "audit", label: "Audit log" },
 ];
 
-/** Every page the shell can show; drives the sidebar highlight, the switcher's links and the breadcrumb. */
-export type ShellPage = SitePageKey | "settings" | "console" | "setup" | "theme";
+/** Staff-only settings: the project's theme (needs a project), the deployment checklist, the staff list. */
+export const STAFF_SETTINGS_SECTIONS: NavSection[] = [
+  { value: "theme", label: "Theme" },
+  { value: "deployment", label: "Deployment" },
+  { value: "staff", label: "Staff" },
+];
 
-const SHELL_PAGE_LABELS: Record<Exclude<ShellPage, SitePageKey>, string> = { settings: "Settings", console: "Ops console", setup: "Setup checklist", theme: "Theme" };
+export function settingsSections(opts: { isStaff: boolean; hasSite: boolean }): NavSection[] {
+  if (!opts.isStaff) return SETTINGS_SECTIONS;
+  return [...SETTINGS_SECTIONS, ...STAFF_SETTINGS_SECTIONS.filter((s) => s.value !== "theme" || opts.hasSite)];
+}
+
+/** Older spellings of a settings tab that links and Stripe return URLs may still carry. */
+export function legacySettingsTab(tab: string | undefined): string | undefined {
+  if (tab === "settings" || tab === "organisation") return "general";
+  return tab;
+}
+
+/** Every page the shell can show; drives the sidebar highlight, the switcher's links and the breadcrumb. */
+export type ShellPage = SitePageKey | "settings" | "console";
 
 export function pageLabel(page: ShellPage): string {
   if (page === "connectors") return "Connectors";
-  const def = SITE_PAGES.find((p) => p.key === page);
-  return def ? def.label : SHELL_PAGE_LABELS[page as Exclude<ShellPage, SitePageKey>];
+  if (page === "settings") return "Settings";
+  if (page === "console") return "Ops console";
+  return SITE_PAGES.find((p) => p.key === page)?.label ?? page;
 }
 
 /**
  * The settings hub for a project's organisation (the project stays in the
- * sidebar) or for one organisation by id; bare /settings picks the caller's
- * first organisation.
+ * sidebar) or for one organisation by id, optionally opened on a tab; bare
+ * /settings picks the caller's first organisation.
  */
-export function settingsHref(siteId?: string | null, orgId?: string | null): string {
+export function settingsHref(siteId?: string | null, orgId?: string | null, tab?: string | null): string {
   const q = new URLSearchParams();
   if (siteId) q.set("site", siteId);
   if (orgId) q.set("org", orgId);
+  if (tab) q.set("tab", tab);
   const query = q.toString();
   return query ? `/settings?${query}` : "/settings";
 }
@@ -119,7 +142,6 @@ export const OPS_SECTIONS: NavSection[] = [
   { value: "orgs", label: "Organisations" },
   { value: "health", label: "Connector health" },
   { value: "spend", label: "LLM spend" },
-  { value: "staff", label: "Staff" },
   { value: "audit", label: "Audit log" },
 ];
 
@@ -128,19 +150,16 @@ export function sitePageHref(siteId: string, page: SitePageDef | SitePageKey): s
   return def.segment ? `/app/sites/${siteId}/${def.segment}` : `/app/sites/${siteId}`;
 }
 
-/** The ops console (or one of its pages) scoped to a project, or platform-wide when there is no project. */
-export function opsHref(siteId: string | null | undefined, path: "" | "setup" = ""): string {
-  const base = path ? `/ops/${path}` : "/ops";
-  return siteId ? `${base}?site=${encodeURIComponent(siteId)}` : base;
+/** The ops console scoped to a project, or platform-wide when there is no project. */
+export function opsHref(siteId: string | null | undefined): string {
+  return siteId ? `/ops?site=${encodeURIComponent(siteId)}` : "/ops";
 }
 
-/** Where another project's copy of the current page lives, so switching projects keeps the page you are on. */
-export function pageHrefForSite(siteId: string, page: string | undefined): string {
-  if (page === "connectors") return `/app/sites/${siteId}/connectors`;
-  if (page === "settings") return settingsHref(siteId);
+/** Where another project's copy of the current page lives, so switching projects keeps the page (and settings tab) you are on. */
+export function pageHrefForSite(siteId: string, page: string | undefined, section?: string | null): string {
+  if (page === "connectors") return settingsHref(siteId, null, "connectors");
+  if (page === "settings") return settingsHref(siteId, null, section);
   if (page === "console") return opsHref(siteId);
-  if (page === "setup") return opsHref(siteId, "setup");
-  if (page === "theme") return `/ops/sites/${siteId}/theme`;
   const def = SITE_PAGES.find((p) => p.key === page);
   return def ? sitePageHref(siteId, def) : `/app/sites/${siteId}`;
 }

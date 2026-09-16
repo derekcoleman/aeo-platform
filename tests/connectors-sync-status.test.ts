@@ -17,7 +17,7 @@ describe("describeSyncState", () => {
     expect(lost.phase).toBe("lost");
     expect(lost.live).toBe(false);
     expect(lost.title).toContain("never started");
-    expect(lost.fix).toContain("Ops → Setup");
+    expect(lost.fix).toContain("Settings → Deployment");
   });
 
   it("a request older than the latest run is not pending", () => {

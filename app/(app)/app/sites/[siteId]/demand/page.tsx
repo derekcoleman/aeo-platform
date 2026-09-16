@@ -11,7 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
-import { resolveTab, sectionHref, settingsHref, sitePage } from "@/lib/app/nav";
+import { resolveTab, settingsHref, sitePage } from "@/lib/app/nav";
 import { demandCounts, listSiteQuestions, serpSpendSummary } from "@/lib/app/demand";
 import { setTrackingAction, snapshotNowAction, trackTopAction } from "@/lib/app/demand-actions";
 import { loadSite } from "@/lib/app/store";
@@ -155,7 +155,7 @@ export default async function DemandPage({ params, searchParams }: { params: Pro
             <CardHeader><CardTitle>Spend this month</CardTitle><CardDescription>Cached by (query, locale, device, day); the budget guard stops calls before the limit, never after.</CardDescription></CardHeader>
             <CardContent className="text-sm">
               <p>This project: <span className="font-mono">${spend.site_month_usd.toFixed(2)}</span> across {spend.calls_month} calls ({spend.cached_month} served from cache).</p>
-              <p>Organisation: <span className="font-mono">${spend.org_month_usd.toFixed(2)}</span> of <span className="font-mono">${spend.budget_usd.toFixed(2)}</span> ({budgetPct}%). Change the budget in <Link className="underline-offset-2 hover:underline" href={sectionHref(settingsHref(site.id), "organisation") as Route}>organisation settings</Link>.</p>
+              <p>Organisation: <span className="font-mono">${spend.org_month_usd.toFixed(2)}</span> of <span className="font-mono">${spend.budget_usd.toFixed(2)}</span> ({budgetPct}%). Change the budget in <Link className="underline-offset-2 hover:underline" href={settingsHref(site.id, null, "general") as Route}>organisation settings</Link>.</p>
             </CardContent>
           </Card>
         </TabsContent>
