@@ -6,12 +6,13 @@ row, never silence.
 
 ## The Connectors page
 
-Project → **Connectors** (`/app/sites/{id}/connectors`) lists **every**
-connector the product offers for that project, connected or not, as a
-compact grid of tiles in three groups. A tile opens a dialog with what the
-connector feeds, the rows that exist and their sync state, and the connect or
-setup form. `/settings/connectors` redirects to the user's first project and
-carries the query an OAuth callback attaches.
+Settings → **Connectors** (`/settings?site={id}&tab=connectors`) lists
+**every** connector the product offers for the current project, connected or
+not, as a compact grid of tiles in three groups. A tile opens a dialog with
+what the connector feeds, the rows that exist and their sync state, and the
+connect or setup form. `/settings/connectors` and the old
+`/app/sites/{id}/connectors` redirect there, carrying the query an OAuth
+callback attaches.
 
 | Group | Connectors | Scope |
 |---|---|---|

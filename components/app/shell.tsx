@@ -1,10 +1,10 @@
 import type { Route } from "next";
 import Link from "next/link";
-import { BarChart3, Brain, ChevronRight, Compass, FileText, Globe, LayoutDashboard, LayoutGrid, ListChecks, LogOut, Palette, Plug, RefreshCw, Search, Send, Settings, ShieldCheck } from "lucide-react";
+import { BarChart3, Brain, ChevronRight, Compass, FileText, Globe, LayoutDashboard, LayoutGrid, LogOut, Plug, RefreshCw, Search, Send, Settings, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ProjectSwitcher, type SwitcherProject } from "@/components/app/project-switcher";
 import { SidebarItem } from "@/components/app/sidebar-item";
-import { OPS_SECTIONS, SETTINGS_SECTIONS, SITE_PAGES, opsHref, pageHrefForSite, pageLabel, settingsHref, sitePageHref, type NavSection, type ShellPage, type SitePageKey } from "@/lib/app/nav";
+import { OPS_SECTIONS, SITE_PAGES, opsHref, pageHrefForSite, pageLabel, settingsHref, sitePageHref, type NavSection, type ShellPage, type SitePageKey } from "@/lib/app/nav";
 import { listSites, type SiteRow } from "@/lib/app/store";
 import { visibleOrgIds, type SessionUser } from "@/lib/auth/session";
 
@@ -52,8 +52,8 @@ export interface ShellSite {
 
 export interface AppShellProps {
   user: SessionUser;
-  /** Which workspace entry is highlighted. Defaults to the project area. */
-  active?: "projects" | "connectors" | "settings" | "ops";
+  /** Which area is highlighted. Defaults to the project area. */
+  active?: "projects" | "settings" | "ops";
   /** The project whose pages fill the sidebar. */
   site?: ShellSite | null;
   /** The page being shown; drives the highlight, the sections that unfold, the switcher's links and the breadcrumb. */
@@ -65,31 +65,39 @@ export interface AppShellProps {
 
 /**
  * The signed-in frame. Server component; the only interactive piece is the
- * project switcher. The sidebar is: the switcher, then the workspace entries
- * (Connectors, Settings, Ops) that follow the current project, then either
- * the current project's pages with the open page's sections nested under it
- * or, when no project is open, the list of projects so there is always a
- * one-click way back. Every page also carries a breadcrumb.
+ * project switcher. The sidebar is: the switcher; the current project's
+ * pages with the open page's sections nested under it, or the list of
+ * projects when none is open (so the way back is always one click); then,
+ * pinned to the bottom, the small Settings and Ops entries and the account.
+ * Every page carries a breadcrumb.
  */
 export async function AppShell({ user, active = "projects", site, page, section, children }: AppShellProps) {
   const sites = await listSites(visibleOrgIds(user));
-  const { workspace, context } = buildGroups({ user, active, site: site ?? null, page, sites });
-  const groups = [workspace, ...context];
-  const projects: SwitcherProject[] = sites.map((s) => ({ id: s.id, name: s.name, domain: s.canonical_domain, href: pageHrefForSite(s.id, page) }));
+  const { main, footer } = buildGroups({ user, active, site: site ?? null, page, sites });
+  const projects: SwitcherProject[] = sites.map((s) => ({ id: s.id, name: s.name, domain: s.canonical_domain, href: pageHrefForSite(s.id, page, page === "settings" ? section : null) }));
   const crumbs = breadcrumbs(site ?? null, page);
   return (
     <div className="flex min-h-screen">
       <aside className="bg-muted/40 hidden w-60 shrink-0 flex-col border-r px-3 py-5 md:sticky md:top-0 md:flex md:h-screen md:overflow-y-auto">
         <Link href={"/app" as Route} className="px-2 text-sm font-semibold tracking-tight">AEO Platform</Link>
         <div className="mt-4"><ProjectSwitcher projects={projects} currentId={site?.id ?? null} /></div>
-        <nav className="mt-4 flex flex-col gap-6" aria-label="Main">
-          {groups.map((g) => <SidebarGroup key={g.key} group={g} section={section} />)}
+        <nav className="mt-5 flex flex-col gap-6" aria-label="Main">
+          {main.map((g) => <SidebarGroup key={g.key} group={g} section={section} />)}
         </nav>
-        <div className="mt-auto flex flex-col gap-2 px-2 pt-6">
-          <p className="text-muted-foreground truncate text-xs" title={user.email ?? undefined}>{user.name ?? user.email}</p>
-          <form action="/auth/signout" method="post">
-            <Button type="submit" variant="ghost" size="sm" className="w-full justify-start px-0"><LogOut /> Sign out</Button>
-          </form>
+        <div className="mt-auto flex flex-col gap-3 border-t pt-4">
+          <nav aria-label="Workspace">
+            <ul className="flex flex-col gap-0.5">
+              {footer.items.map((n) => (
+                <SidebarItem key={n.key} href={n.href} label={n.label} icon={<n.icon className="size-3.5 shrink-0" />} sections={n.sections} current={footer.current === n.key} section={section} compact />
+              ))}
+            </ul>
+          </nav>
+          <div className="flex items-center justify-between gap-2 px-2">
+            <p className="text-muted-foreground min-w-0 truncate text-xs" title={user.email ?? undefined}>{user.name ?? user.email}</p>
+            <form action="/auth/signout" method="post">
+              <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground h-7 px-1.5 text-xs" title="Sign out"><LogOut className="size-3.5" /> Sign out</Button>
+            </form>
+          </div>
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
@@ -98,10 +106,10 @@ export async function AppShell({ user, active = "projects", site, page, section,
             <Link href={"/app" as Route} className="shrink-0 text-sm font-semibold">AEO Platform</Link>
             <ProjectSwitcher projects={projects} currentId={site?.id ?? null} compact />
             <nav className="flex min-w-0 flex-1 justify-end gap-3 overflow-x-auto text-sm whitespace-nowrap" aria-label="Workspace">
-              {workspace.items.map((n) => <Link key={n.key} href={n.href as Route} className={workspace.current === n.key ? "font-medium" : "text-muted-foreground"}>{n.label}</Link>)}
+              {footer.items.map((n) => <Link key={n.key} href={n.href as Route} className={footer.current === n.key ? "font-medium" : "text-muted-foreground"}>{n.label}</Link>)}
             </nav>
           </div>
-          {context.map((g) => (
+          {main.map((g) => (
             <nav key={g.key} className="flex gap-1 overflow-x-auto border-t px-3 py-2 text-sm whitespace-nowrap" aria-label={g.title}>
               {g.items.map((n) => <Link key={n.key} href={n.href as Route} className={`shrink-0 rounded-md px-2 py-1 ${g.current === n.key ? "bg-background font-medium shadow-xs" : "text-muted-foreground"}`}>{n.label}</Link>)}
             </nav>
@@ -150,43 +158,31 @@ function SidebarGroup({ group, section }: { group: NavGroup; section?: string })
   );
 }
 
-function buildGroups({ user, active, site, page, sites }: { user: SessionUser; active: NonNullable<AppShellProps["active"]>; site: ShellSite | null; page?: ShellPage; sites: SiteRow[] }): { workspace: NavGroup; context: NavGroup[] } {
-  // The workspace entries follow the project: Connectors opens the current
-  // project's connectors, Settings its organisation, Ops the console scoped
-  // to it. Without a project they open the workspace-wide view.
-  const workspace: NavGroup = {
-    key: "workspace",
-    current: page === "connectors" ? "connectors" : page === "settings" ? "settings" : active === "ops" ? "ops" : undefined,
-    items: [
-      { key: "connectors", href: site ? `/app/sites/${site.id}/connectors` : "/settings/connectors", label: "Connectors", icon: Plug },
-      { key: "settings", href: settingsHref(site?.id), label: "Settings", icon: Settings, sections: SETTINGS_SECTIONS },
-      ...(user.isStaff ? [{ key: "ops", href: opsHref(site?.id), label: "Ops", icon: ShieldCheck }] : []),
-    ],
-  };
-  const groups: NavGroup[] = [];
-
+function buildGroups({ user, active, site, page, sites }: { user: SessionUser; active: NonNullable<AppShellProps["active"]>; site: ShellSite | null; page?: ShellPage; sites: SiteRow[] }): { main: NavGroup[]; footer: NavGroup } {
+  const main: NavGroup[] = [];
   if (site) {
     const items: NavItem[] = SITE_PAGES.map((p) => ({ key: p.key, href: sitePageHref(site.id, p), label: p.label, icon: PAGE_ICONS[p.key], sections: p.sections }));
-    groups.push({ key: "project", title: site.name, items, current: page && page !== "connectors" && page in PAGE_ICONS ? page : undefined });
+    main.push({ key: "project", title: site.name, items, current: active === "projects" && page && page in PAGE_ICONS ? page : undefined });
   } else if (sites.length > 0) {
-    // No project open (the projects index, a workspace-wide Settings or Ops
-    // page): list the projects so the way back is one click, never a hunt.
+    // No project open (the projects index, workspace-wide Settings or Ops):
+    // list the projects so the way back is one click, never a hunt.
     const items: NavItem[] = sites.slice(0, PROJECT_LIST_MAX).map((s) => ({ key: s.id, href: sitePageHref(s.id, "overview"), label: s.name, icon: Globe }));
     if (sites.length > PROJECT_LIST_MAX) items.push({ key: "all", href: "/app", label: `All ${sites.length} projects`, icon: LayoutGrid });
-    groups.push({ key: "projects", title: "Projects", items });
+    main.push({ key: "projects", title: "Projects", items });
   }
 
-  if (user.isStaff && active === "ops") {
-    const items: NavItem[] = [
-      // Staff management is platform-wide; it has no project view.
-      { key: "console", href: opsHref(site?.id), label: site ? `Console · ${site.name}` : "Console", icon: ShieldCheck, sections: site ? OPS_SECTIONS.filter((s) => s.value !== "staff") : OPS_SECTIONS },
-      { key: "setup", href: opsHref(site?.id, "setup"), label: "Setup checklist", icon: ListChecks },
-    ];
-    if (site && page === "theme") items.push({ key: "theme", href: `/ops/sites/${site.id}/theme`, label: `Theme · ${site.name}`, icon: Palette });
-    groups.push({ key: "ops", title: "Ops", items, current: page === "console" || page === "setup" || page === "theme" ? page : undefined });
-  }
-
-  return { workspace, context: groups };
+  // Settings and Ops follow the project: from a project they open its
+  // organisation's settings and the console scoped to it. The console's
+  // sections unfold under Ops while it is open.
+  const footer: NavGroup = {
+    key: "workspace",
+    current: active === "settings" ? "settings" : active === "ops" ? "ops" : undefined,
+    items: [
+      { key: "settings", href: settingsHref(site?.id), label: "Settings", icon: Settings },
+      ...(user.isStaff ? [{ key: "ops", href: opsHref(site?.id), label: site ? `Ops · ${site.name}` : "Ops", icon: ShieldCheck, sections: OPS_SECTIONS }] : []),
+    ],
+  };
+  return { main, footer };
 }
 
 export function PageHeader({ title, eyebrow, description, children }: { title: string; eyebrow?: React.ReactNode; description?: string; children?: React.ReactNode }) {

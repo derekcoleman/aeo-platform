@@ -4,7 +4,7 @@ import { appDb } from "@/lib/db/app";
 /**
  * Evidence that the job runner executes functions against this database.
  * `cron` is beaten by the five-minute site-health-monitor; the two `ping`
- * keys record a test event's send and receipt (Ops → Setup). The rows are
+ * keys record a test event's send and receipt (Settings → Deployment). The rows are
  * read by the setup checklist, which is the only consumer.
  */
 

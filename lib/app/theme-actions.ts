@@ -46,7 +46,7 @@ export async function saveThemeAction(_prev: ActionResult | null, form: FormData
     customCss: String(form.get("customCss") ?? "") || null,
   };
   await saveTheme(siteId, theme, user.id, "theme.save", { source: "editor" });
-  revalidatePath(`/ops/sites/${siteId}/theme`);
+  revalidatePath("/settings");
   return { ok: true };
 }
 
@@ -70,6 +70,6 @@ export async function extractThemeAction(siteId: string): Promise<ActionResult> 
   if (extracted.logo) {
     await appDb()`update content.site_render_config set organization = organization || ${appDb().json({ logo: extracted.logo } as never)} where site_id = ${siteId}`;
   }
-  revalidatePath(`/ops/sites/${siteId}/theme`);
+  revalidatePath("/settings");
   return { ok: true };
 }

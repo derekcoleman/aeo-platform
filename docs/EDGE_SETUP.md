@@ -36,7 +36,7 @@ per-site cache and telemetry.
 
 ## 3. Verify
 
-- `/ops/setup` shows **Edge wildcard DNS** as passing once
+- Settings → Deployment (`/settings?tab=deployment`) shows **Edge wildcard DNS** as passing once
   `_aeo-probe.<AEO_EDGE_DOMAIN>` resolves.
 - `curl -sI -H 'Host: <allocated hostname>' https://<AEO_EDGE_DOMAIN-wildcard-target>/`
   returns a 404 with `X-AEO-Passthrough: 1` for an unknown path prefix, or the
