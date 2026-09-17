@@ -46,3 +46,17 @@ describe("describeSyncState", () => {
     expect(s.detail).toContain("2026-07-17");
   });
 });
+
+describe("describeSyncState with paged progress", () => {
+  it("counts a run as alive while pages keep reporting progress, and stalled once they stop", () => {
+    const old = run({ status: "running", started_at: min(45), finished_at: null, detail: { rows: 24000, pages: 12, progress_at: min(2), window: { start: "2026-06-18", end: "2026-09-16" } } });
+    const s = describeSyncState({ now, requestedAt: null, requestedKind: null, latestRun: old });
+    expect(s.phase).toBe("running");
+    expect(s.live).toBe(true);
+    expect(s.detail).toContain("24,000 rows in 12 pages so far");
+    const quiet = run({ status: "running", started_at: min(45), finished_at: null, detail: { rows: 24000, pages: 12, progress_at: min(30) } });
+    const t = describeSyncState({ now, requestedAt: null, requestedKind: null, latestRun: quiet });
+    expect(t.phase).toBe("stalled");
+    expect(t.detail).toContain("last progress 30 min ago");
+  });
+});

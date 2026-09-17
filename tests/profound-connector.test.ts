@@ -141,33 +141,45 @@ describe("profoundConnector", () => {
 
   it("ingests an upload into questions / snapshots / citations / external_metrics with provider attribution", async () => {
     const nextId = idSequence();
+    type Rows<T> = { __rows: T[] };
     const c = ctx(true, [
       [/from app\.sites where id/, () => [{ id: conn.site_id, org_id: conn.org_id, canonical_domain: "www.acme.com", path_prefix: "/resources" }]],
       [/from app\.site_domains/, () => []],
-      [/insert into measure\.questions/, () => [{ id: nextId(), inserted: true }]],
-      [/insert into measure\.serp_snapshots/, () => [{ id: nextId() }]],
-      [/insert into measure\.external_metrics/, (q) => [{ id: nextId() }].slice(0, q.values.length > 0 ? 1 : 0)],
+      [/insert into measure\.questions/, (q) => (q.values[0] as Rows<{ normalized: string }>).__rows.map((r) => ({ id: nextId(), normalized: r.normalized, inserted: true }))],
+      [/insert into measure\.external_metrics/, (q) => (q.values[0] as Rows<unknown>).__rows.map(() => ({ id: nextId() }))],
       [/from content\.content_items/, () => []],
     ]);
     const r = await profoundConnector.sync({ connection: conn, kind: "upload", cursor: null, payload: { csv, filename: "export.csv" } }, c);
-    expect(r.detail).toMatchObject({ questionsInserted: 1, questionsMatched: 0, snapshots: 2, citations: 3, ownedCitations: 1, rows: 2, skipped: [] });
+    expect(r.detail).toMatchObject({ questionsInserted: 1, questionsMatched: 0, snapshots: 2, citations: 3, ownedCitations: 1, metrics: 2, rows: 2, skipped: [] });
     expect(r.cursor).toMatchObject({ through: "2026-08-21", lastFile: "export.csv" });
 
+    // Everything lands in bulk: one statement per table, rows carried by the helper.
     const q = c.sql.queries;
     expect(q.filter((x) => /insert into measure\.questions/.test(x.text))).toHaveLength(1);
     const snaps = q.filter((x) => /insert into measure\.serp_snapshots/.test(x.text));
-    expect(snaps).toHaveLength(2);
-    expect(snaps[0]!.values[2]).toBe("profound");
+    expect(snaps).toHaveLength(1);
+    const snapRows = (snaps[0]!.values[0] as Rows<{ provider: string; fetched_at: string; raw: { __json: { engine: string } } }>).__rows;
+    expect(snapRows).toHaveLength(2);
+    expect(snapRows.map((x) => [x.provider, x.fetched_at, x.raw.__json.engine])).toEqual([
+      ["profound", "2026-08-20T00:00:00.000Z", "chatgpt"],
+      ["profound", "2026-08-21T00:00:00.000Z", "perplexity"],
+    ]);
+    // The same tuples are removed before the insert, so a replayed page cannot double them.
+    const wipe = q.find((x) => /delete from measure\.serp_snapshots s using unnest/.test(x.text))!;
+    expect(wipe).toBeDefined();
+    expect((wipe.values[2] as { __array: string[] }).__array).toEqual(["chatgpt", "perplexity"]);
     const cites = q.filter((x) => /insert into measure\.serp_citations/.test(x.text));
-    expect(cites).toHaveLength(3);
-    expect(cites.map((x) => [x.values[4], x.values[6]])).toEqual([
+    expect(cites).toHaveLength(1);
+    const citeRows = (cites[0]!.values[0] as Rows<{ domain: string; is_owned: boolean; serp_snapshot_id: string }>).__rows;
+    expect(citeRows.map((x) => [x.domain, x.is_owned])).toEqual([
       ["acme.com", true],
       ["rival.com", false],
       ["rival.com", false],
     ]);
+    expect(new Set(citeRows.map((x) => x.serp_snapshot_id))).toEqual(new Set(snapRows.map((x) => (x as unknown as { id: string }).id)));
     const metrics = q.filter((x) => /insert into measure\.external_metrics/.test(x.text));
-    expect(metrics.length).toBeGreaterThan(0);
-    expect(metrics.every((x) => x.values.includes("profound"))).toBe(true);
+    expect(metrics).toHaveLength(1);
+    expect((metrics[0]!.values[0] as Rows<{ provider: string }>).__rows.every((x) => x.provider === "profound")).toBe(true);
   });
 
   it("rejects a malformed upload payload", async () => {
@@ -195,5 +207,82 @@ describe("backfill windows", () => {
     expect(backfillResumeFrom({ from: "yesterday" })).toBeNull();
     expect(backfillResumeFrom({ csv: "x" })).toBeNull();
     expect(backfillResumeFrom(undefined)).toBeNull();
+  });
+});
+
+describe("paged API sync", () => {
+  const apiConn: ConnectionRow<ProfoundConfig> = {
+    id: "cccccccc-0000-0000-0000-000000000002",
+    org_id: "11111111-1111-1111-1111-111111111111",
+    site_id: "22222222-2222-2222-2222-222222222222",
+    provider: "profound",
+    status: "active",
+    enabled: true,
+    config: { mode: "api", categoryId: "cat1", backfillDays: 40 },
+    scope: [],
+    secret_ref: "vault:connection:cccccccc-0000-0000-0000-000000000002",
+    external_account_id: null,
+    external_account_name: null,
+    last_synced_at: null,
+    last_error: null,
+  };
+
+  function pagedCtx(pages: Record<string, unknown>[][], total: number) {
+    const calls: { start: string; end: string; offset: number }[] = [];
+    const fetchImpl = (async (_url: URL | string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { start_date: string; end_date: string; pagination: { offset: number } };
+      calls.push({ start: body.start_date.slice(0, 10), end: body.end_date.slice(0, 10), offset: body.pagination.offset });
+      const page = pages[calls.length - 1] ?? [];
+      return new Response(JSON.stringify({ info: { total_rows: total }, data: page }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const next = idSequence();
+    const sql = fakeSql([
+      [/org_feature_enabled/, () => [{ enabled: true }]],
+      [/select id, org_id, canonical_domain, path_prefix from app\.sites/, () => [{ id: apiConn.site_id, org_id: apiConn.org_id, canonical_domain: "acme.com", path_prefix: "/resources" }]],
+      [/insert into measure\.questions/, (q) => ((q.values[0] as { __rows: { normalized: string }[] }).__rows).map((r) => ({ id: next(), normalized: r.normalized, inserted: true }))],
+      [/insert into measure\.external_metrics/, (q) => ((q.values[0] as { __rows: unknown[] }).__rows).map(() => ({ id: next() }))],
+    ]);
+    const secrets = memorySecrets();
+    secrets.store.set(apiConn.secret_ref!, "key");
+    const ctx: ConnectorContext = { sql, secrets, fetchImpl, now: () => new Date("2026-09-17T12:00:00Z"), env: { NODE_ENV: "test" } as NodeJS.ProcessEnv };
+    return { ctx, sql, calls };
+  }
+
+  const row = (i: number, day: string) => ({ prompt: `prompt ${i}`, model: { name: "chatgpt" }, created_at: `${day}T10:00:00Z`, asset: "Acme", mentions: ["Acme"], citation_details: [{ url: `https://acme.com/resources/g${i}`, hostname: "acme.com", positions: [1] }] });
+
+  it("only API connections and non-upload kinds take the paged path", () => {
+    expect(profoundConnector.pagesSync!(apiConn, "backfill")).toBe(true);
+    expect(profoundConnector.pagesSync!(apiConn, "upload")).toBe(false);
+    expect(profoundConnector.pagesSync!({ ...apiConn, config: { mode: "csv" } }, "incremental")).toBe(false);
+  });
+
+  it("the first page fixes the range, clears it, and hands back a page token; the last page hands back the cursor", async () => {
+    const { ctx, sql, calls } = pagedCtx([[row(1, "2026-08-08"), row(2, "2026-08-08")], []], 2);
+    const first = await profoundConnector.syncPage!({ connection: apiConn, kind: "backfill", cursor: null, page: null }, ctx);
+    expect(calls[0]).toEqual({ start: "2026-08-08", end: "2026-09-06", offset: 0 });
+    expect(sql.queries.some((q) => /delete from measure\.serp_snapshots where site_id = \$1 and provider = 'profound' and fetched_at >= \$2 and fetched_at < \$3/.test(q.text) && q.values[1] === "2026-08-08T00:00:00.000Z" && q.values[2] === "2026-09-18T00:00:00.000Z")).toBe(true);
+    expect(sql.queries.some((q) => /delete from measure\.serp_snapshots s using unnest/.test(q.text))).toBe(true);
+    expect(sql.queries.filter((q) => /insert into measure\.serp_snapshots/.test(q.text)).length).toBe(1);
+    expect(sql.queries.filter((q) => /insert into measure\.serp_citations/.test(q.text)).length).toBe(1);
+    expect(first.metricsIngested).toBe(2);
+    // A short page (2 < 2000) ends the first window; the next window starts the day after it.
+    expect(first.next).toEqual({ rangeStart: "2026-08-08", rangeEnd: "2026-09-17", start: "2026-09-07", end: "2026-09-17", offset: 0 });
+    expect(first.cursor).toBeNull();
+    expect(first.detail).toMatchObject({ rows: 2, snapshots: 2, citations: 1 * 2, ownedCitations: 2, window: { start: "2026-08-08", end: "2026-09-17" } });
+
+    const last = await profoundConnector.syncPage!({ connection: apiConn, kind: "backfill", cursor: null, page: first.next }, ctx);
+    expect(calls[1]).toEqual({ start: "2026-09-07", end: "2026-09-17", offset: 0 });
+    expect(last.next).toBeNull();
+    expect(last.cursor).toEqual({ through: "2026-09-17" });
+    // The range was cleared once, on the first page only.
+    expect(sql.queries.filter((q) => /delete from measure\.serp_snapshots where site_id/.test(q.text)).length).toBe(1);
+  });
+
+  it("an incremental run starts at the cursor and a bad page token starts over", async () => {
+    const { ctx, calls } = pagedCtx([[]], 0);
+    const r = await profoundConnector.syncPage!({ connection: apiConn, kind: "incremental", cursor: { through: "2026-09-10" }, page: { garbage: true } }, ctx);
+    expect(calls[0]).toEqual({ start: "2026-09-10", end: "2026-09-17", offset: 0 });
+    expect(r.next).toBeNull();
+    expect(r.cursor).toEqual({ through: "2026-09-17" });
   });
 });

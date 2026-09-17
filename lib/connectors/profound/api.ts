@@ -312,22 +312,31 @@ export class ProfoundApi {
   }
 
   /** Answers with citations, one row per prompt × model × run, paged by offset until a short page. */
-  async answers(q: ReportQuery): Promise<{ records: ProfoundRecord[]; dropped: number; pages: number }> {
-    const all: Record<string, unknown>[] = [];
+  /** One page of the answers report at `offset`; `total` is Profound's row count for the range when it reports one. */
+  async answersPage(q: ReportQuery & { offset: number }): Promise<{ records: ProfoundRecord[]; dropped: number; rawCount: number; total: number | null }> {
     const limit = q.limit ?? ANSWERS_PAGE_SIZE;
+    const body = { category_id: q.categoryId, start_date: dayStart(q.startDate), end_date: dayEnd(q.endDate), pagination: { limit, offset: q.offset }, include: ANSWER_INCLUDE };
+    const json = await this.call<Record<string, unknown>>(this.endpoints.answers, { method: "POST", body });
+    const rows = reportRows(json);
+    const total = json && typeof json === "object" ? num((json.info as Record<string, unknown> | undefined)?.total_rows) : null;
+    const { records, dropped } = normalizeAnswerRows(rows);
+    return { records, dropped, rawCount: rows.length, total };
+  }
+
+  async answers(q: ReportQuery): Promise<{ records: ProfoundRecord[]; dropped: number; pages: number }> {
+    const limit = q.limit ?? ANSWERS_PAGE_SIZE;
+    const records: ProfoundRecord[] = [];
+    let dropped = 0;
     let offset = 0;
     let pages = 0;
     for (;;) {
-      const body = { category_id: q.categoryId, start_date: dayStart(q.startDate), end_date: dayEnd(q.endDate), pagination: { limit, offset }, include: ANSWER_INCLUDE };
-      const json = await this.call<Record<string, unknown>>(this.endpoints.answers, { method: "POST", body });
-      const rows = reportRows(json);
-      all.push(...rows);
+      const page = await this.answersPage({ ...q, limit, offset });
+      records.push(...page.records);
+      dropped += page.dropped;
       pages++;
-      const total = json && typeof json === "object" ? num((json.info as Record<string, unknown> | undefined)?.total_rows) : null;
-      offset += rows.length;
-      if (rows.length < limit || (total !== null && offset >= total) || pages >= 50) break;
+      offset += page.rawCount;
+      if (page.rawCount < limit || (page.total !== null && offset >= page.total) || pages >= 50) break;
     }
-    const { records, dropped } = normalizeAnswerRows(all);
     return { records, dropped, pages };
   }
 }

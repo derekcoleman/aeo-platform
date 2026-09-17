@@ -144,9 +144,16 @@ minutes was killed by the function limit), failed (with the recorded error), or
 succeeded (rows, metrics, window). Killed runs are closed as failed by the next
 run of the same connection.
 
-A Profound API backfill is walked in 30-day windows: each window is its own
-run and cursor, and the job queues the next window from `detail.next.from`, so
-no single invocation outlives Vercel's 300-second limit.
+A Profound API sync is page-shaped (`Connector.syncPage`, selected by
+`pagesSync`): the job opens one run row, then fetches each 2,000-row page of
+the answers report as its own durable step, walking the day range in 30-day
+windows by offset. No invocation outlives Vercel's 300-second limit however
+large the report, a killed invocation resumes at the page it was on, and the
+run row's `detail` carries rows, pages and `progress_at` after every page.
+Each page lands in one transaction with multi-row statements, after deleting
+the same (prompt, engine, day) tuples, so a replayed page replaces its rows;
+the first page of a run clears the whole range it will cover. The
+database-backed test in `tests/db/` drives this against the real schema.
 
 ## Custom source (API or MCP)
 

@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { loadSiteOwnership, recordSnapshot, type SiteOwnership } from "@/lib/demand/store";
+import { contentIdForUrl, isOwnedUrl, loadSiteOwnership, type SiteOwnership } from "@/lib/demand/store";
 import { normalizeQuestion } from "@/lib/demand/question-graph";
 import { isFeatureEnabled, upsertExternalMetrics, type ExternalMetricInput } from "../store";
-import { ConnectorError, FeatureDisabledError, type Connector, type SyncInput, type SyncResult } from "../types";
-import { ProfoundApi, ProfoundApiError, profoundApiConfigSchema } from "./api";
+import { ConnectorError, FeatureDisabledError, type Connector, type SyncInput, type SyncPageInput, type SyncPageResult, type SyncResult } from "../types";
+import { ANSWERS_PAGE_SIZE, ProfoundApi, ProfoundApiError, profoundApiConfigSchema } from "./api";
 import { parseProfoundCsv, type ProfoundRecord } from "./csv";
 import type postgres from "postgres";
 
@@ -58,17 +59,25 @@ export interface ProfoundIngestResult {
   skipped: { line: number; reason: string }[];
 }
 
-async function upsertProfoundQuestion(siteId: string, prompt: string, sql: postgres.Sql): Promise<{ id: string; inserted: boolean }> {
-  const normalized = normalizeQuestion(prompt);
-  const [row] = await sql<{ id: string; inserted: boolean }[]>`
-    insert into measure.questions (site_id, text, normalized, source, seed_term, depth, locale, device, demand_score, seen_count)
-    values (${siteId}, ${prompt}, ${normalized}, 'profound', ${prompt}, 1, ${PROFOUND_LOCALE}, ${PROFOUND_DEVICE}, 1, 1)
-    on conflict (site_id, normalized, locale, device) do update set last_seen_at = now()
-    returning id, (xmax = 0) as inserted`;
-  return row!;
+/** Rows per statement: well under the 65,535-parameter limit at these column counts. */
+const INSERT_CHUNK = 500;
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
-/** Ingest parsed records for one site. Exported so an upload route can call it outside the sync job. */
+/**
+ * Ingest parsed records for one site, in bulk and idempotently. Exported so
+ * an upload route can call it outside the sync job.
+ *
+ * Everything lands in one transaction with multi-row statements: prompts are
+ * upserted once each, then the (prompt, engine, day) tuples this batch
+ * carries are deleted and re-inserted, so re-running a page after a crash
+ * replaces its rows instead of doubling them. Snapshot ids are minted here so
+ * citations can be built without depending on RETURNING order.
+ */
 export async function ingestProfoundRecords(
   own: SiteOwnership,
   conn: SyncInput<ProfoundConfig>["connection"] & { site_id: string },
@@ -76,62 +85,111 @@ export async function ingestProfoundRecords(
   sql: postgres.Sql,
 ): Promise<Omit<ProfoundIngestResult, "skipped">> {
   const out = { questionsInserted: 0, questionsMatched: 0, snapshots: 0, citations: 0, ownedCitations: 0, metrics: 0 };
-  const questionIds = new Map<string, string>();
-  const metrics: ExternalMetricInput[] = [];
+  if (records.length === 0) return out;
 
-  for (const r of records) {
-    const key = normalizeQuestion(r.prompt);
-    let qid = questionIds.get(key);
-    if (!qid) {
-      const q = await upsertProfoundQuestion(own.siteId, r.prompt, sql);
-      qid = q.id;
-      questionIds.set(key, qid);
-      if (q.inserted) out.questionsInserted += 1;
-      else out.questionsMatched += 1;
+  return sql.begin(async (trx) => {
+    const tx = trx as unknown as postgres.Sql;
+    // 1. Prompts → questions, one upsert per distinct prompt.
+    const prompts = new Map<string, string>();
+    for (const r of records) if (!prompts.has(normalizeQuestion(r.prompt))) prompts.set(normalizeQuestion(r.prompt), r.prompt);
+    const questionIds = new Map<string, string>();
+    for (const batch of chunks([...prompts.entries()], INSERT_CHUNK)) {
+      const rows = batch.map(([normalized, text]) => ({ site_id: own.siteId, text, normalized, source: "profound", seed_term: text, depth: 1, locale: PROFOUND_LOCALE, device: PROFOUND_DEVICE, demand_score: 1, seen_count: 1 }));
+      const res = await tx<{ id: string; normalized: string; inserted: boolean }[]>`
+        insert into measure.questions ${tx(rows)}
+        on conflict (site_id, normalized, locale, device) do update set last_seen_at = now()
+        returning id, normalized, (xmax = 0) as inserted`;
+      for (const q of res) {
+        questionIds.set(q.normalized, q.id);
+        if (q.inserted) out.questionsInserted += 1;
+        else out.questionsMatched += 1;
+      }
     }
 
-    // One snapshot per record: what the engine answered on that day, with
-    // its citations. Organic/PAA/featured snippet are not Profound concepts.
-    const rec = await recordSnapshot(
-      own,
-      qid,
-      {
+    // 2. Snapshot rows with minted ids; the same tuples are removed first.
+    type Snap = { id: string; qid: string; key: string; r: ProfoundRecord; fetchedAt: string };
+    const snaps: Snap[] = [];
+    for (const r of records) {
+      const key = normalizeQuestion(r.prompt);
+      const qid = questionIds.get(key);
+      if (!qid) continue;
+      snaps.push({ id: randomUUID(), qid, key, r, fetchedAt: `${r.date}T00:00:00.000Z` });
+    }
+    await tx`
+      delete from measure.serp_snapshots s
+      using unnest(${tx.array(snaps.map((x) => x.qid))}::uuid[], ${tx.array(snaps.map((x) => x.fetchedAt))}::timestamptz[], ${tx.array(snaps.map((x) => x.r.engine))}::text[]) as t(question_id, fetched_at, engine)
+      where s.site_id = ${own.siteId} and s.provider = 'profound'
+        and s.question_id = t.question_id and s.fetched_at = t.fetched_at and s.raw->>'engine' = t.engine`;
+    for (const batch of chunks(snaps, INSERT_CHUNK)) {
+      const rows = batch.map((x) => ({
+        id: x.id,
+        site_id: own.siteId,
+        question_id: x.qid,
         provider: "profound",
-        query: r.prompt,
-        locale: { country: "us", language: "en" },
+        fetched_at: x.fetchedAt,
+        locale: "us-en",
         device: PROFOUND_DEVICE,
-        fetchedAt: `${r.date}T00:00:00.000Z`,
-        organic: [],
-        paa: [],
-        featuredSnippet: null,
-        aiOverview: { triggered: true, text: null, references: r.citations.map((c) => ({ position: c.position, url: c.url, domain: c.domain })) },
-        raw: { source: "profound_csv", engine: r.engine, brandMentioned: r.brandMentioned, row: r.raw },
-        costUsd: 0,
+        aio_triggered: true,
+        aio_text: null,
+        featured_snippet_url: null,
+        organic_count: 0,
         cached: false,
-      },
-      sql,
-    );
-    out.snapshots += 1;
-    out.citations += rec.citations;
-    out.ownedCitations += rec.ownedCitations;
+        raw: tx.json({ source: "profound_csv", engine: x.r.engine, brandMentioned: x.r.brandMentioned, row: x.r.raw }),
+        cost_usd: 0,
+      }));
+      await tx`insert into measure.serp_snapshots ${tx(rows)}`;
+    }
+    out.snapshots = snaps.length;
 
-    metrics.push({
+    // 3. Citations, with owned URLs resolved to content once per URL.
+    const contentIds = new Map<string, string | null>();
+    const cites: { site_id: string; serp_snapshot_id: string; surface: string; url: string; domain: string; position: number; is_owned: boolean; content_id: string | null; title: null; snippet: null }[] = [];
+    const ownedPerSnap = new Map<string, number>();
+    for (const x of snaps) {
+      let owned = 0;
+      for (const c of x.r.citations) {
+        const isOwned = isOwnedUrl(c.url, own);
+        let contentId: string | null = null;
+        if (isOwned) {
+          owned += 1;
+          if (!contentIds.has(c.url)) contentIds.set(c.url, await contentIdForUrl(c.url, own, tx));
+          contentId = contentIds.get(c.url) ?? null;
+        }
+        cites.push({ site_id: own.siteId, serp_snapshot_id: x.id, surface: "ai_overview", url: c.url, domain: c.domain, position: c.position, is_owned: isOwned, content_id: contentId, title: null, snippet: null });
+      }
+      ownedPerSnap.set(x.id, owned);
+      out.ownedCitations += owned;
+    }
+    for (const batch of chunks(cites, INSERT_CHUNK * 2)) await tx`insert into measure.serp_citations ${tx(batch)}`;
+    out.citations = cites.length;
+
+    // 4. Visibility metrics, one row per prompt × engine × day.
+    const metrics: ExternalMetricInput[] = snaps.map((x) => ({
       provider: "profound",
       surface: "profound_visibility",
-      dimension: { engine: r.engine, prompt: key },
-      date: r.date,
+      dimension: { engine: x.r.engine, prompt: x.key },
+      date: x.r.date,
       metrics: {
-        visibility: r.visibility,
-        brand_mentioned: r.brandMentioned === null ? null : r.brandMentioned ? 1 : 0,
-        citations: r.citations.length,
-        owned_citations: rec.ownedCitations,
+        visibility: x.r.visibility,
+        brand_mentioned: x.r.brandMentioned === null ? null : x.r.brandMentioned ? 1 : 0,
+        citations: x.r.citations.length,
+        owned_citations: ownedPerSnap.get(x.id) ?? 0,
       },
-      questionId: qid,
-    });
-  }
+      questionId: x.qid,
+    }));
+    out.metrics = await upsertExternalMetrics(conn, metrics, tx);
+    return out;
+  });
+}
 
-  out.metrics = await upsertExternalMetrics(conn, metrics, sql);
-  return out;
+/** Drop every Profound snapshot for a site in a day range (inclusive); a backfill replaces the range it covers. */
+export async function deleteProfoundSnapshots(siteId: string, start: string, end: string, sql: postgres.Sql): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    delete from measure.serp_snapshots
+    where site_id = ${siteId} and provider = 'profound'
+      and fetched_at >= ${`${start}T00:00:00.000Z`} and fetched_at < ${`${addDays(end, 1)}T00:00:00.000Z`}
+    returning id`;
+  return rows.length;
 }
 
 export const profoundConnector: Connector<ProfoundConfig> = {
@@ -155,33 +213,79 @@ export const profoundConnector: Connector<ProfoundConfig> = {
     }
   },
 
+  pagesSync(conn, kind) {
+    return conn.config.mode === "api" && kind !== "upload";
+  },
+
+  /**
+   * One page of the answers report. The first call of a run fixes the day
+   * range (the configured depth for a backfill, the last cursor otherwise),
+   * clears the site's Profound rows in that range, and walks it in windows
+   * of BACKFILL_WINDOW_DAYS, each paged by offset. The page token carries
+   * everything, so the job can memoise each call as its own step.
+   */
+  async syncPage(input, ctx): Promise<SyncPageResult> {
+    const conn = input.connection;
+    if (!(await isFeatureEnabled(conn.org_id, PROFOUND_FEATURE, ctx.sql))) throw new FeatureDisabledError("profound", PROFOUND_FEATURE);
+    if (!conn.site_id) throw new ConnectorError("profound", "site_required", "profound: connection must be scoped to a site");
+    if (conn.config.mode !== "api" || input.kind === "upload") throw new ConnectorError("profound", "invalid_config", "profound: paged sync is for API connections only");
+    const cfg = profoundApiConfigSchema.parse(conn.config);
+    const api = await profoundApiFor(conn, cfg, ctx);
+    const today = ctx.now().toISOString().slice(0, 10);
+    const through = typeof input.cursor?.through === "string" ? input.cursor.through : null;
+
+    let page = answersPageSchema.safeParse(input.page).data ?? null;
+    if (!page) {
+      const resume = backfillResumeFrom(input.payload);
+      const backfill = input.kind === "backfill" || !through;
+      const rangeStart = resume ?? (backfill ? isoDaysAgo(ctx.now(), cfg.backfillDays) : through!);
+      const w = backfillWindow(rangeStart, today);
+      page = { rangeStart: w.start, rangeEnd: today, start: w.start, end: w.end, offset: 0 };
+      const removed = await deleteProfoundSnapshots(conn.site_id, page.rangeStart, page.rangeEnd, ctx.sql);
+      if (removed && ctx.env.NODE_ENV !== "test") console.info(`[profound] replaced ${removed} snapshots for ${conn.site_id} in ${page.rangeStart}..${page.rangeEnd}`);
+    }
+
+    const { records, dropped, rawCount, total } = await api.answersPage({ categoryId: cfg.categoryId, startDate: page.start, endDate: page.end, offset: page.offset });
+    const own = await loadSiteOwnership(conn.site_id, ctx.sql);
+    if (!own) throw new ConnectorError("profound", "site_not_found");
+    const r = await ingestProfoundRecords(own, { ...conn, site_id: conn.site_id }, records, ctx.sql);
+
+    const fetched = page.offset + rawCount;
+    const windowDone = rawCount < ANSWERS_PAGE_SIZE || (total !== null && fetched >= total);
+    let next: typeof page | null = null;
+    if (!windowDone) next = { ...page, offset: fetched };
+    else if (page.end < page.rangeEnd) {
+      const w = backfillWindow(addDays(page.end, 1), page.rangeEnd);
+      next = { ...page, start: w.start, end: w.end, offset: 0 };
+    }
+    return {
+      documentsIngested: 0,
+      metricsIngested: r.metrics,
+      next,
+      cursor: next ? null : { through: page.rangeEnd },
+      detail: { ...r, mode: "api", rows: rawCount, dropped, window: { start: page.rangeStart, end: page.rangeEnd }, currentWindow: { start: page.start, end: page.end }, windowTotal: total },
+    };
+  },
+
   async sync(input, ctx): Promise<SyncResult> {
     const conn = input.connection;
     if (!(await isFeatureEnabled(conn.org_id, PROFOUND_FEATURE, ctx.sql))) throw new FeatureDisabledError("profound", PROFOUND_FEATURE);
     if (!conn.site_id) throw new ConnectorError("profound", "site_required", "profound: connection must be scoped to a site");
     if (conn.config.mode === "api" && input.kind !== "upload") {
-      const cfg = profoundApiConfigSchema.parse(conn.config);
-      const api = await profoundApiFor(conn, cfg, ctx);
-      const today = ctx.now().toISOString().slice(0, 10);
-      const through = typeof input.cursor?.through === "string" ? input.cursor.through : null;
-      // A backfill is walked in windows so no single run outlives the
-      // platform's function limit: each window is one run with its own
-      // cursor, and `detail.next` tells the job to queue the following one.
-      // An incremental sync covers the gap since the last cursor in one go.
-      const resume = backfillResumeFrom(input.payload);
-      const backfill = input.kind === "backfill" || !through;
-      const start = resume ?? (backfill ? isoDaysAgo(ctx.now(), cfg.backfillDays) : through!);
-      const { end, next } = backfill ? backfillWindow(start, today) : { end: today, next: null };
-      const { records, dropped, pages } = await api.answers({ categoryId: cfg.categoryId, startDate: start, endDate: end });
-      const own = await loadSiteOwnership(conn.site_id, ctx.sql);
-      if (!own) throw new ConnectorError("profound", "site_not_found");
-      const r = records.length ? await ingestProfoundRecords(own, { ...conn, site_id: conn.site_id }, records, ctx.sql) : { questionsInserted: 0, questionsMatched: 0, snapshots: 0, citations: 0, ownedCitations: 0, metrics: 0 };
-      return {
-        documentsIngested: 0,
-        metricsIngested: r.metrics,
-        cursor: { through: end },
-        detail: { ...r, mode: "api", rows: records.length, dropped, pages, window: { start, end }, next: next ? { from: next } : null },
-      };
+      // Same work as the paged path, walked here for callers without a job runner.
+      const totals = { metrics: 0, rows: 0, snapshots: 0, pages: 0 };
+      let page: SyncPageInput<ProfoundConfig>["page"] = null;
+      let detail: Record<string, unknown> = {};
+      for (;;) {
+        const r = await this.syncPage!({ ...input, page }, ctx);
+        totals.metrics += r.metricsIngested;
+        totals.rows += Number(r.detail?.rows ?? 0);
+        totals.snapshots += Number(r.detail?.snapshots ?? 0);
+        totals.pages += 1;
+        detail = r.detail ?? {};
+        if (!r.next) return { documentsIngested: 0, metricsIngested: totals.metrics, cursor: r.cursor, detail: { ...detail, rows: totals.rows, snapshots: totals.snapshots, pages: totals.pages } };
+        page = r.next;
+      }
     }
     if (input.kind !== "upload") {
       // A scheduled sync on a CSV-only connection is a no-op, not a failure.
@@ -233,7 +337,16 @@ function addDays(iso: string, days: number): string {
   return new Date(Date.parse(`${iso}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 }
 
-/** The `from` a chained backfill run carries in its payload; anything else means start from the configured depth. */
+/** The page token of a Profound API sync: the whole range, the window inside it, and the offset within the window. */
+const answersPageSchema = z.object({
+  rangeStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  rangeEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  offset: z.number().int().min(0),
+});
+
+/** The `from` a resumed backfill carries in its payload; anything else means start from the configured depth. */
 export function backfillResumeFrom(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const from = (payload as { from?: unknown }).from;

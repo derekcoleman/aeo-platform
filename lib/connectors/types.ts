@@ -65,11 +65,38 @@ export interface SyncResult {
   detail?: Record<string, unknown>;
 }
 
+/** One page of a paged sync: the connector's own page token, opaque to the job. */
+export type SyncPage = Record<string, unknown>;
+
+export interface SyncPageInput<Config = Record<string, unknown>> extends SyncInput<Config> {
+  /** The page to fetch; null asks for the first page of this run. */
+  page: SyncPage | null;
+}
+
+export interface SyncPageResult {
+  documentsIngested: number;
+  metricsIngested: number;
+  /** The next page, or null when this run has nothing more to fetch. */
+  next: SyncPage | null;
+  /** The cursor to persist for the next run; read on the final page only. */
+  cursor: Record<string, unknown> | null;
+  /** Progress the job stores on the run row after each page (rows, window, …). */
+  detail?: Record<string, unknown>;
+}
+
 export interface Connector<Config = Record<string, unknown>> {
   provider: ConnectorProvider;
   /** Validate config + scope at connect time (properties exist, channels reachable). */
   validate?(connection: ConnectionRow<Config>, ctx: ConnectorContext): Promise<void>;
   sync(input: SyncInput<Config>, ctx: ConnectorContext): Promise<SyncResult>;
+  /**
+   * Page-shaped sync: the job calls this once per page as its own durable
+   * step, so a large backfill is never one long invocation. When present,
+   * `pagesSync` says which connections and kinds go through it; the rest
+   * take `sync`.
+   */
+  syncPage?(input: SyncPageInput<Config>, ctx: ConnectorContext): Promise<SyncPageResult>;
+  pagesSync?(connection: ConnectionRow<Config>, kind: SyncKind): boolean;
   /** Provider-side cleanup (revoke token, leave channels). Row/document cleanup is the store's. */
   disconnect?(connection: ConnectionRow<Config>, ctx: ConnectorContext): Promise<void>;
 }
