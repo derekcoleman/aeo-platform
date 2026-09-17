@@ -44,7 +44,7 @@ export const QUEUE_GRACE_MS = 3 * 60 * 1000;
 export const STALE_RUN_MS = 20 * 60 * 1000;
 
 const LOST_FIX = "The job runner (Inngest) is not receiving events from this deployment, or has not synced this app. Settings → Deployment runs the live checks and names the fix.";
-const STALLED_FIX = "Retry: a backfill resumes from the last window that finished. If it stalls again, the report window is too large for one run; lower backfillDays on the connection.";
+const STALLED_FIX = "Retry. Each page of the report is now its own step, so a retry resumes where it stopped instead of starting over.";
 
 const kindLabel = (k: string | null | undefined) => (k === "backfill" ? "backfill" : k === "incremental" ? "incremental sync" : k ? `${k} sync` : "sync");
 
@@ -55,6 +55,13 @@ function ago(from: Date, to: Date): string {
   if (m < 60) return `${m} min ago`;
   const h = Math.round(m / 60);
   return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} d ago`;
+}
+
+function progressOf(detail: Record<string, unknown>): string {
+  const rows = typeof detail.rows === "number" ? detail.rows : null;
+  const pages = typeof detail.pages === "number" ? detail.pages : null;
+  if (rows === null) return "";
+  return ` · ${rows.toLocaleString("en-US")} rows${pages ? ` in ${pages} page${pages === 1 ? "" : "s"}` : ""} so far`;
 }
 
 function windowOf(detail: Record<string, unknown>): string | null {
@@ -71,11 +78,13 @@ export function describeSyncState(input: SyncStateInput): SyncState {
   const pendingRequest = requestedAt && (!runStarted || requestedAt.getTime() > runStarted.getTime());
 
   if (latestRun && latestRun.status === "running" && runStarted) {
-    const age = now.getTime() - runStarted.getTime();
+    const progressAt = typeof latestRun.detail.progress_at === "string" ? new Date(latestRun.detail.progress_at) : null;
+    const lastSign = progressAt && !Number.isNaN(progressAt.getTime()) ? progressAt : runStarted;
+    const age = now.getTime() - lastSign.getTime();
     if (age > stale) {
-      return { phase: "stalled", title: `The ${kindLabel(latestRun.kind)} timed out`, detail: `Started ${ago(runStarted, now)} and never finished; the function was killed by its time limit.${windowOf(latestRun.detail) ? ` Window ${windowOf(latestRun.detail)}.` : ""}`, fix: STALLED_FIX, live: false, run: latestRun };
+      return { phase: "stalled", title: `The ${kindLabel(latestRun.kind)} timed out`, detail: `Started ${ago(runStarted, now)}, last progress ${ago(lastSign, now)}; the function was killed by its time limit.${windowOf(latestRun.detail) ? ` Window ${windowOf(latestRun.detail)}.` : ""}`, fix: STALLED_FIX, live: false, run: latestRun };
     }
-    return { phase: "running", title: `${capitalize(kindLabel(latestRun.kind))} running`, detail: `Started ${ago(runStarted, now)}${windowOf(latestRun.detail) ? ` · window ${windowOf(latestRun.detail)}` : ""}`, fix: null, live: true, run: latestRun };
+    return { phase: "running", title: `${capitalize(kindLabel(latestRun.kind))} running`, detail: `Started ${ago(runStarted, now)}${progressOf(latestRun.detail)}${windowOf(latestRun.detail) ? ` · window ${windowOf(latestRun.detail)}` : ""}`, fix: null, live: true, run: latestRun };
   }
 
   if (pendingRequest && requestedAt) {

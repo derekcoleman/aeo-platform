@@ -55,6 +55,17 @@ jobs:
       # failing, the policy is wrong — never the expectation.
       - name: Tenant isolation assertions
         run: psql -v ON_ERROR_STOP=1 -q -f supabase/tests/isolation.sql
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Store code against the real schema: bulk ingest, idempotent replay,
+      # paging. These are skipped by `npm run check`, which has no database.
+      - name: Database-backed tests
+        run: npx vitest run tests/db
+        env:
+          AEO_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/aeo_ci
 
   proxy:
     name: reverse-proxy invariants

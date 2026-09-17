@@ -15,12 +15,16 @@ export type FakeSqlHandler = (q: RecordedQuery) => unknown[] | undefined;
 
 export function fakeSql(handlers: [RegExp, FakeSqlHandler][] = []): postgres.Sql & { queries: RecordedQuery[] } {
   const queries: RecordedQuery[] = [];
-  const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+  const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    // `sql(rows)` / `sql(rows, ...columns)`: the multi-row insert helper, embedded as one value (synchronously, as postgres.js does).
+    if (!Array.isArray(strings) || !("raw" in strings)) return { __rows: strings, columns: values };
     const text = strings.reduce((acc, s, i) => acc + s + (i < values.length ? `$${i + 1}` : ""), "").replace(/\s+/g, " ").trim();
     const q = { text, values };
     queries.push(q);
-    for (const [re, h] of handlers) if (re.test(text)) return h(q) ?? [];
-    return [];
+    return (async () => {
+      for (const [re, h] of handlers) if (re.test(text)) return h(q) ?? [];
+      return [];
+    })();
   }) as unknown as postgres.Sql & { queries: RecordedQuery[] };
   Object.assign(sql, {
     queries,
