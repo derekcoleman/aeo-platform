@@ -189,9 +189,27 @@ export async function expireStaleSyncRuns(connectionId: string, sql: postgres.Sq
   const rows = await sql<{ id: string }[]>`
     update context.context_sync_runs
     set status = 'failed', finished_at = now(),
-        error = 'Timed out: the run started ' || to_char(started_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC and never finished (the function likely exceeded its time limit)'
-    where connection_id = ${connectionId} and status = 'running' and started_at < now() - make_interval(mins => ${minutes})
+        error = 'Timed out: the run started ' || to_char(started_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC and stopped reporting progress (the function was killed by its time limit)'
+    where connection_id = ${connectionId} and status = 'running'
+      and coalesce((detail->>'progress_at')::timestamptz, started_at) < now() - make_interval(mins => ${minutes})
     returning id`;
+  return rows.length;
+}
+
+/** Store progress on a running run (a paged sync writes this after every page); `progress_at` is set here. */
+export async function progressSyncRun(runId: string, detail: Record<string, unknown>, sql: postgres.Sql = appDb()): Promise<void> {
+  await sql`update context.context_sync_runs set detail = ${sql.json({ ...detail, progress_at: new Date().toISOString() } as never)} where id = ${runId} and status = 'running'`;
+}
+
+/** Close every running run of a connection as failed with one message: the job gave up after its retries. */
+export async function failRunningSyncRuns(connectionId: string, message: string, sql: postgres.Sql = appDb()): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    update context.context_sync_runs set status = 'failed', finished_at = now(), error = ${message.slice(0, 1000)}
+    where connection_id = ${connectionId} and status = 'running' returning id`;
+  if (rows.length) {
+    await sql`update context.context_connections set last_error = ${message.slice(0, 1000)}, status = 'error', updated_at = now()
+      where id = ${connectionId} and status in ('active', 'pending', 'error')`;
+  }
   return rows.length;
 }
 
@@ -308,18 +326,30 @@ export interface ExternalMetricInput {
   questionId?: string | null;
 }
 
+/** Rows per upsert statement; 11 columns each stays far below the parameter limit. */
+const METRICS_CHUNK = 500;
+
 export async function upsertExternalMetrics(
   conn: ConnectionRef & { site_id: string },
   rows: ExternalMetricInput[],
   sql: postgres.Sql = appDb(),
 ): Promise<number> {
   let written = 0;
-  for (const m of rows) {
+  for (let i = 0; i < rows.length; i += METRICS_CHUNK) {
+    const batch = rows.slice(i, i + METRICS_CHUNK).map((m) => ({
+      org_id: conn.org_id,
+      site_id: conn.site_id,
+      connection_id: conn.id,
+      provider: m.provider,
+      surface: m.surface,
+      dimension: sql.json(m.dimension as never),
+      date: m.date,
+      metrics: sql.json(m.metrics as never),
+      content_id: m.contentId ?? null,
+      question_id: m.questionId ?? null,
+    }));
     const res = await sql`
-      insert into measure.external_metrics
-        (org_id, site_id, connection_id, provider, surface, dimension, date, metrics, content_id, question_id, fetched_at)
-      values (${conn.org_id}, ${conn.site_id}, ${conn.id}, ${m.provider}, ${m.surface}, ${sql.json(m.dimension as never)},
-              ${m.date}, ${sql.json(m.metrics as never)}, ${m.contentId ?? null}, ${m.questionId ?? null}, now())
+      insert into measure.external_metrics ${sql(batch)}
       on conflict (site_id, provider, surface, dimension, date) do update
         set metrics = excluded.metrics, connection_id = excluded.connection_id,
             content_id = coalesce(excluded.content_id, measure.external_metrics.content_id),

@@ -80,3 +80,43 @@ describe("recordWebhookEvent", () => {
     expect(await recordWebhookEvent("slack", "Ev1", {}, sql)).toBe(false);
   });
 });
+
+describe("paged run bookkeeping", () => {
+  it("progressSyncRun stamps progress_at and only touches running rows", async () => {
+    const { progressSyncRun } = await import("@/lib/connectors/store");
+    const sql = fakeSql();
+    await progressSyncRun("r1", { rows: 2000, pages: 1 }, sql);
+    const q = sql.queries[0]!;
+    expect(q.text).toMatch(/update context\.context_sync_runs set detail = \$1 where id = \$2 and status = 'running'/);
+    const detail = (q.values[0] as { __json: Record<string, unknown> }).__json;
+    expect(detail.rows).toBe(2000);
+    expect(typeof detail.progress_at).toBe("string");
+  });
+
+  it("expireStaleSyncRuns judges staleness by the last progress, not the start", async () => {
+    const { expireStaleSyncRuns } = await import("@/lib/connectors/store");
+    const sql = fakeSql([[/update context\.context_sync_runs/, () => [{ id: "a" }, { id: "b" }]]]);
+    expect(await expireStaleSyncRuns("c1", sql)).toBe(2);
+    expect(sql.queries[0]!.text).toContain("coalesce((detail->>'progress_at')::timestamptz, started_at) < now()");
+  });
+
+  it("failRunningSyncRuns closes running rows and flags the connection", async () => {
+    const { failRunningSyncRuns } = await import("@/lib/connectors/store");
+    const sql = fakeSql([[/update context\.context_sync_runs set status = 'failed'/, () => [{ id: "a" }]]]);
+    expect(await failRunningSyncRuns("c1", "The sync job failed after 3 attempts: boom", sql)).toBe(1);
+    expect(sql.queries[1]!.text).toContain("update context.context_connections set last_error");
+    const none = fakeSql();
+    expect(await failRunningSyncRuns("c1", "x", none)).toBe(0);
+    expect(none.queries.length).toBe(1);
+  });
+
+  it("upsertExternalMetrics writes in multi-row chunks", async () => {
+    const { upsertExternalMetrics } = await import("@/lib/connectors/store");
+    const sql = fakeSql([[/insert into measure\.external_metrics/, (q) => Array.from({ length: ((q.values[0] as { __rows: unknown[] }).__rows).length }, (_, i) => ({ id: String(i) }))]]);
+    const rows = Array.from({ length: 1200 }, (_, i) => ({ provider: "profound" as const, surface: "profound_visibility", dimension: { engine: "chatgpt", prompt: `p${i}` }, date: "2026-09-01", metrics: { visibility: 1 } }));
+    expect(await upsertExternalMetrics({ ...conn, site_id: "s1" }, rows, sql)).toBe(1200);
+    expect(sql.queries.length).toBe(3);
+    expect((sql.queries[0]!.values[0] as { __rows: unknown[] }).__rows.length).toBe(500);
+    expect((sql.queries[2]!.values[0] as { __rows: unknown[] }).__rows.length).toBe(200);
+  });
+});
