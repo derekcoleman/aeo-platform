@@ -146,7 +146,7 @@ describe("profoundConnector", () => {
       [/from app\.sites where id/, () => [{ id: conn.site_id, org_id: conn.org_id, canonical_domain: "www.acme.com", path_prefix: "/resources" }]],
       [/from app\.site_domains/, () => []],
       [/insert into measure\.questions/, (q) => (q.values[0] as Rows<{ normalized: string }>).__rows.map((r) => ({ id: nextId(), normalized: r.normalized, inserted: true }))],
-      [/insert into measure\.external_metrics/, (q) => (q.values[0] as Rows<unknown>).__rows.map(() => ({ id: nextId() }))],
+      [/insert into measure\.external_metrics/, () => [{ id: nextId() }, { id: nextId() }]],
       [/from content\.content_items/, () => []],
     ]);
     const r = await profoundConnector.sync({ connection: conn, kind: "upload", cursor: null, payload: { csv, filename: "export.csv" } }, c);
@@ -164,10 +164,13 @@ describe("profoundConnector", () => {
       ["profound", "2026-08-20T00:00:00.000Z", "chatgpt"],
       ["profound", "2026-08-21T00:00:00.000Z", "perplexity"],
     ]);
-    // The same tuples are removed before the insert, so a replayed page cannot double them.
+    // The same rows (by content hash) are removed before the insert, so a replayed page cannot double them.
     const wipe = q.find((x) => /delete from measure\.serp_snapshots s using unnest/.test(x.text))!;
     expect(wipe).toBeDefined();
-    expect((wipe.values[2] as { __array: string[] }).__array).toEqual(["chatgpt", "perplexity"]);
+    const hashes = (wipe.values[2] as { __array: string[] }).__array;
+    expect(hashes).toHaveLength(2);
+    expect(hashes[0]).not.toBe(hashes[1]);
+    expect(snapRows.map((x) => (x.raw.__json as unknown as { row_hash: string }).row_hash)).toEqual(hashes);
     const cites = q.filter((x) => /insert into measure\.serp_citations/.test(x.text));
     expect(cites).toHaveLength(1);
     const citeRows = (cites[0]!.values[0] as Rows<{ domain: string; is_owned: boolean; serp_snapshot_id: string }>).__rows;
@@ -177,9 +180,22 @@ describe("profoundConnector", () => {
       ["rival.com", false],
     ]);
     expect(new Set(citeRows.map((x) => x.serp_snapshot_id))).toEqual(new Set(snapRows.map((x) => (x as unknown as { id: string }).id)));
+    // Daily metrics are recomputed from the stored snapshots of the touched prompt × engine × day groups.
     const metrics = q.filter((x) => /insert into measure\.external_metrics/.test(x.text));
     expect(metrics).toHaveLength(1);
-    expect((metrics[0]!.values[0] as Rows<{ provider: string }>).__rows.every((x) => x.provider === "profound")).toBe(true);
+    expect(metrics[0]!.text).toContain("from unnest(");
+    expect(metrics[0]!.text).toContain("join measure.serp_snapshots s on");
+    expect(metrics[0]!.text).toContain("'samples', count(distinct s.id)");
+    expect((metrics[0]!.values[3] as { __array: string[] }).__array.length).toBe(2);
+  });
+
+  it("hashes a row by everything Profound gave us, so two samples of one prompt/engine/day stay distinct", async () => {
+    const { profoundRowHash } = await import("@/lib/connectors/profound");
+    const base = { prompt: "best sso", engine: "chatgpt", date: "2026-08-20", brandMentioned: true, citations: [{ url: "https://a.com/x", domain: "a.com", position: 1 }], visibility: 40, raw: { prompt_id: "p1", created_at: "2026-08-20T10:00:00Z", region: "us" } };
+    expect(profoundRowHash(base)).toBe(profoundRowHash({ ...base, raw: { ...base.raw } }));
+    expect(profoundRowHash(base)).not.toBe(profoundRowHash({ ...base, raw: { ...base.raw, region: "uk" } }));
+    expect(profoundRowHash(base)).not.toBe(profoundRowHash({ ...base, citations: [] }));
+    expect(profoundRowHash(base)).toHaveLength(32);
   });
 
   it("rejects a malformed upload payload", async () => {
@@ -240,7 +256,7 @@ describe("paged API sync", () => {
       [/org_feature_enabled/, () => [{ enabled: true }]],
       [/select id, org_id, canonical_domain, path_prefix from app\.sites/, () => [{ id: apiConn.site_id, org_id: apiConn.org_id, canonical_domain: "acme.com", path_prefix: "/resources" }]],
       [/insert into measure\.questions/, (q) => ((q.values[0] as { __rows: { normalized: string }[] }).__rows).map((r) => ({ id: next(), normalized: r.normalized, inserted: true }))],
-      [/insert into measure\.external_metrics/, (q) => ((q.values[0] as { __rows: unknown[] }).__rows).map(() => ({ id: next() }))],
+      [/insert into measure\.external_metrics/, (q) => (q.values[3] as { __array: string[] }).__array.map(() => ({ id: next() }))],
     ]);
     const secrets = memorySecrets();
     secrets.store.set(apiConn.secret_ref!, "key");
@@ -262,6 +278,7 @@ describe("paged API sync", () => {
     expect(calls[0]).toEqual({ start: "2026-08-08", end: "2026-09-06", offset: 0 });
     expect(sql.queries.some((q) => /delete from measure\.serp_snapshots where site_id = \$1 and provider = 'profound' and fetched_at >= \$2 and fetched_at < \$3/.test(q.text) && q.values[1] === "2026-08-08T00:00:00.000Z" && q.values[2] === "2026-09-18T00:00:00.000Z")).toBe(true);
     expect(sql.queries.some((q) => /delete from measure\.serp_snapshots s using unnest/.test(q.text))).toBe(true);
+    expect(sql.queries.some((q) => /delete from measure\.external_metrics where connection_id = \$1/.test(q.text) && q.values[1] === "2026-08-08" && q.values[2] === "2026-09-17")).toBe(true);
     expect(sql.queries.filter((q) => /insert into measure\.serp_snapshots/.test(q.text)).length).toBe(1);
     expect(sql.queries.filter((q) => /insert into measure\.serp_citations/.test(q.text)).length).toBe(1);
     expect(first.metricsIngested).toBe(2);
