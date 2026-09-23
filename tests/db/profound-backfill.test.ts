@@ -15,6 +15,8 @@ const DB_URL = process.env.AEO_TEST_DATABASE_URL;
 
 const PROMPTS = 189;
 const ENGINES = ["chatgpt", "perplexity", "google_aio", "gemini", "copilot"];
+/** Profound reports several answers per prompt × engine × day (regions, repeated samples). */
+const SAMPLES = ["us", "uk"];
 const TODAY = "2026-09-17";
 const day = (iso: string, plus: number) => new Date(Date.parse(`${iso}T00:00:00Z`) + plus * 86_400_000).toISOString().slice(0, 10);
 const daysBetween = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000) + 1;
@@ -33,13 +35,14 @@ describe.skipIf(!DB_URL)("profound paged backfill against Postgres", () => {
     const end = body.end_date.slice(0, 10);
     const { limit, offset } = body.pagination;
     calls.push({ start, end, offset });
-    const perDay = PROMPTS * ENGINES.length;
+    const perDay = PROMPTS * ENGINES.length * SAMPLES.length;
     const total = perDay * daysBetween(start, end);
     const data = [];
     for (let i = offset; i < Math.min(total, offset + limit); i++) {
       const d = Math.floor(i / perDay);
-      const p = Math.floor((i % perDay) / ENGINES.length);
-      const e = i % ENGINES.length;
+      const p = Math.floor((i % perDay) / (ENGINES.length * SAMPLES.length));
+      const e = Math.floor(i / SAMPLES.length) % ENGINES.length;
+      const r = i % SAMPLES.length;
       data.push({
         prompt: `How do I edit video ${p}`,
         prompt_id: `p${p}`,
@@ -47,7 +50,8 @@ describe.skipIf(!DB_URL)("profound paged backfill against Postgres", () => {
         created_at: `${day(start, d)}T10:00:00Z`,
         asset: "Acme",
         mentions: i % 3 ? ["Acme"] : [],
-        region: "us",
+        visibility: 40 + r * 20,
+        region: SAMPLES[r],
         topic: "editing",
         citation_details: [
           { url: `https://acme.com/resources/guide-${i % 7}`, clean_url: `acme.com/resources/guide-${i % 7}`, hostname: "acme.com", positions: [1] },
@@ -101,16 +105,22 @@ describe.skipIf(!DB_URL)("profound paged backfill against Postgres", () => {
     const first = await profoundConnector.syncPage!({ connection: conn as never, kind: "backfill", cursor: null, payload: undefined, page: null }, c);
     expect(first.next).toEqual({ rangeStart: "2026-08-08", rangeEnd: TODAY, start: "2026-08-08", end: "2026-09-06", offset: 2000 });
     expect(first.detail).toMatchObject({ rows: 2000, snapshots: 2000, citations: 6000, questionsInserted: PROMPTS });
-    expect(await counts()).toEqual({ snapshots: 2000, citations: 6000, owned: 2000, questions: PROMPTS + 1, metrics: 2000 });
+    // Two samples per prompt × engine × day collapse into one daily metrics row.
+    expect(await counts()).toEqual({ snapshots: 2000, citations: 6000, owned: 2000, questions: PROMPTS + 1, metrics: 1000 });
 
     calls = [];
     const r = await profoundConnector.sync({ connection: conn as never, kind: "backfill", cursor: null, payload: undefined }, c);
-    const expectedRows = PROMPTS * ENGINES.length * daysBetween("2026-08-08", TODAY);
+    const expectedRows = PROMPTS * ENGINES.length * SAMPLES.length * daysBetween("2026-08-08", TODAY);
     expect(r.cursor).toEqual({ through: TODAY });
     expect(r.detail).toMatchObject({ rows: expectedRows, snapshots: expectedRows, pages: calls.length });
     expect([...new Set(calls.map((x) => `${x.start}..${x.end}`))]).toEqual(["2026-08-08..2026-09-06", "2026-09-07..2026-09-17"]);
     const after = await counts();
-    expect(after).toEqual({ snapshots: expectedRows, citations: expectedRows * 3, owned: expectedRows, questions: PROMPTS + 1, metrics: expectedRows });
+    expect(after).toEqual({ snapshots: expectedRows, citations: expectedRows * 3, owned: expectedRows, questions: PROMPTS + 1, metrics: expectedRows / SAMPLES.length });
+    // A day's metrics aggregate every sample, whichever page each sample arrived on (page 1 ends mid-day).
+    const [m] = await sql<{ metrics: Record<string, number> }[]>`select metrics from measure.external_metrics where site_id = ${SITE} and provider = 'profound' and dimension->>'engine' = 'chatgpt' and date = '2026-08-08' limit 1`;
+    expect(m!.metrics).toMatchObject({ samples: 2, visibility: 50, citations: 6, owned_citations: 2, brand_mentioned: 1 });
+    const [bad] = await sql<{ n: number }[]>`select count(*)::int as n from measure.external_metrics where site_id = ${SITE} and provider = 'profound' and (metrics->>'samples')::int <> ${SAMPLES.length}`;
+    expect(bad!.n).toBe(0);
 
     // Running the whole thing again changes nothing.
     await profoundConnector.sync({ connection: conn as never, kind: "backfill", cursor: null, payload: undefined }, c);
@@ -126,7 +136,7 @@ describe.skipIf(!DB_URL)("profound paged backfill against Postgres", () => {
     calls = [];
     const inc = await profoundConnector.sync({ connection: conn as never, kind: "incremental", cursor: { through: "2026-09-15" }, payload: undefined }, c);
     expect([...new Set(calls.map((x) => `${x.start}..${x.end}`))]).toEqual(["2026-09-15..2026-09-17"]);
-    expect(inc.detail).toMatchObject({ rows: PROMPTS * ENGINES.length * 3 });
+    expect(inc.detail).toMatchObject({ rows: PROMPTS * ENGINES.length * SAMPLES.length * 3 });
     expect(await counts()).toEqual(after);
   }, 300_000);
 });

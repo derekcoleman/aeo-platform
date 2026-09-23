@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { contentIdForUrl, isOwnedUrl, loadSiteOwnership, type SiteOwnership } from "@/lib/demand/store";
 import { normalizeQuestion } from "@/lib/demand/question-graph";
-import { isFeatureEnabled, upsertExternalMetrics, type ExternalMetricInput } from "../store";
+import { isFeatureEnabled } from "../store";
 import { ConnectorError, FeatureDisabledError, type Connector, type SyncInput, type SyncPageInput, type SyncPageResult, type SyncResult } from "../types";
 import { ANSWERS_PAGE_SIZE, ProfoundApi, ProfoundApiError, profoundApiConfigSchema } from "./api";
 import { parseProfoundCsv, type ProfoundRecord } from "./csv";
@@ -106,20 +106,24 @@ export async function ingestProfoundRecords(
       }
     }
 
-    // 2. Snapshot rows with minted ids; the same tuples are removed first.
-    type Snap = { id: string; qid: string; key: string; r: ProfoundRecord; fetchedAt: string };
+    // 2. Snapshot rows with minted ids. Profound reports several answers per
+    // prompt × engine × day (samples, regions), so identity is the row's own
+    // content hash: the rows this batch carries are removed by hash and
+    // re-inserted, which makes a replayed page a no-op and leaves rows from
+    // other pages of the same day alone.
+    type Snap = { id: string; qid: string; key: string; r: ProfoundRecord; fetchedAt: string; hash: string };
     const snaps: Snap[] = [];
     for (const r of records) {
       const key = normalizeQuestion(r.prompt);
       const qid = questionIds.get(key);
       if (!qid) continue;
-      snaps.push({ id: randomUUID(), qid, key, r, fetchedAt: `${r.date}T00:00:00.000Z` });
+      snaps.push({ id: randomUUID(), qid, key, r, fetchedAt: `${r.date}T00:00:00.000Z`, hash: profoundRowHash(r) });
     }
     await tx`
       delete from measure.serp_snapshots s
-      using unnest(${tx.array(snaps.map((x) => x.qid))}::uuid[], ${tx.array(snaps.map((x) => x.fetchedAt))}::timestamptz[], ${tx.array(snaps.map((x) => x.r.engine))}::text[]) as t(question_id, fetched_at, engine)
+      using unnest(${tx.array(snaps.map((x) => x.qid))}::uuid[], ${tx.array(snaps.map((x) => x.fetchedAt))}::timestamptz[], ${tx.array(snaps.map((x) => x.hash))}::text[]) as t(question_id, fetched_at, row_hash)
       where s.site_id = ${own.siteId} and s.provider = 'profound'
-        and s.question_id = t.question_id and s.fetched_at = t.fetched_at and s.raw->>'engine' = t.engine`;
+        and s.question_id = t.question_id and s.fetched_at = t.fetched_at and s.raw->>'row_hash' = t.row_hash`;
     for (const batch of chunks(snaps, INSERT_CHUNK)) {
       const rows = batch.map((x) => ({
         id: x.id,
@@ -134,7 +138,7 @@ export async function ingestProfoundRecords(
         featured_snippet_url: null,
         organic_count: 0,
         cached: false,
-        raw: tx.json({ source: "profound_csv", engine: x.r.engine, brandMentioned: x.r.brandMentioned, row: x.r.raw }),
+        raw: tx.json({ source: "profound_csv", engine: x.r.engine, brandMentioned: x.r.brandMentioned, visibility: x.r.visibility, row_hash: x.hash, row: x.r.raw }),
         cost_usd: 0,
       }));
       await tx`insert into measure.serp_snapshots ${tx(rows)}`;
@@ -144,42 +148,69 @@ export async function ingestProfoundRecords(
     // 3. Citations, with owned URLs resolved to content once per URL.
     const contentIds = new Map<string, string | null>();
     const cites: { site_id: string; serp_snapshot_id: string; surface: string; url: string; domain: string; position: number; is_owned: boolean; content_id: string | null; title: null; snippet: null }[] = [];
-    const ownedPerSnap = new Map<string, number>();
     for (const x of snaps) {
-      let owned = 0;
       for (const c of x.r.citations) {
         const isOwned = isOwnedUrl(c.url, own);
         let contentId: string | null = null;
         if (isOwned) {
-          owned += 1;
+          out.ownedCitations += 1;
           if (!contentIds.has(c.url)) contentIds.set(c.url, await contentIdForUrl(c.url, own, tx));
           contentId = contentIds.get(c.url) ?? null;
         }
         cites.push({ site_id: own.siteId, serp_snapshot_id: x.id, surface: "ai_overview", url: c.url, domain: c.domain, position: c.position, is_owned: isOwned, content_id: contentId, title: null, snippet: null });
       }
-      ownedPerSnap.set(x.id, owned);
-      out.ownedCitations += owned;
     }
     for (const batch of chunks(cites, INSERT_CHUNK * 2)) await tx`insert into measure.serp_citations ${tx(batch)}`;
     out.citations = cites.length;
 
-    // 4. Visibility metrics, one row per prompt × engine × day.
-    const metrics: ExternalMetricInput[] = snaps.map((x) => ({
-      provider: "profound",
-      surface: "profound_visibility",
-      dimension: { engine: x.r.engine, prompt: x.key },
-      date: x.r.date,
-      metrics: {
-        visibility: x.r.visibility,
-        brand_mentioned: x.r.brandMentioned === null ? null : x.r.brandMentioned ? 1 : 0,
-        citations: x.r.citations.length,
-        owned_citations: ownedPerSnap.get(x.id) ?? 0,
-      },
-      questionId: x.qid,
-    }));
-    out.metrics = await upsertExternalMetrics(conn, metrics, tx);
+    // 4. Daily visibility metrics, one row per prompt × engine × day, computed
+    // from every snapshot now stored for the groups this batch touched. The
+    // aggregate is the full picture whichever page a sample arrived on, and
+    // recomputing it is idempotent.
+    const groups = new Map<string, { qid: string; fetchedAt: string; engine: string }>();
+    for (const x of snaps) groups.set(`${x.qid}|${x.fetchedAt}|${x.r.engine}`, { qid: x.qid, fetchedAt: x.fetchedAt, engine: x.r.engine });
+    const g = [...groups.values()];
+    const written = await tx<{ id: string }[]>`
+      insert into measure.external_metrics (org_id, site_id, connection_id, provider, surface, dimension, date, metrics, question_id, fetched_at)
+      select ${conn.org_id}, ${own.siteId}, ${conn.id}, 'profound', 'profound_visibility',
+             jsonb_build_object('engine', t.engine, 'prompt', q.normalized),
+             (s.fetched_at at time zone 'UTC')::date,
+             jsonb_build_object(
+               'visibility', avg((s.raw->>'visibility')::numeric),
+               'brand_mentioned', max(case when (s.raw->>'brandMentioned')::boolean then 1 when s.raw->>'brandMentioned' is not null then 0 end),
+               'citations', count(c.id),
+               'owned_citations', count(c.id) filter (where c.is_owned),
+               'samples', count(distinct s.id)),
+             s.question_id, now()
+      from unnest(${tx.array(g.map((x) => x.qid))}::uuid[], ${tx.array(g.map((x) => x.fetchedAt))}::timestamptz[], ${tx.array(g.map((x) => x.engine))}::text[]) as t(question_id, fetched_at, engine)
+      join measure.serp_snapshots s on s.question_id = t.question_id and s.fetched_at = t.fetched_at and s.raw->>'engine' = t.engine
+      join measure.questions q on q.id = s.question_id
+      left join measure.serp_citations c on c.serp_snapshot_id = s.id
+      where s.site_id = ${own.siteId} and s.provider = 'profound'
+      group by s.question_id, q.normalized, s.fetched_at, t.engine
+      on conflict (site_id, provider, surface, dimension, date) do update
+        set metrics = excluded.metrics, connection_id = excluded.connection_id,
+            question_id = excluded.question_id, fetched_at = now()
+      returning id`;
+    out.metrics = written.length;
     return out;
   });
+}
+
+/** A record's identity across syncs: every scalar Profound gave us, so two samples of one prompt/engine/day stay distinct rows. */
+export function profoundRowHash(r: ProfoundRecord): string {
+  const scalars = Object.keys(r.raw).sort().map((k) => `${k}=${r.raw[k]}`);
+  return createHash("sha256").update([r.prompt, r.engine, r.date, r.brandMentioned ?? "", r.visibility ?? "", r.citations.map((c) => c.url).join(","), ...scalars].join("\u0000")).digest("hex").slice(0, 32);
+}
+
+/** Drop the daily Profound metrics of a connection in a day range (inclusive); paired with deleteProfoundSnapshots when a run replaces its range. */
+export async function deleteProfoundMetrics(connectionId: string, start: string, end: string, sql: postgres.Sql): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    delete from measure.external_metrics
+    where connection_id = ${connectionId} and provider = 'profound' and surface = 'profound_visibility'
+      and date >= ${start} and date <= ${end}
+    returning id`;
+  return rows.length;
 }
 
 /** Drop every Profound snapshot for a site in a day range (inclusive); a backfill replaces the range it covers. */
@@ -242,6 +273,7 @@ export const profoundConnector: Connector<ProfoundConfig> = {
       const w = backfillWindow(rangeStart, today);
       page = { rangeStart: w.start, rangeEnd: today, start: w.start, end: w.end, offset: 0 };
       const removed = await deleteProfoundSnapshots(conn.site_id, page.rangeStart, page.rangeEnd, ctx.sql);
+      await deleteProfoundMetrics(conn.id, page.rangeStart, page.rangeEnd, ctx.sql);
       if (removed && ctx.env.NODE_ENV !== "test") console.info(`[profound] replaced ${removed} snapshots for ${conn.site_id} in ${page.rangeStart}..${page.rangeEnd}`);
     }
 
