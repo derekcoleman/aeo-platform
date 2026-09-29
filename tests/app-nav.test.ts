@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OPS_SECTIONS, SETTINGS_SECTIONS, SITE_PAGES, STAFF_SETTINGS_SECTIONS, legacySettingsTab, opsHref, pageHrefForSite, pageLabel, resolveTab, sectionHref, settingsHref, settingsSections, sitePage, sitePageHref } from "@/lib/app/nav";
+import { OPS_SECTIONS, SETTINGS_SECTIONS, SITE_PAGES, STAFF_SETTINGS_SECTIONS, currentSection, legacySettingsTab, opsHref, pageHrefForSite, pageLabel, resolveTab, sectionHref, settingsHref, settingsSections, sitePage, sitePageHref, withTab } from "@/lib/app/nav";
 
 describe("app navigation model", () => {
   it("routes every project page under the site and keeps the overview on the bare path", () => {
@@ -66,5 +66,20 @@ describe("app navigation model", () => {
     expect(resolveTab(sections, "questions", "gaps")).toBe("questions");
     expect(resolveTab(sections, "nope", "gaps")).toBe("gaps");
     expect(resolveTab(sections, undefined, "mine")).toBe("mine");
+  });
+});
+
+describe("client-side tab switching", () => {
+  const sections = sitePage("strategy").sections!;
+  it("rewrites only the tab parameter and keeps the rest of the query", () => {
+    expect(withTab("", "visibility")).toBe("tab=visibility");
+    expect(withTab("topic=t1&tab=topics", "prompts")).toBe("topic=t1&tab=prompts");
+    expect(withTab("tab=topics", "topics")).toBe("tab=topics");
+  });
+  it("highlights the section the URL names, else what the server resolved", () => {
+    expect(currentSection(sections, "visibility", "topics")).toBe("visibility");
+    expect(currentSection(sections, null, "topics")).toBe("topics");
+    expect(currentSection(sections, "nope", "topics")).toBe("topics");
+    expect(currentSection(undefined, "visibility", undefined)).toBeUndefined();
   });
 });

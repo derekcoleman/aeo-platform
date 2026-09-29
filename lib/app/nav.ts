@@ -173,6 +173,23 @@ export function sectionHref(href: string, value: string): string {
   return `${href}${href.includes("?") ? "&" : "?"}tab=${encodeURIComponent(value)}`;
 }
 
+/** The query string with `tab` set to `value`, every other parameter kept in place. */
+export function withTab(search: string, value: string): string {
+  const params = new URLSearchParams(search);
+  params.set("tab", value);
+  return params.toString();
+}
+
+/**
+ * The section a page is showing, read on the client: the `?tab=` value when
+ * it names one of the page's sections, else what the server resolved. The
+ * tab strip rewrites the query without a server render, so the sidebar
+ * reads the query rather than waiting for one.
+ */
+export function currentSection(sections: NavSection[] | undefined, requested: string | null, resolved: string | undefined): string | undefined {
+  return requested && sections?.some((s) => s.value === requested) ? requested : resolved;
+}
+
 /** Resolve a `?tab=` value against a page's sections, falling back to the default. */
 export function resolveTab(sections: NavSection[], requested: string | undefined, fallback: string): string {
   return requested && sections.some((s) => s.value === requested) ? requested : fallback;

@@ -2,9 +2,10 @@
 
 import type { Route } from "next";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { useState } from "react";
-import { sectionHref, type NavSection } from "@/lib/app/nav";
+import { Suspense, useState } from "react";
+import { currentSection, sectionHref, type NavSection } from "@/lib/app/nav";
 
 /**
  * One sidebar entry. An entry with sections gets a chevron that folds them
@@ -29,19 +30,37 @@ export function SidebarItem({ href, label, icon, sections, current, section, com
         ) : null}
       </div>
       {showSections ? (
-        <ul className="mt-0.5 mb-1 ml-[15px] flex flex-col gap-0.5 border-l pl-3">
-          {sections!.map((s) => {
-            const on = section === s.value;
-            return (
-              <li key={s.value}>
-                <Link href={sectionHref(href, s.value) as Route} aria-current={on ? "location" : undefined} className={`block rounded-md px-2 py-1 text-[13px] ${on ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}>
-                  {s.label}
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
+        <Suspense fallback={<SectionLinks href={href} sections={sections!} active={section} />}>
+          <LiveSectionLinks href={href} sections={sections!} resolved={section} />
+        </Suspense>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * The page's sections, the shown one highlighted from the URL: the tab strip
+ * rewrites `?tab=` without a server render, so the highlight follows the
+ * query and falls back to what the server resolved when the URL names none.
+ */
+function LiveSectionLinks({ href, sections, resolved }: { href: string; sections: NavSection[]; resolved?: string }) {
+  const search = useSearchParams();
+  return <SectionLinks href={href} sections={sections} active={currentSection(sections, search.get("tab"), resolved)} />;
+}
+
+function SectionLinks({ href, sections, active }: { href: string; sections: NavSection[]; active?: string }) {
+  return (
+    <ul className="mt-0.5 mb-1 ml-[15px] flex flex-col gap-0.5 border-l pl-3">
+      {sections.map((s) => {
+        const on = active === s.value;
+        return (
+          <li key={s.value}>
+            <Link href={sectionHref(href, s.value) as Route} aria-current={on ? "location" : undefined} className={`block rounded-md px-2 py-1 text-[13px] ${on ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}>
+              {s.label}
+            </Link>
+          </li>
+        );
+      })}
+    </ul>
   );
 }

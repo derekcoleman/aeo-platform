@@ -1,8 +1,10 @@
 import type { Route } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { Suspense } from "react";
 import { ActionButton } from "@/components/app/action-button";
 import { LiveRefresh } from "@/components/app/live-refresh";
+import { CompetitorDomains, CompetitorDomainsLoading } from "@/components/app/competitor-domains";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { SyncStatus } from "@/components/app/sync-status";
 import { when } from "@/components/app/status";
@@ -15,7 +17,7 @@ import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { resolveTab, settingsHref, sitePage } from "@/lib/app/nav";
 import { loadSite } from "@/lib/app/store";
-import { competitorDomains, listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
+import { listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
 import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
 import { canEdit, canManage, requireUser, roleIn } from "@/lib/auth/session";
 import { latestSyncRun } from "@/lib/connectors/store";
@@ -36,12 +38,11 @@ export default async function StrategyPage({ params, searchParams }: { params: P
   if (!site || !roleIn(user, site.org_id)) notFound();
   const editor = canEdit(user, site.org_id);
   const manager = canManage(user, site.org_id);
-  const [topics, stats, prompts, pages, domains, engines, byTopic, profound] = await Promise.all([
+  const [topics, stats, prompts, pages, engines, byTopic, profound] = await Promise.all([
     listTopics(siteId, undefined, true),
     topicStats(siteId),
     listPrompts(siteId, { topicId: topicFilter ?? null, limit: 200 }),
     listCompetitorPages(siteId, { topicId: topicFilter ?? null, limit: 40 }),
-    competitorDomains(siteId, { topicId: topicFilter ?? null }),
     profoundByEngine(siteId),
     profoundByTopic(siteId),
     profoundConnection(siteId, site.org_id),
@@ -177,12 +178,9 @@ export default async function StrategyPage({ params, searchParams }: { params: P
             <Card>
               <CardHeader><CardTitle>Who gets cited instead of you</CardTitle><CardDescription>AI Overview citations, last 30 days, native and Profound sources labelled.</CardDescription></CardHeader>
               <CardContent>
-                {domains.length === 0 ? <p className="text-muted-foreground text-sm">No competitor citations recorded yet.</p> : (
-                  <Table>
-                    <TableHeader><TableRow><TableHead>Domain</TableHead><TableHead className="text-right">Citations</TableHead><TableHead className="text-right">Prompts</TableHead><TableHead>Source</TableHead></TableRow></TableHeader>
-                    <TableBody>{domains.map((d) => <TableRow key={d.domain}><TableCell className="font-medium">{d.domain}</TableCell><TableCell className="text-right tabular-nums">{d.citations}</TableCell><TableCell className="text-right tabular-nums">{d.questions}</TableCell><TableCell className="text-xs">{d.providers.join(", ")}</TableCell></TableRow>)}</TableBody>
-                  </Table>
-                )}
+                <Suspense fallback={<CompetitorDomainsLoading />}>
+                  <CompetitorDomains siteId={siteId} topicId={topicFilter ?? null} />
+                </Suspense>
               </CardContent>
             </Card>
             <Card>
