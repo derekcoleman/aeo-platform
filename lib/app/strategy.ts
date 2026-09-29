@@ -25,18 +25,30 @@ export interface PromptRow {
 }
 
 export async function listPrompts(siteId: string, opts: { topicId?: string | null; limit?: number } = {}, sql: postgres.Sql = appDb()): Promise<PromptRow[]> {
+  // Profound's 30-day figures come from one pass over the site's metrics rows,
+  // grouped by prompt, rather than a scan per prompt: on a site with a full
+  // backfill the per-row subselects walked every metrics row for every prompt.
   return sql<PromptRow[]>`
+    with profound as (
+      select m.question_id,
+             avg((m.metrics->>'brand_mentioned')::numeric)::float as mention_rate,
+             avg((m.metrics->>'visibility')::numeric)::float as visibility
+      from measure.external_metrics m
+      where m.site_id = ${siteId} and m.surface = 'profound_visibility' and m.date >= current_date - 30 and m.question_id is not null
+      group by m.question_id
+    )
     select q.id, q.text, q.source, q.topic_id, q.pinned, q.excluded, q.is_tracked, q.tracking_tier, q.demand_score::float as demand_score,
            s.aio_triggered,
            coalesce((select bool_or(c.is_owned) from measure.serp_citations c where c.serp_snapshot_id = s.id and c.surface = 'ai_overview'), false) as aio_owned,
            coalesce((select array_agg(distinct c.domain order by c.domain) from measure.serp_citations c where c.serp_snapshot_id = s.id and c.surface = 'ai_overview' and not c.is_owned), '{}') as competitor_domains,
-           (select avg((m.metrics->>'brand_mentioned')::numeric)::float from measure.external_metrics m where m.question_id = q.id and m.surface = 'profound_visibility' and m.date >= current_date - 30) as profound_mention_rate,
-           (select avg((m.metrics->>'visibility')::numeric)::float from measure.external_metrics m where m.question_id = q.id and m.surface = 'profound_visibility' and m.date >= current_date - 30) as profound_visibility
+           p.mention_rate as profound_mention_rate,
+           p.visibility as profound_visibility
     from measure.questions q
     left join lateral (
       select ss.id, ss.aio_triggered from measure.serp_snapshots ss
       where ss.question_id = q.id and ss.provider in ('dataforseo', 'serpapi') order by ss.fetched_at desc limit 1
     ) s on true
+    left join profound p on p.question_id = q.id
     where q.site_id = ${siteId} and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
     order by q.pinned desc, q.excluded asc, q.is_tracked desc, q.demand_score desc
     limit ${opts.limit ?? 200}`;
