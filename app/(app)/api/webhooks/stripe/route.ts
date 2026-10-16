@@ -1,15 +1,17 @@
 import { NextResponse } from "next/server";
-import { applyStripeEvent, verifyStripeSignature, type StripeEvent } from "@/lib/billing/stripe";
-import { markWebhookProcessed, recordWebhookEvent } from "@/lib/connectors/store";
-import { appDb } from "@/lib/db/app";
+import { applyAndAuditStripeEvent, verifyStripeSignature, type StripeEvent } from "@/lib/billing/stripe";
+import { claimWebhookEvent, markWebhookFailed, markWebhookProcessed } from "@/lib/connectors/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Same invariant as every webhook here: verify the signature, record the
- * event (unique on provider + id), apply, mark processed, answer fast. A
- * replayed event is a no-op 200.
+ * Same invariant as every webhook here: verify the signature, claim the
+ * event's ledger row (unique on provider + id), apply, mark processed, answer
+ * fast. A replay of a processed event is a no-op 200. When applying fails the
+ * claim is released with the error and the answer is 500, so Stripe's retry
+ * (or the webhook-redrive cron) applies it later instead of the ledger
+ * swallowing it as a duplicate.
  */
 export async function POST(req: Request) {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -23,13 +25,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "invalid json" }, { status: 400 });
   }
   if (!event?.id || !event.type) return NextResponse.json({ error: "invalid event" }, { status: 400 });
-  const fresh = await recordWebhookEvent("stripe", event.id, event);
-  if (!fresh) return NextResponse.json({ ok: true, duplicate: true });
-  const result = await applyStripeEvent(event);
-  await markWebhookProcessed("stripe", event.id);
-  if (result.applied && result.orgId) {
-    await appDb()`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, after)
-      values (${result.orgId}, null, ${`billing.${event.type}`}, 'organization', ${result.orgId}, ${appDb().json({ change: result.change ?? null, eventId: event.id } as never)})`;
+  const claimed = await claimWebhookEvent("stripe", event.id, event);
+  if (!claimed) return NextResponse.json({ ok: true, duplicate: true });
+  try {
+    const result = await applyAndAuditStripeEvent(event);
+    await markWebhookProcessed("stripe", event.id);
+    return NextResponse.json({ ok: true, applied: result.applied });
+  } catch (e) {
+    console.error("[aeo] stripe event not applied", { eventId: event.id, type: event.type, err: e instanceof Error ? e.message : String(e) });
+    await markWebhookFailed("stripe", event.id, e);
+    return NextResponse.json({ error: "processing_failed" }, { status: 500 });
   }
-  return NextResponse.json({ ok: true, applied: result.applied });
 }

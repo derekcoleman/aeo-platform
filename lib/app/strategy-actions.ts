@@ -14,7 +14,7 @@ import { PROFOUND_DEFAULT_BASE, ProfoundApi, ProfoundApiError, ProfoundDiscovery
 import { appDb } from "@/lib/db/app";
 import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
 import { createManualOpportunity } from "@/lib/pipeline/opportunities";
-import { addManualPrompt, assignQuestionsToTopics, createTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
+import { OutOfSiteError, addManualPrompt, assertSiteScopedIds, assignQuestionsToTopics, createTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";
 
@@ -31,6 +31,17 @@ async function guard(siteId: string, level: "edit" | "manage") {
   if (!site) return { user, site: null, error: "Site not found." };
   const allowed = level === "manage" ? canManage(user, site.org_id) : canEdit(user, site.org_id);
   return { user, site, error: allowed ? null : "You do not have permission for this project." };
+}
+
+/** The reason to refuse when a submitted topic or question id is not this site's; null when every id is. */
+async function outOfSite(siteId: string, ids: { topicId?: string | null; questionId?: string | null }): Promise<string | null> {
+  try {
+    await assertSiteScopedIds(siteId, ids);
+    return null;
+  } catch (e) {
+    if (e instanceof OutOfSiteError) return e.message;
+    throw e;
+  }
 }
 
 const refresh = (siteId: string) => {
@@ -75,6 +86,8 @@ export async function addPromptAction(_prev: ActionResult | null, form: FormData
   const { siteId, topicId, text, tier } = parsed.data;
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const scope = await outOfSite(siteId, { topicId });
+  if (scope) return fail(scope);
   const lines = text.split(/\n/).map((l) => l.trim()).filter((l) => l.length >= 3).slice(0, 50);
   let added = 0;
   for (const line of lines) {
@@ -88,6 +101,8 @@ export async function addPromptAction(_prev: ActionResult | null, form: FormData
 export async function setQuestionFlagAction(siteId: string, questionId: string, flags: { excluded?: boolean; pinned?: boolean; topicId?: string | null }): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const scope = await outOfSite(siteId, { topicId: flags.topicId });
+  if (scope) return fail(scope);
   if (!(await setQuestionFlags(siteId, questionId, flags))) return fail("Question not found.");
   refresh(siteId);
   return { ok: true };
@@ -118,6 +133,8 @@ export async function createContentAction(_prev: ActionResult | null, form: Form
   const { siteId, topicId, questionId, title, format, note, startNow } = parsed.data;
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const scope = await outOfSite(siteId, { topicId, questionId });
+  if (scope) return fail(scope);
   const { id } = await createManualOpportunity(siteId, { title, topicId: topicId || null, questionId: questionId || null, format: (format || null) as never, note: note || null });
   if (startNow) {
     if (!llmConfigured()) return { ok: true, id, error: `Queued, but the pipeline cannot draft yet. ${LLM_NOT_CONFIGURED}` };
@@ -131,6 +148,8 @@ export async function createContentAction(_prev: ActionResult | null, form: Form
 export async function analyzeCompetitorsAction(siteId: string, topicId?: string | null): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const scope = await outOfSite(siteId, { topicId });
+  if (scope) return fail(scope);
   const jobError = await queueJob(strategyCompetitorsAnalyzeRequested.create({ siteId, orgId: site.org_id, topicId: topicId ?? null }));
   if (jobError) return fail(jobError);
   return { ok: true };

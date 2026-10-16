@@ -8,9 +8,12 @@ const fetched = new Date("2026-09-01T09:00:00.000Z");
 describe("citationStatus", () => {
   it("is null when the question has never been snapshotted", async () => {
     const sql = fakeSql();
-    expect(await citationStatus("q-1", sql)).toBeNull();
+    expect(await citationStatus("q-1", "site-1", sql)).toBeNull();
     expect(sql.queries).toHaveLength(1);
     expect(sql.queries[0]!.text).toContain("order by fetched_at desc limit 1");
+    // Another site's snapshot of the same question id must never answer for this one.
+    expect(sql.queries[0]!.text).toContain("where question_id = $1 and site_id = $2");
+    expect(sql.queries[0]!.values).toEqual(["q-1", "site-1"]);
   });
 
   it("reads only AI Overview citations from the latest snapshot and dedupes competitors", async () => {
@@ -23,7 +26,7 @@ describe("citationStatus", () => {
         { domain: "microsoft.com", is_owned: false },
       ]],
     ]);
-    const status = await citationStatus("q-1", sql);
+    const status = await citationStatus("q-1", "site-1", sql);
     expect(status).toEqual({ snapshotId: "snap-9", fetchedAt: fetched, aioTriggered: true, owned: true, competitorDomains: ["okta.com", "microsoft.com"] });
     const cites = sql.queries[1]!;
     expect(cites.text).toContain("surface = 'ai_overview'");
@@ -35,14 +38,14 @@ describe("citationStatus", () => {
       [/from measure\.serp_snapshots/, () => [{ id: "snap-1", fetched_at: fetched, aio_triggered: true }]],
       [/from measure\.serp_citations/, () => [{ domain: "okta.com", is_owned: false }]],
     ]);
-    const status = await citationStatus("q-1", sql);
+    const status = await citationStatus("q-1", "site-1", sql);
     expect(status?.owned).toBe(false);
     expect(status?.competitorDomains).toEqual(["okta.com"]);
   });
 
   it("reports no citations at all when the AI Overview did not trigger", async () => {
     const sql = fakeSql([[/from measure\.serp_snapshots/, () => [{ id: "snap-1", fetched_at: fetched, aio_triggered: false }]]]);
-    const status = await citationStatus("q-1", sql);
+    const status = await citationStatus("q-1", "site-1", sql);
     expect(status).toMatchObject({ aioTriggered: false, owned: false, competitorDomains: [] });
   });
 });

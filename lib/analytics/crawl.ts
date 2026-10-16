@@ -34,6 +34,8 @@ export type CrawlEventInput = z.infer<typeof crawlEventSchema>;
 
 export const crawlIngestSchema = z.object({
   siteId: z.guid(),
+  /** Sent by a Cloudflare Worker from version 2 on; absent from v1 and from our own origin reports. */
+  workerVersion: z.string().regex(/^[0-9A-Za-z._-]{1,16}$/).optional(),
   events: z.array(crawlEventSchema).min(1).max(500),
 });
 

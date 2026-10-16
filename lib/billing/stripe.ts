@@ -180,3 +180,17 @@ export async function applyStripeEvent(event: StripeEvent, sql: postgres.Sql = a
 
   return { applied: false, orgId };
 }
+
+/**
+ * Apply an event and, when it changed an org, write the billing audit row.
+ * Shared by the webhook route and the re-drive of a delivery that failed, so
+ * both leave the same trail.
+ */
+export async function applyAndAuditStripeEvent(event: StripeEvent, sql: postgres.Sql = appDb()): Promise<{ applied: boolean; orgId: string | null; change?: string }> {
+  const result = await applyStripeEvent(event, sql);
+  if (result.applied && result.orgId) {
+    await sql`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, after)
+      values (${result.orgId}, null, ${`billing.${event.type}`}, 'organization', ${result.orgId}, ${sql.json({ change: result.change ?? null, eventId: event.id } as never)})`;
+  }
+  return result;
+}

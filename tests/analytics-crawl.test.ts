@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { crawlIngestSchema, insertCrawlEvents, prepareCrawlRows, rollupCrawlDaily } from "@/lib/analytics/crawl";
+import { noteWorkerVersion, resetWorkerVersionMemo } from "@/lib/analytics/ingest";
 import { fakeSql } from "./helpers/fake-sql";
 
 const SITE = "aaaaaaaa-0000-0000-0000-000000000001";
@@ -42,6 +43,29 @@ describe("crawlIngestSchema", () => {
     expect(crawlIngestSchema.safeParse({ siteId: "nope", events: [{ path: "/" }] }).success).toBe(false);
     expect(crawlIngestSchema.safeParse({ siteId: SITE, events: Array.from({ length: 501 }, () => ({ path: "/" })) }).success).toBe(false);
     expect(crawlIngestSchema.safeParse({ siteId: SITE, events: [{ path: "/x", ua: "GPTBot", ip: "1.1.1.1" }] }).success).toBe(true);
+  });
+
+  it("accepts a Worker version token and nothing that is not one", () => {
+    const events = [{ path: "/x" }];
+    expect(crawlIngestSchema.safeParse({ siteId: SITE, workerVersion: "2", events }).success).toBe(true);
+    expect(crawlIngestSchema.safeParse({ siteId: SITE, workerVersion: "2'; drop table x", events }).success).toBe(false);
+    expect(crawlIngestSchema.safeParse({ siteId: SITE, workerVersion: "x".repeat(17), events }).success).toBe(false);
+  });
+});
+
+describe("noteWorkerVersion", () => {
+  it("stamps the site at most once a minute, and at once when the version changes", async () => {
+    resetWorkerVersionMemo();
+    const sql = fakeSql([[/update app\.sites set worker_version/, () => [{ id: SITE }]]]);
+    const t0 = now.getTime();
+    expect(await noteWorkerVersion(SITE, "2", sql, t0)).toBe(true);
+    expect(await noteWorkerVersion(SITE, "2", sql, t0 + 30_000)).toBe(false);
+    expect(sql.queries).toHaveLength(1);
+    expect(sql.queries[0]!.text).toContain("worker_seen_at < now() - interval '1 minute'");
+    expect(sql.queries[0]!.values.slice(0, 2)).toEqual(["2", SITE]);
+    await noteWorkerVersion(SITE, "3", sql, t0 + 31_000);
+    await noteWorkerVersion(SITE, "3", sql, t0 + 92_000);
+    expect(sql.queries).toHaveLength(3);
   });
 });
 

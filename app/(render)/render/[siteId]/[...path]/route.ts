@@ -7,7 +7,7 @@ import {
 } from "@/lib/render/published";
 import { renderArticleDocument, renderArticleMarkdown } from "@/lib/render/document";
 import { buildFeed, buildLlmsFullTxt, buildLlmsTxt, buildSitemap } from "@/lib/render/artifacts";
-import { routeContext, textResponse, type RouteContext } from "@/lib/render/routes";
+import { RENDER_VARY, routeContext, textResponse, type RouteContext } from "@/lib/render/routes";
 
 /**
  * Everything on the public render path.
@@ -26,7 +26,12 @@ import { routeContext, textResponse, type RouteContext } from "@/lib/render/rout
  * Dynamic, not prerendered: responses depend on the forwarded host, which
  * decides the canonical URL and whether the page may be indexed. Caching lives
  * where it belongs for this architecture — our Cloudflare edge and the
- * customer's CDN, via the headers textResponse sets.
+ * customer's CDN, via the headers textResponse sets: every response varies on
+ * X-Forwarded-Host, and one that may not be indexed is `private, no-store`.
+ *
+ * The x-aeo-internal-* headers read here are middleware's verdict. Middleware
+ * strips any a client sent before setting them, and refuses /render/* on any
+ * host that is not an edge hostname, so they cannot be forged from outside.
  */
 export const dynamic = "force-dynamic";
 
@@ -41,11 +46,14 @@ export async function GET(
   // Next's middleware runtime parses `Location` as an absolute URL and throws
   // on a relative one, and relative is exactly what we need — an absolute
   // Location would carry our edge hostname into a customer-visible response.
+  // Middleware only ever sets a root-relative path here; refuse anything else
+  // rather than redirect a customer's visitor off their own domain.
   const redirectTo = h.get(INTERNAL_HEADER.redirect);
   if (redirectTo) {
+    if (!/^\/(?![/\\])/.test(redirectTo)) return notFound();
     return new Response(null, {
       status: 301,
-      headers: { location: redirectTo, "cache-control": "public, max-age=3600" },
+      headers: { location: redirectTo, "cache-control": "public, max-age=300", vary: RENDER_VARY },
     });
   }
 
@@ -56,11 +64,11 @@ export async function GET(
   const last = segments[segments.length - 1] ?? "";
 
   const artifact = artifactFor(last);
-  if (artifact) return renderArtifact(artifact, siteId, ctx, h.get(INTERNAL_HEADER.indexable) === "1", siteId, new URL(req.url).searchParams.get("nonce"));
+  if (artifact) return renderArtifact(artifact, siteId, ctx, new URL(req.url).searchParams.get("nonce"));
 
   // The root-level llms paths customers rewrite to us separately.
   if (last === "llms.txt" || last === "llms-full.txt") {
-    return renderArtifact(last === "llms.txt" ? "llms" : "llmsFull", siteId, ctx, true, siteId);
+    return renderArtifact(last === "llms.txt" ? "llms" : "llmsFull", siteId, ctx);
   }
 
   return renderArticle(siteId, ctx, segments, last);
@@ -85,43 +93,49 @@ async function renderArticle(
   if (!page) return notFound();
 
   const input = { config: ctx.config, host: ctx.host, page, slug };
+  const cache = { indexable: ctx.host.indexable };
 
   if (wantsMarkdown) {
     if (!page.markdown) return notFound();
     return textResponse(renderArticleMarkdown(input), "text/markdown; charset=utf-8", {
       etag: `"${page.etag}-md"`,
-    });
+    }, cache);
   }
   return textResponse(renderArticleDocument(input), "text/html; charset=utf-8", {
     etag: `"${page.etag}"`,
-  });
+  }, cache);
 }
 
 async function renderArtifact(
   kind: keyof typeof ARTIFACTS,
   siteId: string,
   ctx: RouteContext,
-  indexable: boolean,
-  siteIdForHeader: string,
   nonce: string | null = null,
 ): Promise<Response> {
+  const cache = { indexable: ctx.host.indexable };
   switch (kind) {
     case "sitemap":
       return textResponse(
         buildSitemap(ctx.host, await listPublishedPages(siteId, 5000)),
         "application/xml; charset=utf-8",
+        {},
+        cache,
       );
 
     case "feed":
       return textResponse(
         buildFeed(ctx.host, ctx.config, await listPublishedPages(siteId, 200)),
         "application/atom+xml; charset=utf-8",
+        {},
+        cache,
       );
 
     case "llms":
       return textResponse(
         buildLlmsTxt(ctx.host, ctx.config, await listPublishedPages(siteId, 2000)),
         "text/plain; charset=utf-8",
+        {},
+        cache,
       );
 
     case "llmsFull": {
@@ -132,14 +146,14 @@ async function renderArtifact(
       );
       // Be explicit when the corpus outgrew the cap rather than serving a
       // partial file that looks complete.
-      return textResponse(body, "text/plain; charset=utf-8", truncated ? { "x-aeo-truncated": "1" } : {});
+      return textResponse(body, "text/plain; charset=utf-8", truncated ? { "x-aeo-truncated": "1" } : {}, cache);
     }
 
     case "robots":
-      return renderRobots(ctx, indexable);
+      return renderRobots(ctx);
 
     case "health":
-      return renderHealth(ctx, siteIdForHeader, nonce);
+      return renderHealth(ctx, siteId, nonce);
   }
 }
 
@@ -150,11 +164,9 @@ async function renderArtifact(
  * host must be fully disallowed, or our copy of the customer's content becomes
  * indexable on a third-party domain.
  */
-function renderRobots(ctx: RouteContext, indexable: boolean): Response {
-  if (!indexable) {
-    return textResponse("User-agent: *\nDisallow: /\n", "text/plain; charset=utf-8", {
-      "cache-control": "public, max-age=300",
-    });
+function renderRobots(ctx: RouteContext): Response {
+  if (!ctx.host.indexable) {
+    return textResponse("User-agent: *\nDisallow: /\n", "text/plain; charset=utf-8", {}, { indexable: false });
   }
   const body = [
     "User-agent: *",
@@ -163,7 +175,7 @@ function renderRobots(ctx: RouteContext, indexable: boolean): Response {
     `Sitemap: ${absoluteUrl(ctx.host, `${ctx.config.pathPrefix}/${ARTIFACTS.sitemap}`)}`,
     "",
   ].join("\n");
-  return textResponse(body, "text/plain; charset=utf-8");
+  return textResponse(body, "text/plain; charset=utf-8", {}, { indexable: true });
 }
 
 /**
@@ -195,7 +207,7 @@ async function renderHealth(ctx: RouteContext, siteId: string, nonce: string | n
       },
       at: new Date().toISOString(),
     },
-    { headers: { [HEADER.site]: siteId, "cache-control": "no-store" } },
+    { headers: { [HEADER.site]: siteId, "cache-control": "no-store", vary: RENDER_VARY } },
   );
 }
 
@@ -207,6 +219,6 @@ async function renderHealth(ctx: RouteContext, siteId: string, nonce: string | n
 function notFound(): Response {
   return new Response(null, {
     status: 404,
-    headers: { [HEADER.passthrough]: "1", "cache-control": "public, max-age=10" },
+    headers: { [HEADER.passthrough]: "1", "cache-control": "public, max-age=10", vary: RENDER_VARY },
   });
 }

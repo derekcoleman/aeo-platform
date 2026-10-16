@@ -6,6 +6,7 @@ import {
   messageToDocument,
   parseApprovalAction,
   parseSlackEvent,
+  redriveSlackEvent,
   slackConnector,
   slackSignature,
   verifySlackSignature,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/connectors/slack";
 import type { ConnectionRow, ConnectorContext } from "@/lib/connectors/types";
 import { memorySecrets } from "@/lib/secrets/vault";
+import { redriveWebhookEvents } from "@/lib/connectors/webhook-redrive";
 import { fakeSql } from "./helpers/fake-sql";
 
 const SECRET = "8f742231b10e8888abcd99yyyzzz85a5";
@@ -144,6 +146,8 @@ describe("handleSlackEventRequest", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0]![0]).toMatchObject({
       name: "connector/webhook.received",
+      // The ledger id doubles as the Inngest event id, so a re-send cannot run twice.
+      id: "webhook:slack:Ev42",
       data: { provider: "slack", externalId: "Ev42", connectionId: "conn-1", orgId: "org-1", payload: { channel: "C1", ts: "1700000000.000100" } },
     });
     const ledger = sql.queries.find((q) => /insert into ops\.webhook_events/.test(q.text))!;
@@ -152,6 +156,24 @@ describe("handleSlackEventRequest", () => {
     const retry = await handleSlackEventRequest(body, { ...headers, retryNum: "1" }, { signingSecret: SECRET, sql, send, now: () => NOW });
     expect(retry).toEqual({ status: 200, body: { ok: true, duplicate: true } });
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers 500 and releases the claim when the hand-off fails, so Slack's retry delivers it", async () => {
+    const sql = fakeSql([
+      [/insert into ops\.webhook_events/, () => [{ id: "w1" }]],
+      [/from context\.context_connections/, () => [{ id: "conn-1", org_id: "org-1" }]],
+    ]);
+    const send = vi.fn(async () => {
+      throw new Error("inngest unreachable");
+    });
+    const { body, headers } = signed(messageBody);
+    const res = await handleSlackEventRequest(body, headers, { signingSecret: SECRET, sql, send, now: () => NOW });
+    expect(res).toEqual({ status: 500, body: { error: "delivery_failed" } });
+    const release = sql.queries.find((q) => /set claimed_at = null/.test(q.text))!;
+    expect(release.values.slice(1)).toEqual(["slack", "Ev42"]);
+    expect(String(release.values[0])).toContain("inngest unreachable");
+    // A message is marked processed by the function that receives it, never here.
+    expect(sql.queries.some((q) => /set processed_at/.test(q.text))).toBe(false);
   });
 
   it("acknowledges ignored subtypes without ledgering them", async () => {
@@ -184,12 +206,88 @@ describe("handleSlackInteractionRequest", () => {
     expect(send.mock.calls[0]![0]).toMatchObject({ name: "approval/decided", data: { approvalId, decision: "changes", by: { userId: "U9", name: "derek" }, source: "slack", orgId: "org-1" } });
     const ledger = sql.queries.find((q) => /insert into ops\.webhook_events/.test(q.text))!;
     expect(ledger.values[1]).toBe(`interaction:${approvalId}:U9:1.0`);
+    expect(send.mock.calls[0]![0].id).toBe(`webhook:slack:interaction:${approvalId}:U9:1.0`);
+    // Nothing downstream marks a click, so a successful hand-off finishes its ledger row.
+    const done = sql.queries.find((q) => /set processed_at = now\(\)/.test(q.text))!;
+    expect(done.values).toEqual(["slack", `interaction:${approvalId}:U9:1.0`]);
+  });
+
+  it("answers 500 and leaves a click unprocessed for the re-drive when the hand-off fails", async () => {
+    const sql = fakeSql([[/insert into ops\.webhook_events/, () => [{ id: "w1" }]]]);
+    const payload = { type: "block_actions", user: { id: "U9" }, actions: [{ action_id: "approval:approve", value: encodeApprovalValue({ approvalId, decision: "approve" }), action_ts: "2.0" }] };
+    const { body, headers } = signed(`payload=${encodeURIComponent(JSON.stringify(payload))}`);
+    const res = await handleSlackInteractionRequest(body, headers, { signingSecret: SECRET, sql, send: vi.fn(async () => Promise.reject(new Error("down"))), now: () => NOW });
+    expect(res.status).toBe(500);
+    expect(sql.queries.some((q) => /set claimed_at = null/.test(q.text))).toBe(true);
+    expect(sql.queries.some((q) => /set processed_at/.test(q.text))).toBe(false);
+  });
+
+  it("does nothing for a duplicate of a click already handled", async () => {
+    const sql = fakeSql([[/insert into ops\.webhook_events/, () => []]]);
+    const payload = { type: "block_actions", user: { id: "U9" }, actions: [{ action_id: "approval:approve", value: encodeApprovalValue({ approvalId, decision: "approve" }), action_ts: "3.0" }] };
+    const { body, headers } = signed(`payload=${encodeURIComponent(JSON.stringify(payload))}`);
+    const send = vi.fn();
+    const res = await handleSlackInteractionRequest(body, headers, { signingSecret: SECRET, sql, send, now: () => NOW });
+    expect(res).toEqual({ status: 200, body: { ok: true, duplicate: true } });
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("400s when the payload field is missing", async () => {
     const { body, headers } = signed("foo=bar");
     const res = await handleSlackInteractionRequest(body, headers, { signingSecret: SECRET, sql: fakeSql(), send: vi.fn(), now: () => NOW });
     expect(res).toEqual({ status: 400, body: { error: "missing_payload" } });
+  });
+});
+
+describe("webhook re-drive", () => {
+  const approvalId = "7d9e2b1a-3c4d-4e5f-8a9b-0c1d2e3f4a5b";
+  const click = { type: "block_actions", team: { id: "T123" }, user: { id: "U9", username: "derek" }, actions: [{ action_id: "approval:approve", value: encodeApprovalValue({ approvalId, decision: "approve" }), action_ts: "1.0" }] };
+  const envelope = { type: "event_callback", event_id: "Ev42", team_id: "T123", event: { type: "message", channel: "C1", ts: "1.0", user: "U1", text: "hi" } };
+  const connections: [RegExp, () => unknown[]] = [/from context\.context_connections/, () => [{ id: "conn-1", org_id: "org-1" }]];
+
+  it("re-sends a lost click under its original event id and finishes its row", async () => {
+    const sql = fakeSql([connections]);
+    const send = vi.fn<(event: InboundEvent) => Promise<void>>(async () => undefined);
+    expect(await redriveSlackEvent(`interaction:${approvalId}:U9:1.0`, click, { sql, send })).toBe("delivered");
+    expect(send.mock.calls[0]![0]).toMatchObject({ name: "approval/decided", id: `webhook:slack:interaction:${approvalId}:U9:1.0`, data: { approvalId, decision: "approve", source: "slack", orgId: "org-1" } });
+    expect(sql.queries.at(-1)!.text).toContain("set processed_at = now()");
+  });
+
+  it("re-sends a lost message and leaves the row for the function that receives it", async () => {
+    const sql = fakeSql([connections]);
+    const send = vi.fn<(event: InboundEvent) => Promise<void>>(async () => undefined);
+    expect(await redriveSlackEvent("Ev42", envelope, { sql, send })).toBe("delivered");
+    expect(send.mock.calls[0]![0]).toMatchObject({ name: "connector/webhook.received", id: "webhook:slack:Ev42", data: { externalId: "Ev42", connectionId: "conn-1" } });
+    expect(sql.queries.some((q) => /set processed_at/.test(q.text))).toBe(false);
+  });
+
+  it("drops a stored payload that no longer matches its ledger id", async () => {
+    const sql = fakeSql();
+    const send = vi.fn();
+    expect(await redriveSlackEvent("interaction:someone-else", click, { sql, send })).toBe("dropped");
+    expect(send).not.toHaveBeenCalled();
+    expect(sql.queries.at(-1)!.text).toContain("set processed_at = now()");
+  });
+
+  it("applies a Stripe event, releases what fails again, and counts both", async () => {
+    const sql = fakeSql([
+      [/update ops\.webhook_events w set attempts/, () => [
+        { provider: "stripe", external_id: "evt_1", payload: { id: "evt_1", type: "invoice.payment_failed", data: { object: { customer: "cus_1" } } }, attempts: 2 },
+        { provider: "slack", external_id: "Ev42", payload: envelope, attempts: 3 },
+      ]],
+      [/update app\.organizations set plan_status = 'past_due'/, () => [{ id: "org-1" }]],
+      connections,
+    ]);
+    const send = vi.fn(async () => {
+      throw new Error("inngest unreachable");
+    });
+    const summary = await redriveWebhookEvents({ sql, send });
+    expect(summary).toEqual({ claimed: 2, delivered: 1, dropped: 0, failed: 1 });
+    expect(sql.queries.some((q) => /insert into app\.audit_log/.test(q.text) && q.values.includes("billing.invoice.payment_failed"))).toBe(true);
+    const done = sql.queries.find((q) => /set processed_at = now\(\)/.test(q.text))!;
+    expect(done.values).toEqual(["stripe", "evt_1"]);
+    const release = sql.queries.find((q) => /set claimed_at = null/.test(q.text))!;
+    expect(release.values.slice(1)).toEqual(["slack", "Ev42"]);
   });
 });
 

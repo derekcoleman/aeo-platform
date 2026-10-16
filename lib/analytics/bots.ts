@@ -54,6 +54,28 @@ export function classifyUserAgent(ua: string | null | undefined): { family: stri
   return null;
 }
 
+// ── client address ──────────────────────────────────────────────────────────
+
+/**
+ * The connecting address as our hosting platform saw it, for verifying a
+ * crawler hit against its operator's published ranges. Only headers the
+ * platform sets (and overwrites when a client sends its own) count:
+ * `x-vercel-forwarded-for`, then `x-real-ip`. Never `cf-connecting-ip` or a
+ * client-supplied `x-forwarded-for`: anyone can send those, and a forged
+ * address inside OpenAI's ranges would turn a scripted "GPTBot" into a
+ * verified crawl. Null when the platform gave us nothing (local dev), which
+ * leaves the hit unverified rather than trusting a guess.
+ *
+ * Edge-safe and pure: middleware calls it.
+ */
+export function trustedClientIp(headers: Pick<Headers, "get">): string | null {
+  for (const name of ["x-vercel-forwarded-for", "x-real-ip"]) {
+    const ip = headers.get(name)?.split(",")[0]?.trim();
+    if (ip && parseIp(ip)) return ip;
+  }
+  return null;
+}
+
 // ── IP ranges ───────────────────────────────────────────────────────────────
 
 export interface ParsedIp {

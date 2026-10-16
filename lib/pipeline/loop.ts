@@ -20,10 +20,10 @@ export interface CitationStatus {
 }
 
 /** The latest snapshot for a question, with whether any AI Overview citation is ours. */
-export async function citationStatus(questionId: string, sql: postgres.Sql = appDb()): Promise<CitationStatus | null> {
+export async function citationStatus(questionId: string, siteId: string, sql: postgres.Sql = appDb()): Promise<CitationStatus | null> {
   const [snap] = await sql<{ id: string; fetched_at: Date; aio_triggered: boolean | null }[]>`
     select id, fetched_at, aio_triggered from measure.serp_snapshots
-    where question_id = ${questionId} order by fetched_at desc limit 1`;
+    where question_id = ${questionId} and site_id = ${siteId} order by fetched_at desc limit 1`;
   if (!snap) return null;
   const cites = await sql<{ domain: string; is_owned: boolean }[]>`
     select domain, is_owned from measure.serp_citations

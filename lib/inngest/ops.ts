@@ -1,5 +1,6 @@
+import { redriveWebhookEvents } from "@/lib/connectors/webhook-redrive";
 import { tryRecordHeartbeat } from "@/lib/jobs/heartbeat";
-import { inngest, opsPingRequested } from "./client";
+import { concurrencyCap, inngest, opsPingRequested } from "./client";
 
 /**
  * The setup checklist's test event. Settings → Deployment sends `ops/ping.requested`
@@ -15,4 +16,14 @@ export const opsPingFunction = inngest.createFunction(
   },
 );
 
-export const opsFunctions = [opsPingFunction];
+/**
+ * Every 15 minutes: deliver webhook events whose first hand-off failed
+ * (lib/connectors/webhook-redrive.ts). One run at a time, so two runs never
+ * claim the same rows; no retries, because the next run is the retry.
+ */
+export const webhookRedriveFunction = inngest.createFunction(
+  { id: "webhook-redrive", triggers: [{ cron: "*/15 * * * *" }], concurrency: [{ limit: concurrencyCap(1) }], retries: 0 },
+  async ({ step }) => step.run("redrive", () => redriveWebhookEvents({ send: (e) => inngest.send(e) })),
+);
+
+export const opsFunctions = [opsPingFunction, webhookRedriveFunction];

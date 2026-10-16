@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ModelRefusalError, type CompletionOptions, type StopReason, type TextModel } from "@/lib/ai/model";
 import { ScoredJsonError } from "@/lib/ai/scored-json";
-import { briefPrompt, generateBrief, insertBrief, loadBrief, loadBriefBrain, materializeFacts, type BriefBrain } from "@/lib/pipeline/briefs";
+import { briefPrompt, generateBrief, insertBrief, loadBrief, loadBriefBrain, loadBriefContext, materializeFacts, type BriefBrain } from "@/lib/pipeline/briefs";
 import { draftPrompt, generateDraft, slugify } from "@/lib/pipeline/draft";
 import { estimateCostUsd, modelIdFor, ModelTruncatedError, TASK_SETTINGS } from "@/lib/pipeline/model";
 import { fakeSql } from "./helpers/fake-sql";
@@ -245,5 +245,25 @@ describe("model helpers", () => {
     expect(slugify("Résumé — naïve café")).toBe("resume-naive-cafe");
     expect(slugify("!!!")).toBe("article");
     expect(slugify("a".repeat(100)).length).toBe(80);
+  });
+});
+
+describe("loadBriefContext tenancy", () => {
+  it("reads the topic and the question's cluster only from the opportunity's own site", async () => {
+    const sql = fakeSql([
+      [/from app\.sites s left join content\.site_render_config/, () => [{ canonical_domain: "acme.com", path_prefix: "/resources", organization: { name: "Acme" } }]],
+      [/from measure\.topics where id/, () => [{ name: "SCIM", description: null, formats: ["guide"], notes: null }]],
+    ]);
+    const ctx = await loadBriefContext(
+      { org_id: ORG_ID, site_id: SITE_ID, question_id: "q-1", title: "SSO vs SCIM", target_query: "sso vs scim", source: "citation_gap", evidence: {}, topic_id: "t-1" },
+      sql,
+    );
+    expect(ctx.topic?.name).toBe("SCIM");
+    const topic = sql.queries.find((q) => /from measure\.topics where id/.test(q.text))!;
+    expect(topic.text).toContain("where id = $1 and site_id = $2");
+    expect(topic.values).toEqual(["t-1", SITE_ID]);
+    const related = sql.queries.find((q) => /parent_question_id/.test(q.text))!;
+    expect(related.text).toContain("(select cluster_id from measure.questions where id = $3 and site_id = $4 and cluster_id is not null)");
+    expect(related.values[3]).toBe(SITE_ID);
   });
 });

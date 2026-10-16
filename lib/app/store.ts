@@ -111,11 +111,14 @@ export interface SiteRow {
   profile_status: "none" | "queued" | "running" | "ready" | "failed";
   profile_error: string | null;
   profile_updated_at: string | Date | null;
+  /** What the site's Cloudflare Worker last reported in telemetry; null for none yet or a v1 Worker. */
+  worker_version: string | null;
+  worker_seen_at: string | Date | null;
 }
 
 
 /** Column list shared by every site read/insert so a new column cannot be forgotten in one place. */
-export const SITE_COLUMNS = "id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at, keywords, profile, profile_status, profile_error, profile_updated_at";
+export const SITE_COLUMNS = "id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at, keywords, profile, profile_status, profile_error, profile_updated_at, worker_version, worker_seen_at";
 
 export class SiteInputError extends Error {}
 

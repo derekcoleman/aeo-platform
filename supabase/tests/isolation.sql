@@ -1009,3 +1009,77 @@ begin;
 rollback;
 
 \echo 'isolation: onboarding assertions passed'
+
+-- ── 0018: security hardening ─────────────────────────────────────────────────
+do $$ begin
+  if (select count(*) from information_schema.columns where table_schema = 'ops' and table_name = 'webhook_events' and column_name in ('attempts', 'claimed_at', 'last_error')) <> 3 then
+    raise exception 'FAIL webhook ledger claim columns missing';
+  end if;
+  if (select count(*) from information_schema.columns where table_schema = 'app' and table_name = 'sites' and column_name in ('worker_version', 'worker_seen_at')) <> 2 then
+    raise exception 'FAIL worker version columns missing';
+  end if;
+end $$;
+
+-- A connection may name a site of its own organisation only, whoever writes it.
+do $$
+declare refused boolean := false;
+begin
+  begin
+    insert into context.context_connections (org_id, site_id, provider, secret_ref)
+    values ('11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000002', 'google', null);
+  exception when check_violation then
+    refused := true;
+  end;
+  if not refused then raise exception 'FAIL connection bound to another org''s site on insert'; end if;
+  refused := false;
+  begin
+    update context.context_connections set site_id = 'bbbbbbbb-0000-0000-0000-000000000002'
+      where id = 'cccccccc-0000-0000-0000-000000000001';
+  exception when check_violation then
+    refused := true;
+  end;
+  if not refused then raise exception 'FAIL connection moved to another org''s site'; end if;
+  raise notice 'ok  a connection cannot bind another org''s site';
+end $$;
+
+begin;
+  insert into context.context_connections (id, org_id, site_id, provider, secret_ref)
+  values ('cccccccc-0000-0000-0000-000000000018', '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-000000000001', 'google', null);
+  select pg_temp.expect('a connection binds a site of its own org',
+    (select count(*) from context.context_connections where id = 'cccccccc-0000-0000-0000-000000000018'), 1);
+rollback;
+
+grant insert, update on context.context_connections to app_user;
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  do $$
+  declare refused boolean := false;
+  begin
+    begin
+      insert into context.context_connections (org_id, site_id, provider)
+      values ('11111111-1111-1111-1111-111111111111', 'bbbbbbbb-0000-0000-0000-000000000002', 'google');
+    exception when check_violation then
+      refused := true;
+    end;
+    if not refused then raise exception 'FAIL member bound a Globex site to an Acme connection'; end if;
+    refused := false;
+    begin
+      update context.context_connections set site_id = 'bbbbbbbb-0000-0000-0000-000000000002'
+        where id = 'cccccccc-0000-0000-0000-000000000001';
+    exception when check_violation then
+      refused := true;
+    end;
+    if not refused then raise exception 'FAIL member moved an Acme connection onto a Globex site'; end if;
+    raise notice 'ok  a member cannot bind another org''s site through RLS';
+  end $$;
+rollback;
+revoke insert, update on context.context_connections from app_user;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('member still cannot read the webhook ledger', (select count(*) from ops.webhook_events), 0);
+rollback;
+
+\echo 'isolation: security hardening assertions passed'

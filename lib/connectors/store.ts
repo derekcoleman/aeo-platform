@@ -363,14 +363,75 @@ export async function upsertExternalMetrics(
 
 // ── webhook ledger ──────────────────────────────────────────────────────────
 
-/** Returns false when this (provider, external_id) was already recorded — the caller must not re-emit. */
-export async function recordWebhookEvent(provider: string, externalId: string, payload: unknown, sql: postgres.Sql = appDb()): Promise<boolean> {
+/** How long a claim holds before another delivery (a provider retry, the re-drive) may take the row over. */
+export const WEBHOOK_LEASE_SECONDS = 120;
+
+/**
+ * Claim a delivery of a verified webhook. True when the caller now owns it
+ * and must hand it on: the event is new, or it was seen before, never
+ * processed, and its last claim was released (the hand-off failed) or has
+ * lapsed (the handler died). False for a duplicate of a processed event or of
+ * one another delivery is handling right now: answer 200 and do nothing.
+ */
+export async function claimWebhookEvent(provider: string, externalId: string, payload: unknown, sql: postgres.Sql = appDb(), leaseSeconds = WEBHOOK_LEASE_SECONDS): Promise<boolean> {
   const rows = await sql`
-    insert into ops.webhook_events (provider, external_id, payload)
-    values (${provider}, ${externalId}, ${sql.json(payload as never)})
-    on conflict (provider, external_id) do nothing
+    insert into ops.webhook_events as w (provider, external_id, payload, attempts, claimed_at)
+    values (${provider}, ${externalId}, ${sql.json(payload as never)}, 1, now())
+    on conflict (provider, external_id) do update
+      set attempts = w.attempts + 1, claimed_at = now()
+      where w.processed_at is null
+        and (w.claimed_at is null or w.claimed_at < now() - make_interval(secs => ${leaseSeconds}))
     returning id`;
   return rows.length > 0;
+}
+
+/** Release a claim whose hand-off failed, keeping the reason, so a retry or the re-drive can deliver it. */
+export async function markWebhookFailed(provider: string, externalId: string, error: unknown, sql: postgres.Sql = appDb()): Promise<void> {
+  await sql`
+    update ops.webhook_events set claimed_at = null, last_error = ${errorMessage(error)}
+    where provider = ${provider} and external_id = ${externalId} and processed_at is null`;
+}
+
+export interface StaleWebhookEvent {
+  provider: string;
+  external_id: string;
+  payload: unknown;
+  attempts: number;
+}
+
+export interface StaleWebhookOptions {
+  providers: string[];
+  /** Leave a delivery to its own handler and the provider's retries for this long. */
+  olderThanMinutes?: number;
+  /** Past this many deliveries, a human looks at last_error instead. */
+  maxAttempts?: number;
+  /** Older events are history, not something to act on now. */
+  maxAgeDays?: number;
+  limit?: number;
+  leaseSeconds?: number;
+}
+
+/**
+ * Claim unprocessed deliveries for a re-drive, oldest first: old enough that
+ * their handler and the provider have had their turn, young enough to still
+ * matter, under the attempt cap, and not held by a live claim.
+ */
+export async function claimStaleWebhookEvents(opts: StaleWebhookOptions, sql: postgres.Sql = appDb()): Promise<StaleWebhookEvent[]> {
+  const { providers, olderThanMinutes = 10, maxAttempts = 5, maxAgeDays = 3, limit = 100, leaseSeconds = WEBHOOK_LEASE_SECONDS } = opts;
+  return sql<StaleWebhookEvent[]>`
+    update ops.webhook_events w set attempts = w.attempts + 1, claimed_at = now()
+    where w.id in (
+      select id from ops.webhook_events
+      where processed_at is null
+        and provider = any(${sql.array(providers)}::text[])
+        and received_at < now() - make_interval(mins => ${olderThanMinutes})
+        and received_at > now() - make_interval(days => ${maxAgeDays})
+        and attempts < ${maxAttempts}
+        and (claimed_at is null or claimed_at < now() - make_interval(secs => ${leaseSeconds}))
+      order by received_at
+      limit ${limit}
+      for update skip locked)
+    returning w.provider, w.external_id, w.payload, w.attempts`;
 }
 
 export async function markWebhookProcessed(provider: string, externalId: string, sql: postgres.Sql = appDb()): Promise<void> {

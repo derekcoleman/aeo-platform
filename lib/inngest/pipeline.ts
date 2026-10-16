@@ -378,7 +378,7 @@ export const contentPipelineFunction = inngest.createFunction(
         await step.sendEvent(`window:${days}d:track`, serpTrackRequested.create({ siteId, orgId, questionIds: [questionId] }));
         // Give the tracker time to land the snapshot before we read it.
         await step.sleep(`window:${days}d:settle`, "30m");
-        const status = await step.run(`window:${days}d:check`, () => citationStatus(questionId));
+        const status = await step.run(`window:${days}d:check`, () => citationStatus(questionId, siteId));
         windows.push({ days, owned: status?.owned ?? null });
         if (status && !status.owned) {
           await step.run(`window:${days}d:refresh`, () =>

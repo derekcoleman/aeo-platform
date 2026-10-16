@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertNoSecretsInConfig, errorMessage, recordWebhookEvent, upsertDocuments, withSyncRun } from "@/lib/connectors/store";
+import { assertNoSecretsInConfig, claimStaleWebhookEvents, claimWebhookEvent, errorMessage, markWebhookFailed, upsertDocuments, withSyncRun } from "@/lib/connectors/store";
 import { ConnectorError } from "@/lib/connectors/types";
 import { fakeSql, idSequence } from "./helpers/fake-sql";
 
@@ -72,12 +72,42 @@ describe("upsertDocuments", () => {
   });
 });
 
-describe("recordWebhookEvent", () => {
-  it("is true on first sight and false on a duplicate", async () => {
+describe("webhook ledger claims", () => {
+  it("is true for the owner of a delivery and false for a duplicate", async () => {
     let seen = false;
     const sql = fakeSql([[/insert into ops\.webhook_events/, () => { if (seen) return []; seen = true; return [{ id: 1 }]; }]]);
-    expect(await recordWebhookEvent("slack", "Ev1", {}, sql)).toBe(true);
-    expect(await recordWebhookEvent("slack", "Ev1", {}, sql)).toBe(false);
+    expect(await claimWebhookEvent("slack", "Ev1", {}, sql)).toBe(true);
+    expect(await claimWebhookEvent("slack", "Ev1", {}, sql)).toBe(false);
+  });
+
+  it("re-claims only an unprocessed row whose claim was released or has lapsed", async () => {
+    const sql = fakeSql();
+    await claimWebhookEvent("stripe", "evt_1", { id: "evt_1" }, sql, 90);
+    const q = sql.queries[0]!;
+    expect(q.text).toContain("values ($1, $2, $3, 1, now())");
+    expect(q.text).toContain("on conflict (provider, external_id) do update set attempts = w.attempts + 1, claimed_at = now()");
+    expect(q.text).toContain("where w.processed_at is null and (w.claimed_at is null or w.claimed_at < now() - make_interval(secs => $4))");
+    expect(q.values[3]).toBe(90);
+  });
+
+  it("releases a failed claim with a redacted reason, never touching a processed row", async () => {
+    const sql = fakeSql();
+    await markWebhookFailed("slack", "Ev1", new Error("send failed for xoxb-leaked-token"), sql);
+    const q = sql.queries[0]!;
+    expect(q.text).toBe("update ops.webhook_events set claimed_at = null, last_error = $1 where provider = $2 and external_id = $3 and processed_at is null");
+    expect(String(q.values[0])).toContain("[redacted]");
+    expect(String(q.values[0])).not.toContain("xoxb-leaked");
+  });
+
+  it("claims stale deliveries for a re-drive: unprocessed, aged, capped, unclaimed, oldest first", async () => {
+    const sql = fakeSql([[/update ops\.webhook_events w set attempts/, () => [{ provider: "slack", external_id: "Ev1", payload: {}, attempts: 2 }]]]);
+    const rows = await claimStaleWebhookEvents({ providers: ["stripe", "slack"] }, sql);
+    expect(rows).toHaveLength(1);
+    const q = sql.queries[0]!;
+    for (const part of ["processed_at is null", "received_at < now() - make_interval(mins => $2)", "received_at > now() - make_interval(days => $3)", "attempts < $4", "order by received_at", "for update skip locked"]) {
+      expect(q.text).toContain(part);
+    }
+    expect(q.values.slice(1)).toEqual([10, 3, 5, 120, 100]);
   });
 });
 

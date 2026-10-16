@@ -1,5 +1,5 @@
 /**
- * AEO content proxy — Cloudflare Worker
+ * AEO content proxy — Cloudflare Worker, version 2
  * ────────────────────────────────────────────────────────────────────────────
  * Generated for: {{SITE_NAME}} ({{CANONICAL_DOMAIN}}{{PATH_PREFIX}})
  *
@@ -14,27 +14,47 @@
  *     receive them. This is the single strongest reason to use this mode:
  *     the rewrite-only install modes cannot do it at your edge.
  *
- *  2. Verifies the response belongs to your site (X-AEO-Site) before returning
+ *  2. Strips every X-AEO-* header a visitor sent before adding its own (hop
+ *     count, signature, version). Those headers are how this Worker and our
+ *     origin talk to each other; a visitor must not be able to speak for
+ *     either of them.
+ *
+ *  3. Verifies the response belongs to your site (X-AEO-Site) before returning
  *     it, and falls back to your own origin if it does not. A bug on our side
  *     therefore degrades to "your own page is served", never "someone else's
  *     content appears on your domain".
  *
- *  3. Falls back to cache, then to a static mirror, if we are slow or down.
+ *  4. Caches at your edge for one hostname only, CONFIG.cacheHost, and never
+ *     caches a redirect or an error. Cloudflare keys this cache on the URL it
+ *     fetches from us, which is the same for every hostname routed here, so
+ *     caching on a second host could serve that host's page, canonical link
+ *     included, on the first. It is generated as {{CANONICAL_DOMAIN}}, the
+ *     host in the route above; if you route this Worker on another host
+ *     instead, such as www.{{CANONICAL_DOMAIN}}, put that host in cacheHost or
+ *     its pages get no edge cache. Never list two.
+ *
+ *  5. Falls back to cache, then to a static mirror, if we are slow or down.
  *     Only {{PATH_PREFIX}}/* is involved either way — the rest of your site is
  *     structurally untouched.
  *
- *  4. Re-fetches your origin on a 404 with X-AEO-Passthrough, so if you ever
+ *  6. Re-fetches your origin on a 404 with X-AEO-Passthrough, so if you ever
  *     publish your own page under this prefix, your page wins.
  *
- *  5. Reports AI crawler hits, including cache hits, which is what makes
+ *  7. Reports AI crawler hits, including cache hits, which is what makes
  *     "ChatGPT-User fetched this page 43 times yesterday" possible at all.
+ *     Each report carries this Worker's version, so we can tell you when a
+ *     newer one is available.
  *
  * This Worker sets no cookies and stores nothing about your visitors.
  */
 
 const CONFIG = {
+  workerVersion: "2",
   origin: "{{EDGE_HOSTNAME}}",
   siteId: "{{SITE_ID}}",
+  // The only hostname whose responses are cached at your edge: the host you
+  // route this Worker on (note 4).
+  cacheHost: "{{CANONICAL_DOMAIN}}",
   pathPrefix: "{{PATH_PREFIX}}",
   mirrorOrigin: "{{MIRROR_ORIGIN}}",
   crawlEndpoint: "{{CRAWL_ENDPOINT}}",
@@ -46,6 +66,15 @@ const CONFIG = {
 
 /** Request headers never forwarded upstream. See note 1 above. */
 const STRIP_REQUEST_HEADERS = ["cookie", "authorization", "proxy-authorization"];
+
+/** Every header with this prefix is ours to set, never a visitor's. See note 2. */
+const OWN_HEADER_PREFIX = "x-aeo-";
+
+/**
+ * Edge cache TTLs by status, for CONFIG.cacheHost only. A negative TTL
+ * tells Cloudflare not to cache: redirects and errors always come from us.
+ */
+const CACHE_TTL_BY_STATUS = { "200-299": 300, "300-399": -1, "404": 10, "410": 300, "500-599": -1 };
 
 /**
  * User agents worth reporting. `live_fetch` is the valuable one: a model is
@@ -110,12 +139,15 @@ export default {
     upstream.port = "";
 
     const headers = new Headers(request.headers);
-    for (const h of STRIP_REQUEST_HEADERS) headers.delete(h);
+    const drop = [...STRIP_REQUEST_HEADERS];
+    for (const name of headers.keys()) if (name.startsWith(OWN_HEADER_PREFIX)) drop.push(name);
+    for (const h of drop) headers.delete(h);
 
     headers.set("host", CONFIG.origin);
     headers.set("x-forwarded-host", url.hostname);
     headers.set("x-forwarded-proto", url.protocol.replace(":", ""));
     headers.set("x-aeo-hops", "1");
+    headers.set("x-aeo-worker-version", CONFIG.workerVersion);
     if (CONFIG.hmacSecret) {
       // Minute-granularity so a captured signature is not replayable for long,
       // while tolerating modest clock skew.
@@ -129,15 +161,14 @@ export default {
       redirect: "manual",
     });
 
+    // Note 4: the edge cache is keyed on the upstream URL, shared by every
+    // hostname routed here, so only one host may use it.
+    const cacheable = url.hostname === CONFIG.cacheHost.trim().toLowerCase();
+
     let response = null;
     try {
       response = await Promise.race([
-        fetch(originRequest, {
-          cf: {
-            cacheEverything: true,
-            cacheTtlByStatus: { "200-299": 300, "301-399": 60, "404": 10, "500-599": 0 },
-          },
-        }),
+        fetch(originRequest, cacheable ? { cf: { cacheEverything: true, cacheTtlByStatus: CACHE_TTL_BY_STATUS } } : {}),
         new Promise((_, reject) =>
           setTimeout(() => reject(new Error("origin timeout")), CONFIG.originTimeoutMs),
         ),
@@ -152,7 +183,7 @@ export default {
         return fetch(request);
       }
 
-      // Note 2: refuse anything that is not demonstrably this site's content.
+      // Note 3: refuse anything that is not demonstrably this site's content.
       const servedSite = response.headers.get("x-aeo-site");
       if (servedSite && servedSite !== CONFIG.siteId) {
         ctx.waitUntil(report(ctx, request, url, "site-mismatch", servedSite));
@@ -212,6 +243,7 @@ async function reportCrawl(request, url, status, cacheStatus) {
     // published IP ranges; we store a salted hash, never the address itself.
     const body = JSON.stringify({
       siteId: CONFIG.siteId,
+      workerVersion: CONFIG.workerVersion,
       events: [
         {
           ts: new Date().toISOString(),

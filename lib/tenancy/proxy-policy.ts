@@ -174,3 +174,31 @@ export function decideProxyAction(input: ProxyInput): ProxyAction {
  * a cookie on their domain — not for analytics, not for anything.
  */
 export const STRIPPED_REQUEST_HEADERS = ["cookie", "authorization", "proxy-authorization"] as const;
+
+/** Every header middleware attaches for the render handler starts with this. */
+export const INTERNAL_HEADER_PREFIX = "x-aeo-internal-";
+
+/** Sent by a Worker (v2+) on every origin request; telemetry, not something a handler needs. */
+export const WORKER_VERSION_HEADER = "x-aeo-worker-version";
+
+/**
+ * The request headers a render handler may see: the client's, minus the
+ * stripped set above, minus anything that looks like one of OUR internal
+ * headers. The handler trusts `x-aeo-internal-*` as middleware's verdict
+ * (the redirect target, indexability, the canonical host), so a client that
+ * sends its own must never get it through: a forged
+ * `x-aeo-internal-redirect` was an open redirect that a Worker then cached on
+ * the customer's domain. Middleware sets the real values after this.
+ *
+ * Edge-safe and pure: runs in middleware.
+ */
+export function renderRequestHeaders(incoming: Headers): Headers {
+  const headers = new Headers(incoming);
+  const drop: string[] = [...STRIPPED_REQUEST_HEADERS, WORKER_VERSION_HEADER];
+  // Header names come back lowercased; collect first, deleting while iterating skips entries.
+  headers.forEach((_value, name) => {
+    if (name.startsWith(INTERNAL_HEADER_PREFIX)) drop.push(name);
+  });
+  for (const h of drop) headers.delete(h);
+  return headers;
+}

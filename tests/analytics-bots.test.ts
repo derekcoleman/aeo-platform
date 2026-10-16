@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyUserAgent, ipInCidr, parseIp, parsePublishedRanges, verifyBotIp } from "@/lib/analytics/bots";
+import { classifyUserAgent, ipInCidr, parseIp, parsePublishedRanges, trustedClientIp, verifyBotIp } from "@/lib/analytics/bots";
 import { hashIp } from "@/lib/analytics/crawl";
 
 describe("classifyUserAgent", () => {
@@ -39,6 +39,21 @@ describe("ip parsing and cidr", () => {
     expect(verifyBotIp("gptbot", "1.2.3.4", ranges)).toBe(false);
     expect(verifyBotIp("gptbot", null, ranges)).toBe(false);
     expect(verifyBotIp("claudebot", "1.2.3.4", ranges)).toBeNull();
+  });
+});
+
+describe("trustedClientIp", () => {
+  it("prefers the platform's forwarded-for, then x-real-ip", () => {
+    expect(trustedClientIp(new Headers({ "x-vercel-forwarded-for": "20.15.240.70, 10.0.0.1", "x-real-ip": "1.2.3.4" }))).toBe("20.15.240.70");
+    expect(trustedClientIp(new Headers({ "x-real-ip": "2001:db8::5" }))).toBe("2001:db8::5");
+  });
+  it("never trusts a header the caller can set", () => {
+    // A scripted "GPTBot" claiming an OpenAI address must stay unverified.
+    expect(trustedClientIp(new Headers({ "cf-connecting-ip": "20.15.240.70", "x-forwarded-for": "20.15.240.70" }))).toBeNull();
+  });
+  it("ignores values that are not addresses", () => {
+    expect(trustedClientIp(new Headers({ "x-vercel-forwarded-for": "unknown", "x-real-ip": "1.2.3.4" }))).toBe("1.2.3.4");
+    expect(trustedClientIp(new Headers())).toBeNull();
   });
 });
 

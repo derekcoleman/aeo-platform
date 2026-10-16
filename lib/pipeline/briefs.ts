@@ -193,7 +193,7 @@ export async function loadBriefContext(
         select text from measure.questions
         where site_id = ${opportunity.site_id}
           and (parent_question_id = ${opportunity.question_id}
-               or cluster_id = (select cluster_id from measure.questions where id = ${opportunity.question_id} and cluster_id is not null))
+               or cluster_id = (select cluster_id from measure.questions where id = ${opportunity.question_id} and site_id = ${opportunity.site_id} and cluster_id is not null))
           and id <> ${opportunity.question_id}
         order by demand_score desc limit 12`
     : [];
@@ -204,7 +204,7 @@ export async function loadBriefContext(
     order by p.updated_at desc limit 25`;
   const brain = await loadBriefBrain({ orgId: opportunity.org_id, siteId: opportunity.site_id }, `${opportunity.title} ${opportunity.target_query}`, sql);
   const [topic] = opportunity.topic_id
-    ? await sql<{ name: string; description: string | null; formats: string[]; notes: string | null }[]>`select name, description, formats, notes from measure.topics where id = ${opportunity.topic_id}`
+    ? await sql<{ name: string; description: string | null; formats: string[]; notes: string | null }[]>`select name, description, formats, notes from measure.topics where id = ${opportunity.topic_id} and site_id = ${opportunity.site_id}`
     : [];
   const format = opportunity.format ?? ((topic?.formats[0] as BriefContext["format"]) ?? null);
   let structuralTarget: Record<string, unknown> | null = null;

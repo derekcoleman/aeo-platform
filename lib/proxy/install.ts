@@ -81,7 +81,11 @@ export interface InstallContext {
   site: Pick<SiteRoute, "id" | "canonicalDomain" | "pathPrefix" | "edgeHostname" | "proxyMode"> & {
     name: string;
   };
-  hmacSecret?: string;
+  /**
+   * The site's signing secret. `null` means the viewer may not see it (only
+   * managers may): the Worker is generated with a placeholder in its place.
+   */
+  hmacSecret?: string | null;
   mirrorOrigin?: string;
   crawlEndpoint?: string;
 }
@@ -94,11 +98,25 @@ export interface InstallInstructions {
   config: string;
   /** Route pattern, where the mode needs one configured separately. */
   routePattern?: string;
+  /** Shown beside the route pattern: what to change if the customer routes a different host. */
+  routeNote?: string;
   /** Things the customer must know before choosing this mode. */
   warnings: string[];
   /** Additional rewrites we ask for beyond the content prefix. */
   extraRewrites: { source: string; reason: string }[];
+  /** The config carries a placeholder where the signing secret goes (see InstallContext.hmacSecret). */
+  secretWithheld: boolean;
 }
+
+/**
+ * The Worker version `edge/customer-worker.template.js` generates. A Worker
+ * reports its version in crawl telemetry (app.sites.worker_version); v1
+ * reports none.
+ */
+export const CURRENT_WORKER_VERSION = "2";
+
+/** What a viewer without the right to see the secret gets in its place. */
+export const HMAC_SECRET_PLACEHOLDER = "<signing secret hidden: ask an organisation admin>";
 
 const TEMPLATE_PATH = join(process.cwd(), "edge", "customer-worker.template.js");
 
@@ -111,8 +129,33 @@ export function buildInstall(ctx: InstallContext): InstallInstructions {
     capabilities: caps,
     warnings,
     extraRewrites: extraRewrites(),
+    secretWithheld: ctx.site.proxyMode === "cloudflare_worker" && ctx.hmacSecret === null,
     ...renderConfig(ctx),
   };
+}
+
+/**
+ * Ask a site to redeploy its Worker when it runs an older one. Version 2
+ * strips forged internal headers at the customer's edge, caches on one host
+ * only (its CONFIG.cacheHost) and never caches a redirect; a v1 Worker cached
+ * a 3xx for a minute on every host routed to it. `installed` is false while
+ * the project is still being set up, when there is nothing deployed to
+ * upgrade.
+ */
+export function workerUpgradeNotice(site: { proxyMode: ProxyMode; workerVersion: string | null; installed: boolean; canonicalDomain: string }): string | null {
+  if (site.proxyMode !== "cloudflare_worker" || !site.installed) return null;
+  const why =
+    `Version ${CURRENT_WORKER_VERSION} refuses forged internal headers at your edge, caches on one host only ` +
+    `(${site.canonicalDomain}, unless you set cacheHost to the host you route it on) and never caches a redirect or an error.`;
+  if (site.workerVersion === null) {
+    return (
+      "This project's Worker has not reported a version. Workers generated before version 2 report none; a current one " +
+      `reports with its first crawler hit. If yours predates it, redeploy the script below. ${why}`
+    );
+  }
+  const reported = Number(site.workerVersion);
+  if (Number.isFinite(reported) && reported >= Number(CURRENT_WORKER_VERSION)) return null;
+  return `This project's Worker reports version ${site.workerVersion}; the current version is ${CURRENT_WORKER_VERSION}. Redeploy the script below. ${why}`;
 }
 
 function warningsFor(mode: ProxyMode, caps: InstallCapabilities): string[] {
@@ -171,7 +214,7 @@ function extraRewrites(): { source: string; reason: string }[] {
   ];
 }
 
-function renderConfig(ctx: InstallContext): Pick<InstallInstructions, "filename" | "config" | "routePattern"> {
+function renderConfig(ctx: InstallContext): Pick<InstallInstructions, "filename" | "config" | "routePattern" | "routeNote"> {
   const { site } = ctx;
   switch (site.proxyMode) {
     case "cloudflare_worker": {
@@ -179,6 +222,11 @@ function renderConfig(ctx: InstallContext): Pick<InstallInstructions, "filename"
       return {
         filename: "aeo-proxy.worker.js",
         routePattern: `${site.canonicalDomain}${site.pathPrefix}/*`,
+        // The Worker edge-caches one host only (apex and www render different
+        // canonicals under one upstream cache key), generated as the apex.
+        routeNote:
+          `The Worker caches at your edge only on ${site.canonicalDomain}. If your site lives on www.${site.canonicalDomain} and you ` +
+          `route the Worker there instead, set cacheHost in its CONFIG to www.${site.canonicalDomain}, or those pages get no edge cache. Name one host only.`,
         config: template
           .replaceAll("{{SITE_NAME}}", site.name)
           .replaceAll("{{SITE_ID}}", site.id)
@@ -187,7 +235,7 @@ function renderConfig(ctx: InstallContext): Pick<InstallInstructions, "filename"
           .replaceAll("{{EDGE_HOSTNAME}}", site.edgeHostname)
           .replaceAll("{{MIRROR_ORIGIN}}", ctx.mirrorOrigin ?? "")
           .replaceAll("{{CRAWL_ENDPOINT}}", ctx.crawlEndpoint ?? "")
-          .replaceAll("{{HMAC_SECRET}}", ctx.hmacSecret ?? ""),
+          .replaceAll("{{HMAC_SECRET}}", ctx.hmacSecret === null ? HMAC_SECRET_PLACEHOLDER : (ctx.hmacSecret ?? "")),
       };
     }
 

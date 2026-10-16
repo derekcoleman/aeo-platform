@@ -1,5 +1,5 @@
 import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
-import { classifyUserAgent } from "@/lib/analytics/bots";
+import { classifyUserAgent, trustedClientIp } from "@/lib/analytics/bots";
 import { hmacHex, verifyRequestSignature } from "@/lib/tenancy/signature";
 import { canonicalHostRedirect, strayAuthRedirect } from "@/lib/auth/callback";
 import { refreshSession } from "@/lib/auth/supabase";
@@ -7,9 +7,10 @@ import {
   HEADER,
   INTERNAL_HEADER,
   SiteLookupError,
-  STRIPPED_REQUEST_HEADERS,
   decideProxyAction,
   isEdgeHost,
+  isReservedPath,
+  renderRequestHeaders,
   siteResolver,
 } from "@/lib/tenancy";
 
@@ -45,6 +46,13 @@ export async function middleware(req: NextRequest, event: NextFetchEvent) {
   // through to the app without touching the site store — so the app keeps
   // serving even when the store is unreachable or not yet configured.
   if (!host || !isEdgeHost(host)) {
+    // The render route trusts the x-aeo-internal-* headers only middleware
+    // sets on the edge branch below. Reached on our own host, it would render
+    // any site by id under whatever "verdict" the client sent. Refuse it.
+    if (isReservedPath(req.nextUrl.pathname)) {
+      return new NextResponse(null, { status: 404, headers: { "cache-control": "no-store" } });
+    }
+
     // Our own domain: refresh the Supabase session (rotated cookies land on
     // this response) and gate the authenticated surfaces. This branch never
     // runs for a customer's domain, so we never set a cookie there.
@@ -121,12 +129,12 @@ export async function middleware(req: NextRequest, event: NextFetchEvent) {
       });
 
     case "render": {
-      const headers = new Headers(req.headers);
-
       // The blog is same-origin with the customer's site, so the browser sends
       // THEIR session cookies here. Drop them before any handler — or any log
       // sink — can see them. We also never set a cookie on their domain.
-      for (const h of STRIPPED_REQUEST_HEADERS) headers.delete(h);
+      // Any x-aeo-internal-* the client sent goes too: the handler reads those
+      // as our verdict, so only the values set below may reach it.
+      const headers = renderRequestHeaders(req.headers);
 
       // Site config the render handler needs. It runs as a role that can read
       // only content.published_pages, so it cannot resolve these itself.
@@ -177,7 +185,9 @@ export async function middleware(req: NextRequest, event: NextFetchEvent) {
 /** Fire-and-forget post to our own ingest route, signed like a Worker's would be. */
 async function reportOriginCrawl(req: NextRequest, siteId: string, secret: string, bot: { family: string; purpose: string }): Promise<void> {
   const base = process.env.APP_URL || req.nextUrl.origin;
-  const ip = req.headers.get("cf-connecting-ip") ?? req.headers.get("x-real-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+  // The platform's view of the caller, never a header the caller could set:
+  // the address is what makes a crawler hit "verified".
+  const ip = trustedClientIp(req.headers);
   const body = JSON.stringify({
     siteId,
     events: [

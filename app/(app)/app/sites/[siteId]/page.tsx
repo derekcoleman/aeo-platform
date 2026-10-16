@@ -18,7 +18,7 @@ import { decideApprovalAction, dismissOpportunityAction, runHealthCheckAction, r
 import { listHealthChecks, listOpportunities, listPendingApprovals, listPreflights, listPublished } from "@/lib/app/queries";
 import { loadSite } from "@/lib/app/store";
 import { canManage, requireUser, roleIn } from "@/lib/auth/session";
-import { buildInstall } from "@/lib/proxy/install";
+import { buildInstall, workerUpgradeNotice } from "@/lib/proxy/install";
 import { crawlSummary } from "@/lib/analytics/crawl";
 import { CrawlersPanel } from "@/components/app/crawlers-panel";
 import { BusinessProfileCard } from "@/components/app/business-profile";
@@ -45,15 +45,17 @@ export default async function SitePage({ params, searchParams }: { params: Promi
     listTopics(siteId),
   ]);
   const trackedKeywords = topics.flatMap((t) => [t.name, ...t.seed_terms]);
+  const manage = canManage(user, site.org_id);
   const install = buildInstall({
     site: { id: site.id, canonicalDomain: site.canonical_domain, pathPrefix: site.path_prefix, edgeHostname: site.edge_hostname, proxyMode: site.proxy_mode, name: site.name },
     mirrorOrigin: process.env.AEO_MIRROR_ORIGIN,
     crawlEndpoint: process.env.APP_URL ? `${process.env.APP_URL}/api/ingest/crawl` : undefined,
-    hmacSecret: site.proxy_hmac_secret,
+    // The signing secret is a manager's to see and paste; everyone else gets a placeholder.
+    hmacSecret: manage ? site.proxy_hmac_secret : null,
   });
+  const workerUpgrade = workerUpgradeNotice({ proxyMode: site.proxy_mode, workerVersion: site.worker_version, installed: site.status !== "provisioning", canonicalDomain: site.canonical_domain });
   const latestPreflight = preflights.find((p) => p.kind === "preflight");
   const latestReport = preflights.find((p) => p.crawler_access)?.crawler_access ?? null;
-  const manage = canManage(user, site.org_id);
   const sections = sitePage("overview").sections!;
   const defaultTab = site.status === "active" ? "content" : "install";
   const tab = resolveTab(sections, requestedTab, defaultTab);
@@ -105,6 +107,18 @@ export default async function SitePage({ params, searchParams }: { params: Promi
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
+              {workerUpgrade ? (
+                <Alert variant="warning">
+                  <AlertTitle>Update your Worker</AlertTitle>
+                  <AlertDescription>{workerUpgrade}</AlertDescription>
+                </Alert>
+              ) : null}
+              {install.secretWithheld ? (
+                <Alert>
+                  <AlertTitle>Signing secret hidden</AlertTitle>
+                  <AlertDescription>Only organisation owners and admins can see the secret that signs this Worker&apos;s requests. Ask one to deploy it, or to paste the secret in place of the placeholder.</AlertDescription>
+                </Alert>
+              ) : null}
               {install.warnings.length ? (
                 <Alert variant="warning">
                   <AlertTitle>What this mode gives up</AlertTitle>
@@ -112,7 +126,7 @@ export default async function SitePage({ params, searchParams }: { params: Promi
                 </Alert>
               ) : null}
               <CopyBlock filename={install.filename} text={install.config} />
-              {install.routePattern ? <p className="text-muted-foreground text-xs">Route pattern: <span className="font-mono">{install.routePattern}</span></p> : null}
+              {install.routePattern ? <p className="text-muted-foreground text-xs">Route pattern: <span className="font-mono">{install.routePattern}</span>{install.routeNote ? ` · ${install.routeNote}` : null}</p> : null}
               <div className="text-sm">
                 <p className="font-medium">Also rewrite these root paths to us (we merge with anything you already serve):</p>
                 <ul className="text-muted-foreground mt-1 list-disc pl-4 font-mono text-xs">{install.extraRewrites.map((r) => <li key={r.source}>{r.source} <span className="font-sans">— {r.reason}</span></li>)}</ul>
