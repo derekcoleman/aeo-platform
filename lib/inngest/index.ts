@@ -15,6 +15,7 @@ export {
   contentPublished,
   contentPipelineFailed,
   approvalRequested,
+  contentRemediateFaqRequested,
   opportunitiesScanRequested,
   contextIngestRequested,
   contextIngestCompleted,

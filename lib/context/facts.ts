@@ -74,7 +74,7 @@ export async function extractFacts(
   const { value, run } = await runJsonTask(
     "context.facts.extract",
     model,
-    { system: factExtractionSystemPrompt(), prompt: factExtractionPrompt(docs, brand), promptVersion: FACT_EXTRACTION_PROMPT_VERSION, maxTokens: 8192, temperature: 0 },
+    { system: factExtractionSystemPrompt(), prompt: factExtractionPrompt(docs, brand), promptVersion: FACT_EXTRACTION_PROMPT_VERSION },
     factExtractionSchema,
     scope,
     sql,

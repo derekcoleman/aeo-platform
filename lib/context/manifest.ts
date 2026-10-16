@@ -167,7 +167,7 @@ export async function draftManifestFromFacts(
   const { value, run } = await runJsonTask(
     "context.manifest.draft",
     model,
-    { system: manifestDraftSystemPrompt(), prompt, promptVersion: MANIFEST_DRAFT_PROMPT_VERSION, maxTokens: 6000, temperature: 0.3 },
+    { system: manifestDraftSystemPrompt(), prompt, promptVersion: MANIFEST_DRAFT_PROMPT_VERSION },
     manifestDocSchema,
     { orgId: scope.orgId, siteId: scope.siteId ?? null },
     sql,

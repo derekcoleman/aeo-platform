@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { composeVersion } from "@/lib/pipeline/compose";
-import { mechanicsGate, runQaGates, sentenceLengthCv, slopGate, unmarkedStatistics, verifySources } from "@/lib/pipeline/qa";
+import { composeQaDocument, composeVersion, qaDocumentFor } from "@/lib/pipeline/compose";
+import { mechanicsGate, runQaGates, safeSourceFetcher, sentenceLengthCv, slopGate, structureGate, structureMinFrom, unmarkedStatistics, verifySources, verifySourcesWith } from "@/lib/pipeline/qa";
 import { author, brief, draft, gartnerSource, scimFact, site } from "./fixtures/pipeline";
 
 const NOW = new Date("2026-09-01T12:00:00Z");
@@ -102,11 +102,131 @@ describe("runQaGates", () => {
   });
 });
 
+describe("structure on the composed document", () => {
+  const organization = { name: "Acme", url: "https://acme.com" };
+  const c = composeVersion({ draft, brief, site, organization, author, slug: "sso-vs-scim", datePublished: NOW });
+  const documentHtml = composeQaDocument(c, site, organization, "sso-vs-scim");
+  const input = { ...qaInput(), documentHtml, canonicalUrl: c.page.canonicalUrl };
+
+  it("is the renderer's document: head, JSON-LD, one H1, the byline and dates", () => {
+    expect(documentHtml).toContain(`<link rel="canonical" href="https://acme.com/resources/sso-vs-scim">`);
+    expect(documentHtml).toContain('<script type="application/ld+json">');
+    expect(documentHtml.match(/<h1[ >]/g)).toHaveLength(1);
+    expect(documentHtml).toContain(`rel="author"`);
+    expect(documentHtml).toContain(`<meta property="article:published_time" content="${NOW.toISOString()}">`);
+    expect(documentHtml).toContain(c.bodyHtml);
+    expect(documentHtml).not.toContain(site.edgeHostname);
+  });
+
+  it("clears the production floor, and scores what the body-only wrapper could not see", () => {
+    const floor = structureMinFrom({ NODE_ENV: "test" } as NodeJS.ProcessEnv);
+    expect(floor).toBe(65);
+    const full = structureGate(input, floor);
+    const bare = structureGate(qaInput(), floor);
+    expect(full.passed).toBe(true);
+    expect(full.structure.normalized).toBeGreaterThanOrEqual(floor);
+    expect(full.structure.normalized).toBeGreaterThan(bare.structure.normalized);
+    const score = (r: typeof full, key: string) => r.structure.findings.find((f) => f.key === key)!.score;
+    for (const key of ["schema_valid", "freshness", "author_eeat"]) expect(score(full, key)).toBeGreaterThan(score(bare, key));
+    // The byline is not mistaken for the answer under the H1.
+    expect(score(full, "answer_block")).toBe(score(bare, "answer_block"));
+  });
+
+  it("passes the full report at the production floor", async () => {
+    const fetchImpl = fakeFetch({ [gartnerSource.url]: `<p>${gartnerSource.quote}.</p>` });
+    const report = await runQaGates(input, { fetchImpl });
+    expect(report.passed).toBe(true);
+  });
+
+  it("scores a cms item as a body: only its body HTML goes to the CMS, none of our document", () => {
+    expect(qaDocumentFor(c, "pipeline", site, organization, "sso-vs-scim")).toEqual({ documentHtml, canonicalUrl: c.page.canonicalUrl });
+    const cms = qaDocumentFor(c, "cms", site, organization, "sso-vs-scim");
+    expect(cms).toEqual({});
+    const floor = structureMinFrom({ NODE_ENV: "test" } as NodeJS.ProcessEnv);
+    expect(structureGate({ ...qaInput(), ...cms }, floor).structure.normalized).toBe(structureGate(qaInput(), floor).structure.normalized);
+  });
+});
+
+describe("safeSourceFetcher", () => {
+  /** No DNS in tests: skip resolution. The literal-address check on every hop still runs. */
+  async function offline<T>(fn: () => Promise<T>): Promise<T> {
+    const prior = process.env.AEO_FETCH_ALLOW_PRIVATE;
+    process.env.AEO_FETCH_ALLOW_PRIVATE = "1";
+    try {
+      return await fn();
+    } finally {
+      if (prior === undefined) delete process.env.AEO_FETCH_ALLOW_PRIVATE;
+      else process.env.AEO_FETCH_ALLOW_PRIVATE = prior;
+    }
+  }
+
+  it("refuses a cited URL that points at the metadata address, without fetching it, and records why", async () => {
+    let called = 0;
+    const counting = (async () => {
+      called++;
+      return new Response("secret");
+    }) as typeof fetch;
+    const [v] = await verifySourcesWith([{ ...gartnerSource, url: "http://169.254.169.254/latest/meta-data/" }], safeSourceFetcher(counting));
+    expect(v).toMatchObject({ verified: false, status: null });
+    expect(v!.reason).toMatch(/^fetch failed: host 169\.254\.169\.254 is not publicly routable/);
+    expect(called).toBe(0);
+  });
+
+  it("checks every redirect hop", async () => {
+    const hops = (async (url: string | URL | Request) =>
+      String(url).startsWith("https://example.org/")
+        ? new Response("", { status: 302, headers: { location: "http://127.0.0.1/admin" } })
+        : new Response("internal")) as typeof fetch;
+    const [v] = await offline(() => verifySourcesWith([gartnerSource], safeSourceFetcher(hops)));
+    expect(v).toMatchObject({ verified: false, status: null });
+    expect(v!.reason).toMatch(/^fetch failed: host 127\.0\.0\.1 is not publicly routable/);
+  });
+
+  it("verifies a public source through the same path", async () => {
+    const ok = (async () => new Response(`<p>${gartnerSource.quote}.</p>`, { status: 200, headers: { "content-type": "text/html" } })) as typeof fetch;
+    const [v] = await offline(() => verifySourcesWith([gartnerSource], safeSourceFetcher(ok)));
+    expect(v).toMatchObject({ verified: true, status: 200 });
+  });
+
+  it("holds one deadline over the body too: a source that sends headers and then stalls fails at the timeout", async () => {
+    // Headers and the first bytes arrive at once; the rest never does.
+    const stalled = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(`<p>${gartnerSource.quote}`));
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/html" } },
+      )) as typeof fetch;
+    const started = Date.now();
+    const [v] = await offline(() => verifySourcesWith([gartnerSource], safeSourceFetcher(stalled), 200));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(v).toMatchObject({ verified: false, status: null });
+    expect(v!.reason).toMatch(/^fetch failed: .*(aborted|timeout)/i);
+  });
+});
+
 describe("mechanicsGate / slopGate", () => {
   it("catches placeholders, empty links, missing alt, an H1 and edge-host leaks", () => {
     const r = mechanicsGate({ title: "T", bodyMd: "Body [TODO] here", bodyHtml: '<h1>x</h1><a href="#">link</a><img src="/a.png"><p>acme-8fj2.blogedge.aeo.app</p>', sources: [], intent: "unknown" });
     expect(r.passed).toBe(false);
     expect(r.detail.problems).toHaveLength(5);
+  });
+
+  it("fails a body that prints its FAQ section twice (a refresh that kept the live FAQ and answered it again)", async () => {
+    const once = compose();
+    expect(mechanicsGate({ ...qaInput(), bodyHtml: once.bodyHtml }).passed).toBe(true);
+    const kept = once.bodyMd.slice(once.bodyMd.indexOf("## Frequently asked questions"));
+    const twice = qaInput(`${draft.bodyMd}\n\n${kept}`);
+    const r = mechanicsGate(twice);
+    expect(r.passed).toBe(false);
+    expect(r.detail.problems).toEqual([expect.stringMatching(/FAQ section appears 2 times; return FAQ entries only in the faq array/)]);
+    const fetchImpl = fakeFetch({ [gartnerSource.url]: `<p>${gartnerSource.quote}.</p>` });
+    const report = await runQaGates(twice, { fetchImpl, structureMin: 0 });
+    expect(report.passed).toBe(false);
+    expect(report.routeTo).toBe("draft");
+    expect(report.feedback).toEqual(expect.arrayContaining([expect.stringMatching(/^Mechanics: the FAQ section appears 2 times/)]));
   });
 
   it("flags banned phrases and uniform sentence length", () => {

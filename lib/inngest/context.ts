@@ -1,5 +1,5 @@
 import { defaultEmbedder } from "@/lib/ai/embed";
-import { llmConfigured } from "@/lib/ai/model";
+import { llmConfigured, ModelRefusalError } from "@/lib/ai/model";
 import { ScoredJsonError } from "@/lib/ai/scored-json";
 import { chunkDocument } from "@/lib/context/chunk";
 import { ensureBrandEntity } from "@/lib/context/entities";
@@ -118,9 +118,9 @@ export const contextExtractFactsFunction = inngest.createFunction(
           const summary = await upsertCandidateFacts(orgId, siteId, facts, docs, { model: run.model, promptVersion: run.promptVersion }, sql, brand.entity);
           c = summary.inserted + summary.merged;
         } catch (err) {
-          // Malformed model output is not worth retrying on the same documents; mark them and move on.
-          if (!(err instanceof ScoredJsonError)) throw err;
-          console.warn(`[context] fact extraction returned unusable JSON for org ${orgId} (${FACT_EXTRACTION_PROMPT_VERSION}): ${err.message}`);
+          // Malformed model output, or a refusal, is not worth retrying on the same documents; mark them and move on.
+          if (!(err instanceof ScoredJsonError) && !(err instanceof ModelRefusalError)) throw err;
+          console.warn(`[context] fact extraction returned unusable output for org ${orgId} (${FACT_EXTRACTION_PROMPT_VERSION}): ${err.message}`);
         }
         await markFactsExtracted(docs, sql);
         return { n: docs.length, c, more: docs.length === EXTRACT_BATCH };

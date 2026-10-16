@@ -46,7 +46,7 @@ llms.txt: ${input.llmsTxtSummary}
 Reply with JSON only:
 {"googleAIOverviews":{"score":n,"strengths":[],"weaknesses":[]},"chatgptWebSearch":{...},"perplexityAI":{...},"googleGemini":{...},"bingCopilot":{...}}`;
 
-  const { text } = await model.complete(prompt, { json: true, maxTokens: 1200 });
+  const { text } = await model.complete(prompt, { json: true, maxTokens: 4096, effort: "low" });
   const platforms = parseScoredJson(text, Schema);
   const round = (p: PlatformScore): PlatformScore => ({ ...p, score: Math.round(p.score) });
   const rounded = {

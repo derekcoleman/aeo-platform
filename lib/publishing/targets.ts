@@ -119,9 +119,18 @@ export async function loadArticleForPush(contentItemId: string, sql: postgres.Sq
   return { ...row, origin: row.origin === "cms" ? "cms" : "pipeline", faq: row.frontmatter?.faq ?? [] };
 }
 
-/** The body Webflow gets: the sanitised article HTML plus the FAQ as headings, so the post is complete without our renderer. */
+/** The FAQ section's heading as composeVersion renders it into a version's body. */
+const FAQ_SECTION_RE = /<h2(?:\s[^>]*)?>\s*Frequently asked questions\s*<\/h2>/i;
+
+/**
+ * The body Webflow gets: the sanitised article HTML with the FAQ as
+ * headings, so the post is complete without our renderer. A stored
+ * version's body already ends in its FAQ section (the draft step composed
+ * it in, and that is the HTML QA scored), so it goes as it is; the FAQ is
+ * appended only to a body that lacks one.
+ */
 export function webflowBodyHtml(a: Pick<ArticleSource, "body_html" | "faq">): string {
-  if (!a.faq.length) return a.body_html;
+  if (!a.faq.length || FAQ_SECTION_RE.test(a.body_html)) return a.body_html;
   const faq = a.faq.map((f) => `<h3>${escapeHtml(f.question)}</h3><p>${escapeHtml(f.answer)}</p>`).join("");
   return `${a.body_html}<h2>Frequently asked questions</h2>${faq}`;
 }

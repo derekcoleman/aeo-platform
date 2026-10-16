@@ -12,6 +12,7 @@ import { appDb } from "@/lib/db/app";
 import {
   approvalDecided,
   contentPipelineRequested,
+  contentRemediateFaqRequested,
   contextSignalsScanRequested,
   inngest,
   opportunitiesScanRequested,
@@ -194,6 +195,14 @@ export async function setFeatureAction(orgId: string, feature: string, enabled: 
   await requireStaff();
   await setFeature(orgId, feature, enabled);
   revalidatePath("/ops");
+  return { ok: true };
+}
+
+/** Republish live pages that print their FAQ twice (one site, or every site). The job writes the audit row with the paths. */
+export async function remediateFaqAction(siteId: string | null): Promise<ActionResult> {
+  const staff = await requireStaff();
+  const jobError = await queueJob(contentRemediateFaqRequested.create({ siteId, requestedBy: staff.id }), undefined, "FAQ remediation");
+  if (jobError) return fail(jobError);
   return { ok: true };
 }
 

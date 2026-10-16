@@ -1,5 +1,6 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
+import type { GateStep } from "./gate";
 
 /**
  * The post-publish loop. An article that did not earn its citation is not a
@@ -38,4 +39,23 @@ export async function citationStatus(questionId: string, sql: postgres.Sql = app
 
 export function windowDate(from: Date, days: number): Date {
   return new Date(from.getTime() + days * 86_400_000);
+}
+
+/** The item's stored publish time (both the proxy and the CMS publish paths set it). */
+export async function loadPublishedAt(contentItemId: string, sql: postgres.Sql = appDb()): Promise<Date | null> {
+  const [row] = await sql<{ published_at: Date | null }[]>`select published_at from content.content_items where id = ${contentItemId}`;
+  return row?.published_at ?? null;
+}
+
+/**
+ * Where the re-measure windows start: the publish step's memoised timestamp,
+ * so a replay cannot move them. A run that published before the step
+ * returned one replays a result without it, and `new Date(undefined)` would
+ * make every `sleepUntil` throw, even for a sleep that already ran. That run
+ * reads the item's publish time in a step of its own instead.
+ */
+export async function windowsStart(step: Pick<GateStep, "run">, published: { publishedAt?: string | null }, load: () => Promise<Date | null>): Promise<Date> {
+  if (published.publishedAt) return new Date(published.publishedAt);
+  const at = await step.run("published-at", async () => ((await load()) ?? new Date()).toISOString());
+  return new Date(at);
 }

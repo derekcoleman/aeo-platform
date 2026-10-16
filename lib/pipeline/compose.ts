@@ -1,3 +1,6 @@
+import { renderArticleDocument } from "@/lib/render/document";
+import type { PublishedPage } from "@/lib/render/published";
+import type { SiteRenderConfig } from "@/lib/render/site-config";
 import type { SiteRoute } from "@/lib/tenancy/types";
 import { ANY_MARKER_RE, factMarkerKeys, faqMarkdown, renderMarkdown, resolveMarkers, stripFactMarkers, stripLeadingH1 } from "./markdown";
 import { buildPublishedPage, type BuiltPage, type PublishInputs } from "./publish";
@@ -20,6 +23,11 @@ export interface ComposeInput {
   slug: string;
   datePublished: Date;
   dateModified?: Date;
+  /**
+   * The body already ends in its FAQ section: a stored version's markdown,
+   * recomposed at publish. Appending `draft.faq` again would print it twice.
+   */
+  faqIncluded?: boolean;
 }
 
 export interface Composed {
@@ -44,7 +52,7 @@ export function stripMarkers(text: string): string {
 
 export function composeVersion(input: ComposeInput): Composed {
   const body = stripLeadingH1(input.draft.bodyMd).trim();
-  const bodyMd = [body, faqMarkdown(input.draft.faq)].filter(Boolean).join("\n\n");
+  const bodyMd = input.faqIncluded ? body : [body, faqMarkdown(input.draft.faq)].filter(Boolean).join("\n\n");
   const resolved = resolveMarkers(stripFactMarkers(bodyMd), input.brief.sources);
   const { html, wordCount } = renderMarkdown(resolved.markdown);
   const faq = input.draft.faq.map((f) => ({ question: f.question.trim(), answer: stripMarkers(f.answer) }));
@@ -63,4 +71,51 @@ export function composeVersion(input: ComposeInput): Composed {
     dateModified: input.dateModified,
   });
   return { bodyMd, bodyHtml: html, wordCount, cited: resolved.cited, unresolved: resolved.unresolved, factKeys: factMarkerKeys(bodyMd), faq, page };
+}
+
+/**
+ * The full article document as the renderer would serve it on the canonical
+ * host (head, JSON-LD, H1, byline, dates), for QA. Scoring the body alone
+ * misses everything the document layer adds, so a draft could fail the
+ * structure floor on rules the published page passes. The theme is left at
+ * its defaults: QA scores structure, not styling.
+ */
+export function composeQaDocument(composed: Pick<Composed, "page">, site: SiteRoute, organization: PublishInputs["organization"], slug: string): string {
+  const config: SiteRenderConfig = {
+    siteId: site.id,
+    canonicalDomain: site.canonicalDomain,
+    pathPrefix: site.pathPrefix,
+    locale: site.locale,
+    trailingSlash: site.trailingSlash,
+    theme: { tokens: {} },
+    organization,
+  };
+  const page: PublishedPage = {
+    siteId: site.id,
+    path: composed.page.path,
+    contentItemId: null,
+    html: composed.page.html,
+    head: composed.page.head,
+    markdown: composed.page.markdown,
+    etag: composed.page.etag,
+    updatedAt: new Date(composed.page.head.dateModified ?? 0),
+  };
+  return renderArticleDocument({ config, host: { canonicalDomain: site.canonicalDomain, indexable: true }, page, slug });
+}
+
+/**
+ * What the structure gate scores for an item. A proxy page is the document
+ * the renderer serves. A cms item ships only its body HTML and FAQ into the
+ * customer's CMS template: none of our head, JSON-LD, byline or canonical go
+ * with it, and its slug here is internal, so it is scored as a body.
+ */
+export function qaDocumentFor(
+  composed: Pick<Composed, "page">,
+  origin: "pipeline" | "cms",
+  site: SiteRoute,
+  organization: PublishInputs["organization"],
+  slug: string,
+): { documentHtml?: string; canonicalUrl?: string } {
+  if (origin === "cms") return {};
+  return { documentHtml: composeQaDocument(composed, site, organization, slug), canonicalUrl: composed.page.canonicalUrl };
 }

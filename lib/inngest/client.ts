@@ -190,6 +190,11 @@ export const approvalRequested = eventType("approval/requested", {
   }),
 });
 
+/** Republish live pages whose FAQ section was printed twice (staff, from /ops). No `siteId` = every site. */
+export const contentRemediateFaqRequested = eventType("content/remediate.faq.requested", {
+  schema: z.object({ siteId: z.guid().nullable().optional(), requestedBy: z.guid().nullable().optional() }),
+});
+
 /** Re-derive the opportunity queue for a site from citation gaps. */
 export const opportunitiesScanRequested = eventType("content/opportunities.scan.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid() }),

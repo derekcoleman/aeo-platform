@@ -1,3 +1,4 @@
+import { ModelRefusalError } from "@/lib/ai/model";
 import { connectorContext } from "@/lib/connectors";
 import { appDb } from "@/lib/db/app";
 import {
@@ -15,13 +16,15 @@ import {
 import { loadFactStatuses } from "@/lib/context/facts";
 import { loadManifest, manifestPromptBlock } from "@/lib/context/manifest";
 import { generateBrief, insertBrief, loadBrief, loadBriefContext, setBriefStatus } from "@/lib/pipeline/briefs";
-import { composeVersion } from "@/lib/pipeline/compose";
+import { composeVersion, qaDocumentFor } from "@/lib/pipeline/compose";
 import { generateDraft, slugify } from "@/lib/pipeline/draft";
-import { citationStatus, POST_PUBLISH_WINDOWS_DAYS, windowDate } from "@/lib/pipeline/loop";
-import { modelFor } from "@/lib/pipeline/model";
+import { applyDecision, approvalUrl, GATE_TTL_DAYS, humanGate, type DecisionDeps, type GateDeps } from "@/lib/pipeline/gate";
+import { citationStatus, loadPublishedAt, POST_PUBLISH_WINDOWS_DAYS, windowDate, windowsStart } from "@/lib/pipeline/loop";
+import { modelFor, ModelTruncatedError, TASK_SETTINGS } from "@/lib/pipeline/model";
 import { loadOpportunity, markOpportunity, openRefreshOpportunity, scanSite } from "@/lib/pipeline/opportunities";
-import { loadSiteOrganization, loadSiteRoute, publishVersion } from "@/lib/pipeline/publish";
-import { runQaGates } from "@/lib/pipeline/qa";
+import { loadSiteOrganization, loadSiteRoute } from "@/lib/pipeline/publish";
+import { runQaGates, safeSourceFetcher } from "@/lib/pipeline/qa";
+import { recomposeFromVersion, remediateDuplicateFaq, sitesWithDuplicateFaq, type FaqRemediation } from "@/lib/pipeline/republish";
 import { importCmsItem, loadExistingContent, publishRefreshToCms } from "@/lib/refresh/publish";
 import type { BriefSpec, DraftOutput } from "@/lib/pipeline/types";
 import {
@@ -32,11 +35,21 @@ import {
   insertSources,
   insertVersion,
   loadContentItem,
-  loadSources,
   loadVersion,
   reserveSlug,
 } from "@/lib/pipeline/versions";
-import { approvalDecided, approvalRequested, concurrencyCap, contentPipelineFailed, contentPipelineRequested, contentPublished, inngest, opportunitiesScanRequested, serpTrackRequested } from "./client";
+import {
+  approvalDecided,
+  concurrencyCap,
+  contentPipelineFailed,
+  contentPipelineRequested,
+  contentPublished,
+  contentRemediateFaqRequested,
+  inngest,
+  opportunitiesScanRequested,
+  publishingPushRequested,
+  serpTrackRequested,
+} from "./client";
 
 /**
  * The content pipeline as one durable function: brief → (human gate) → draft
@@ -49,50 +62,32 @@ import { approvalDecided, approvalRequested, concurrencyCap, contentPipelineFail
 const MAX_BRIEF_VERSIONS = 3;
 const MAX_QA_ATTEMPTS = 3;
 const MAX_REVIEW_ROUNDS = 2;
-const GATE_TIMEOUT = "7d";
-const GATE_TTL_MS = 7 * 86_400_000;
-
-type Step = Parameters<Parameters<typeof inngest.createFunction>[1]>[0]["step"];
-
-interface GateResult {
-  decision: "approve" | "changes" | "regenerate";
-  note: string | null;
-  by: string;
-}
 
 function appUrl(env: NodeJS.ProcessEnv = process.env): string {
   return (env.APP_URL ?? "https://app.aeo.app").replace(/\/$/, "");
 }
 
-/** Open an approval, tell Slack (best effort) and the app, then hold until a human decides or the gate expires. */
-async function humanGate(
-  step: Step,
-  label: string,
-  input: { kind: ApprovalKind; siteId: string; orgId: string; briefId?: string | null; contentVersionId?: string | null; notice: Omit<ApprovalNotice, "approvalId"> },
-): Promise<GateResult | null> {
-  const approvalId = await step.run(`${label}:open`, async () => {
-    const { id } = await createApproval({
-      siteId: input.siteId,
-      kind: input.kind,
-      briefId: input.briefId ?? null,
-      contentVersionId: input.contentVersionId ?? null,
-      expiresAt: new Date(Date.now() + GATE_TTL_MS),
-    });
-    try {
-      await notifyApprovalSlack(input.orgId, { ...input.notice, approvalId: id }, connectorContext());
-    } catch (e) {
-      // Slack is a convenience path; the app UI always renders the gate.
-      console.warn(`[pipeline] slack approval notice failed for ${id}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    return id;
-  });
-  await step.sendEvent(`${label}:requested`, approvalRequested.create({ approvalId, kind: input.kind, siteId: input.siteId, orgId: input.orgId }));
-  const evt = await step.waitForEvent(`${label}:wait`, { event: approvalDecided, if: `event.data.approvalId == "${approvalId}"`, timeout: GATE_TIMEOUT });
-  if (!evt) {
-    await step.run(`${label}:expire`, () => expireApproval(approvalId));
-    return null;
-  }
-  return { decision: evt.data.decision, note: evt.data.note ?? null, by: evt.data.by.name ?? evt.data.by.userId ?? evt.data.source };
+function gateDeps(): GateDeps {
+  return {
+    createApproval: (input) => createApproval(input),
+    loadApproval: (id) => loadApproval(id),
+    expireApproval: (id) => expireApproval(id),
+    notifyApprovalSlack: (orgId, notice) => notifyApprovalSlack(orgId, notice, connectorContext()),
+    appUrl: appUrl(),
+  };
+}
+
+/**
+ * Model outcomes caught inside their step and returned, not thrown. A refusal
+ * is not retried by Inngest; the run hands it to a human. A cut-off comes
+ * back with the larger budget, and the retry runs in a step of its own, so
+ * each long call gets its own invocation (and request timeout) and a replay
+ * never pays for the first call again.
+ */
+function handedBack(e: unknown): { refused: string } | { truncated: number } | null {
+  if (e instanceof ModelRefusalError) return { refused: e.category ?? "no category given" };
+  if (e instanceof ModelTruncatedError) return { truncated: e.retryMaxTokens };
+  return null;
 }
 
 export const contentPipelineFunction = inngest.createFunction(
@@ -102,8 +97,9 @@ export const contentPipelineFunction = inngest.createFunction(
     concurrency: [{ key: "event.data.orgId", limit: 2 }, { limit: concurrencyCap(10) }],
     retries: 2,
   },
-  async ({ event, step, attempt }) => {
+  async ({ event, step, attempt, runId }) => {
     const { opportunityId, siteId, orgId, note = null } = event.data;
+    const scope = { orgId, siteId, runId, opportunityId };
     let stage: "brief" | "brief_gate" | "draft" | "qa" | "draft_gate" | "publish" = "brief";
 
     const fail = async (reason: string) => {
@@ -133,12 +129,22 @@ export const contentPipelineFunction = inngest.createFunction(
       let previousBrief: BriefSpec | null = null;
       for (let v = 1; v <= MAX_BRIEF_VERSIONS; v++) {
         stage = "brief";
-        const brief = await step.run(`brief:${v}`, async () => {
+        const writeBrief = (maxTokens: number) => async () => {
           const ctx = await loadBriefContext(opp);
-          const { spec, run } = await generateBrief(modelFor("pipeline.brief"), { ...ctx, note: briefNote, previous: previousBrief }, { orgId, siteId });
-          const { id } = await insertBrief({ siteId, opportunityId, version: v, spec, run });
-          return { id, spec };
-        });
+          try {
+            const { spec, run } = await generateBrief(modelFor("pipeline.brief"), { ...ctx, note: briefNote, previous: previousBrief }, scope, appDb(), { maxTokens, retryTruncated: false });
+            const { id } = await insertBrief({ siteId, opportunityId, version: v, spec, run });
+            return { id, spec };
+          } catch (e) {
+            const handed = handedBack(e);
+            if (handed) return handed;
+            throw e;
+          }
+        };
+        let brief = await step.run(`brief:${v}`, writeBrief(TASK_SETTINGS["pipeline.brief"].maxTokens));
+        if ("truncated" in brief) brief = await step.run(`brief:${v}:more-room`, writeBrief(brief.truncated));
+        if ("refused" in brief) return await fail(`model refused the brief (${brief.refused}) — needs a human`);
+        if ("truncated" in brief) return await fail("the brief was cut off at max_tokens even with more room — needs a human");
         if (briefId) await step.run(`brief:${v}:supersede-previous`, () => setBriefStatus(briefId!, "superseded"));
         briefId = brief.id;
         spec = brief.spec;
@@ -148,25 +154,29 @@ export const contentPipelineFunction = inngest.createFunction(
         }
         stage = "brief_gate";
         await step.run(`brief:${v}:pending`, () => setBriefStatus(brief.id, "pending_approval"));
-        const gate = await humanGate(step, `brief-gate:${v}`, {
-          kind: "brief",
-          siteId,
-          orgId,
-          briefId: brief.id,
-          notice: {
+        const gate = await humanGate(
+          step,
+          `brief-gate:${v}`,
+          {
             kind: "brief",
-            title: brief.spec.title,
-            summary: brief.spec.targetAnswer,
-            previewUrl: `${appUrl()}/briefs/${brief.id}`,
-            facts: [
-              { label: "Head question", value: brief.spec.headQuestion },
-              { label: "Sections", value: String(brief.spec.outline.length) },
-              { label: "Sources", value: String(brief.spec.sources.length) },
-              { label: "Brand facts", value: String(brief.spec.facts.length) },
-            ],
+            siteId,
+            orgId,
+            briefId: brief.id,
+            notice: {
+              kind: "brief",
+              title: brief.spec.title,
+              summary: brief.spec.targetAnswer,
+              facts: [
+                { label: "Head question", value: brief.spec.headQuestion },
+                { label: "Sections", value: String(brief.spec.outline.length) },
+                { label: "Sources", value: String(brief.spec.sources.length) },
+                { label: "Brand facts", value: String(brief.spec.facts.length) },
+              ],
+            },
           },
-        });
-        if (!gate) return await fail(`brief approval expired after ${GATE_TIMEOUT}`);
+          gateDeps(),
+        );
+        if (!gate) return await fail(`brief approval expired after ${GATE_TTL_DAYS} days`);
         if (gate.decision === "approve") {
           await step.run(`brief:${v}:approved`, () => setBriefStatus(brief.id, "approved"));
           break;
@@ -218,7 +228,8 @@ export const contentPipelineFunction = inngest.createFunction(
       // ── draft → QA → (gate) ───────────────────────────────────────────
       let versionId: string | null = null;
       let reviewNote: string | null = null;
-      let previousDraft: DraftOutput | null = existing ? { title: existing.title, description: existing.description ?? approvedBrief.description, bodyMd: existing.bodyMd, faq: [] } : null;
+      // The live FAQ rides in `faq`, as a draft returns it; loadExistingContent cut it out of the body.
+      let previousDraft: DraftOutput | null = existing ? { title: existing.title, description: existing.description ?? approvedBrief.description, bodyMd: existing.bodyMd, faq: existing.faq } : null;
       const refresh = existing ? { url: existing.url, lastUpdated: existing.lastUpdated, reasons: existing.reasons } : null;
       let attemptNo = 0;
       rounds: for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
@@ -227,28 +238,49 @@ export const contentPipelineFunction = inngest.createFunction(
         for (let qa = 1; qa <= MAX_QA_ATTEMPTS; qa++) {
           attemptNo++;
           stage = "draft";
-          const r = await step.run(`draft:${attemptNo}`, async () => {
+          const writeDraft = (maxTokens: number) => async () => {
             const sql = appDb();
             const now = new Date();
-            const { draft, run } = await generateDraft(
-              modelFor("pipeline.draft"),
-              {
-                brief: approvedBrief,
-                author: site.author ? { name: site.author.name, jobTitle: site.author.job_title } : { name: organizationName },
-                site: { organizationName, domain: site.route.canonicalDomain },
-                manifest,
-                feedback,
-                note: reviewNote,
-                previous: previousDraft,
-                refresh: previousDraft && refresh && attemptNo === 1 ? refresh : null,
-              },
-              { orgId, siteId, contentItemId: item.id },
-              sql,
-            );
+            let generated: Awaited<ReturnType<typeof generateDraft>>;
+            try {
+              generated = await generateDraft(
+                modelFor("pipeline.draft"),
+                {
+                  brief: approvedBrief,
+                  author: site.author ? { name: site.author.name, jobTitle: site.author.job_title } : { name: organizationName },
+                  site: { organizationName, domain: site.route.canonicalDomain },
+                  manifest,
+                  feedback,
+                  note: reviewNote,
+                  previous: previousDraft,
+                  refresh: previousDraft && refresh && attemptNo === 1 ? refresh : null,
+                },
+                { ...scope, contentItemId: item.id },
+                sql,
+                { maxTokens, retryTruncated: false },
+              );
+            } catch (e) {
+              const handed = handedBack(e);
+              if (handed) return handed;
+              throw e;
+            }
+            const { draft, run } = generated;
             const composed = composeVersion({ draft, brief: approvedBrief, site: site.route, organization: site.organization, author: site.author, slug: item.slug, datePublished: now });
+            // Structure is scored on what goes live: the renderer's document for a proxy page, the body for a cms item.
+            const document = qaDocumentFor(composed, item.origin, site.route, site.organization, item.slug);
             const report = await runQaGates(
-              { title: draft.title, bodyMd: composed.bodyMd, bodyHtml: composed.bodyHtml, sources: approvedBrief.sources, facts: approvedBrief.facts, intent: approvedBrief.intent, jsonLd: composed.page.jsonLd, now },
-              { fetchImpl: fetch, loadFacts: (ids) => loadFactStatuses(orgId, ids, sql, now) },
+              {
+                title: draft.title,
+                bodyMd: composed.bodyMd,
+                bodyHtml: composed.bodyHtml,
+                sources: approvedBrief.sources,
+                facts: approvedBrief.facts,
+                intent: approvedBrief.intent,
+                jsonLd: composed.page.jsonLd,
+                ...document,
+                now,
+              },
+              { fetchSource: safeSourceFetcher(), loadFacts: (ids) => loadFactStatuses(orgId, ids, sql, now) },
             );
             const version = await insertVersion(
               {
@@ -270,7 +302,11 @@ export const contentPipelineFunction = inngest.createFunction(
             await insertContentFacts(version.id, report.citedFacts, sql);
             await insertQaResults(version.id, report.gates, sql);
             return { versionId: version.id, versionNo: version.versionNo, draft, passed: report.passed, routeTo: report.routeTo, feedback: report.feedback, wordCount: composed.wordCount, structure: report.structure.normalized };
-          });
+          };
+          let r = await step.run(`draft:${attemptNo}`, writeDraft(TASK_SETTINGS["pipeline.draft"].maxTokens));
+          if ("truncated" in r) r = await step.run(`draft:${attemptNo}:more-room`, writeDraft(r.truncated));
+          if ("refused" in r) return await fail(`model refused the draft (${r.refused}) — needs a human`);
+          if ("truncated" in r) return await fail("the draft was cut off at max_tokens even with more room — needs a human");
           versionId = r.versionId;
           previousDraft = r.draft;
           if (r.passed) {
@@ -285,20 +321,24 @@ export const contentPipelineFunction = inngest.createFunction(
         if (!gates.includes("draft")) break;
 
         stage = "draft_gate";
-        const gate = await humanGate(step, `draft-gate:${round}`, {
-          kind: "draft",
-          siteId,
-          orgId,
-          contentVersionId: versionId,
-          notice: {
+        const gate = await humanGate(
+          step,
+          `draft-gate:${round}`,
+          {
             kind: "draft",
-            title: previousDraft!.title,
-            summary: previousDraft!.description,
-            previewUrl: `${appUrl()}/content/${item.id}/versions/${versionId}`,
-            facts: [{ label: "Path", value: `${site.route.pathPrefix}/${item.slug}` }],
+            siteId,
+            orgId,
+            contentVersionId: versionId,
+            notice: {
+              kind: "draft",
+              title: previousDraft!.title,
+              summary: previousDraft!.description,
+              facts: [{ label: "Path", value: `${site.route.pathPrefix}/${item.slug}` }],
+            },
           },
-        });
-        if (!gate) return await fail(`draft approval expired after ${GATE_TIMEOUT}`);
+          gateDeps(),
+        );
+        if (!gate) return await fail(`draft approval expired after ${GATE_TTL_DAYS} days`);
         if (gate.decision === "approve") break rounds;
         if (round === MAX_REVIEW_ROUNDS) return await fail(`draft rejected ${MAX_REVIEW_ROUNDS} times`);
         reviewNote = gate.note;
@@ -313,36 +353,25 @@ export const contentPipelineFunction = inngest.createFunction(
       if (opp.question_id) await step.sendEvent("baseline", serpTrackRequested.create({ siteId, orgId, questionIds: [opp.question_id] }));
       const published = await step.run("publish", async () => {
         const sql = appDb();
-        const version = await loadVersion(finalVersionId, sql);
-        if (!version) throw new Error(`version ${finalVersionId} vanished`);
+        const now = new Date();
         if (item.origin === "cms") {
           // Back to the CMS, same item, same slug. The proxy never serves this one.
-          const r = await publishRefreshToCms({ contentItemId: item.id, versionId: finalVersionId, now: new Date() }, connectorContext({ sql }));
+          const r = await publishRefreshToCms({ contentItemId: item.id, versionId: finalVersionId, now }, connectorContext({ sql }));
           await markOpportunity(opportunityId, "published", sql);
-          return { path: r.url ? new URL(r.url).pathname : `/${item.slug}`, canonicalUrl: r.url, etag: null, cms: true };
+          return { path: r.url ? new URL(r.url).pathname : `/${item.slug}`, canonicalUrl: r.url, etag: null, cms: true, publishedAt: now.toISOString() };
         }
-        const [dates] = await sql<{ first_published_at: Date | null }[]>`select first_published_at from content.content_items where id = ${item.id}`;
-        const now = new Date();
-        const composed = composeVersion({
-          draft: { title: version.title, description: version.description ?? "", bodyMd: version.body_md, faq: version.frontmatter.faq },
-          brief: { sources: await loadSources(finalVersionId, sql), intent: version.frontmatter.intent },
-          site: site.route,
-          organization: site.organization,
-          author: site.author,
-          slug: item.slug,
-          datePublished: dates?.first_published_at ?? now,
-          dateModified: now,
-        });
-        const result = await publishVersion({ contentItemId: item.id, versionId: finalVersionId, siteId, page: composed.page, now }, sql);
+        // The stored version is what QA passed; recompose it, never re-append its FAQ.
+        const result = await recomposeFromVersion({ contentItemId: item.id, versionId: finalVersionId, siteId, now }, sql);
         await markOpportunity(opportunityId, "published", sql);
-        return { ...result, cms: false };
+        return { ...result, cms: false, publishedAt: now.toISOString() };
       });
       if (published.canonicalUrl) await step.sendEvent("published", contentPublished.create({ contentItemId: item.id, versionId: finalVersionId, siteId, orgId, path: published.path, canonicalUrl: published.canonicalUrl }));
 
       // ── post-publish loop ─────────────────────────────────────────────
       if (!opp.question_id) return { ok: true as const, contentItemId: item.id, versionId: finalVersionId, path: published.path, windows: [] };
       const questionId = opp.question_id;
-      const publishedAt = new Date();
+      // From the step's memoised result: a replay must not move the re-measure windows.
+      const publishedAt = await windowsStart(step, published, () => loadPublishedAt(item.id));
       const windows: { days: number; owned: boolean | null }[] = [];
       for (const days of POST_PUBLISH_WINDOWS_DAYS) {
         await step.sleepUntil(`window:${days}d`, windowDate(publishedAt, days));
@@ -374,37 +403,51 @@ export const contentPipelineFunction = inngest.createFunction(
   },
 );
 
-/** Record a human decision (from Slack, the app or ops) and rewrite the Slack message so it cannot be clicked twice. */
+function decisionDeps(): DecisionDeps {
+  return {
+    recordDecision: (approvalId, input) => recordDecision(approvalId, input),
+    loadApproval: (id) => loadApproval(id),
+    noticeFor: (approval) => noticeFor(approval.kind, approval.brief_id, approval.content_version_id, approval.id),
+    updateSlackDecision: (approval, decision, by, notice) => updateSlackDecision(approval, decision, by, notice, connectorContext()),
+  };
+}
+
+/** Record a human decision and retire its Slack buttons; see applyDecision. */
 export const approvalDecidedFunction = inngest.createFunction(
   { id: "approval-decided", triggers: [approvalDecided], retries: 2 },
-  async ({ event, step }) => {
-    const { approvalId, decision, by, source, note } = event.data;
-    const applied = await step.run("record", () =>
-      recordDecision(approvalId, { decision, by: { userId: by.userId ?? null, name: by.name ?? null }, source, note: note ?? null }),
-    );
-    if (!applied.applied) return { applied: false };
-    await step.run("update-slack", async () => {
-      const approval = await loadApproval(approvalId);
-      if (!approval?.slack_ts) return false;
-      const notice = await noticeFor(approval.kind, approval.brief_id, approval.content_version_id, approvalId);
-      if (!notice) return false;
-      return updateSlackDecision(approval, decision, by.name ?? by.userId ?? source, notice, connectorContext());
-    });
-    return { applied: true };
-  },
+  async ({ event, step }) => applyDecision(step, event.data, decisionDeps()),
 );
 
 async function noticeFor(kind: ApprovalKind, briefId: string | null, versionId: string | null, approvalId: string): Promise<ApprovalNotice | null> {
+  const previewUrl = approvalUrl(appUrl(), approvalId);
   if (kind === "brief" && briefId) {
     const brief = await loadBrief(briefId);
-    return brief ? { approvalId, kind, title: brief.spec.title, summary: brief.target_answer, previewUrl: `${appUrl()}/briefs/${briefId}` } : null;
+    return brief ? { approvalId, kind, title: brief.spec.title, summary: brief.target_answer, previewUrl } : null;
   }
   if (kind === "draft" && versionId) {
     const version = await loadVersion(versionId);
-    return version ? { approvalId, kind, title: version.title, summary: version.description ?? "", previewUrl: `${appUrl()}/content/${version.content_item_id}/versions/${versionId}` } : null;
+    return version ? { approvalId, kind, title: version.title, summary: version.description ?? "", previewUrl } : null;
   }
   return null;
 }
+
+/**
+ * Staff remediation: republish live pages that carry their FAQ section twice,
+ * then push their Webflow copies again (publishing-push, one target each).
+ * Model-free, idempotent.
+ */
+export const contentRemediateFaqFunction = inngest.createFunction(
+  { id: "content-remediate-faq", triggers: [contentRemediateFaqRequested], concurrency: [{ limit: concurrencyCap(1) }], retries: 1 },
+  async ({ event, step }) => {
+    const sites = await step.run("sites", () => sitesWithDuplicateFaq(event.data.siteId ?? null));
+    const results: FaqRemediation[] = [];
+    // One step per site: a timeout or a retry keeps the sites already fixed, and their audit rows.
+    for (const siteId of sites) results.push(...(await step.run(`remediate:${siteId}`, () => remediateDuplicateFaq(siteId, { actorUserId: event.data.requestedBy ?? null }))));
+    const pushes = results.flatMap((r) => r.repush.map((p) => publishingPushRequested.create({ siteId: r.siteId, orgId: r.orgId, contentItemId: p.contentItemId, targetId: p.targetId })));
+    if (pushes.length) await step.sendEvent("repush-webflow", pushes);
+    return { sites: results.length, pages: results.reduce((n, r) => n + r.paths.length, 0), skipped: results.reduce((n, r) => n + r.skipped.length, 0), repushed: pushes.length };
+  },
+);
 
 /** Rebuild one site's opportunity queue from its citation gaps. */
 export const opportunityScanFunction = inngest.createFunction(
@@ -423,4 +466,4 @@ export const opportunityScanNightly = inngest.createFunction(
   },
 );
 
-export const pipelineFunctions = [contentPipelineFunction, approvalDecidedFunction, opportunityScanFunction, opportunityScanNightly];
+export const pipelineFunctions = [contentPipelineFunction, approvalDecidedFunction, opportunityScanFunction, opportunityScanNightly, contentRemediateFaqFunction];

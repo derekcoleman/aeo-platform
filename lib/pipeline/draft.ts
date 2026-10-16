@@ -1,7 +1,7 @@
 import type postgres from "postgres";
 import type { TextModel } from "@/lib/ai/model";
 import { appDb } from "@/lib/db/app";
-import { runJsonTask } from "./model";
+import { runJsonTask, type LlmCallScope, type TaskBudget } from "./model";
 import { draftOutputSchema, type BriefSpec, type DraftOutput, type ModelRun } from "./types";
 
 /**
@@ -89,10 +89,11 @@ function publicFacts(b: BriefSpec) {
 export async function generateDraft(
   model: TextModel,
   ctx: DraftContext,
-  scope: { orgId: string; siteId: string; contentItemId?: string | null },
+  scope: LlmCallScope & { siteId: string },
   sql: postgres.Sql = appDb(),
+  budget: TaskBudget = {},
 ): Promise<{ draft: DraftOutput; run: ModelRun }> {
-  const { value, run } = await runJsonTask("pipeline.draft", model, { system: draftSystemPrompt(), prompt: draftPrompt(ctx), promptVersion: DRAFT_PROMPT_VERSION, maxTokens: 12_000, temperature: 0.5 }, draftOutputSchema, scope, sql);
+  const { value, run } = await runJsonTask("pipeline.draft", model, { system: draftSystemPrompt(), prompt: draftPrompt(ctx), promptVersion: DRAFT_PROMPT_VERSION, ...budget }, draftOutputSchema, scope, sql);
   return { draft: value, run };
 }
 

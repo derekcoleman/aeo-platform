@@ -110,13 +110,19 @@ export function renderArticleDocument({ config, host, page, slug }: DocumentInpu
  * A real named author with a visible last-updated date. Both are E-E-A-T
  * signals, and both are part of the argument that this is first-party content
  * the customer stands behind rather than vendor output on their subfolder.
+ *
+ * The byline is a <div>, not a <p>: parsers that take "the first paragraph
+ * after the H1" as the page's answer should find the answer, not the byline.
+ * The author is marked (rel="author", .aeo-author) so it reads as one.
  */
 function renderByline(head: PublishedPage["head"]): string {
   const bits: string[] = [];
   if (head.author?.name) {
     const name = escapeHtml(head.author.name);
     bits.push(
-      head.author.url ? `By <a href="${escapeHtml(head.author.url)}">${name}</a>` : `By ${name}`,
+      head.author.url
+        ? `By <a class="aeo-author" rel="author" href="${escapeHtml(head.author.url)}">${name}</a>`
+        : `By <span class="aeo-author">${name}</span>`,
     );
   }
   const shown = head.dateModified ?? head.datePublished;
@@ -124,7 +130,7 @@ function renderByline(head: PublishedPage["head"]): string {
     const label = head.dateModified && head.dateModified !== head.datePublished ? "Updated" : "Published";
     bits.push(`${label} <time datetime="${escapeHtml(shown)}">${escapeHtml(shown.slice(0, 10))}</time>`);
   }
-  return bits.length ? `<p class="aeo-meta">${bits.join(" · ")}</p>` : "";
+  return bits.length ? `<div class="aeo-meta">${bits.join(" · ")}</div>` : "";
 }
 
 /** The `.md` variant advertised by `rel="alternate"` and by llms.txt. */

@@ -3,7 +3,9 @@ import { WebflowApi, WebflowApiError, articleFieldData, suggestFieldMap, syncWeb
 import { cmsItemFromWebflow, pickPublicDomain, urlKey, webflowItemUrl } from "@/lib/refresh/inventory";
 import { memorySecrets } from "@/lib/secrets/vault";
 import { payloadHash, pushItemToTarget, webflowBodyHtml, type PublishTargetRow } from "@/lib/publishing/targets";
+import { composeVersion } from "@/lib/pipeline/compose";
 import { fakeSql } from "./helpers/fake-sql";
+import { author, brief, draft, site } from "./fixtures/pipeline";
 
 const f = (slug: string, type: string, displayName = slug, extra: Partial<WebflowField> = {}): WebflowField => ({ id: slug, slug, displayName, type, isRequired: false, isEditable: true, ...extra });
 
@@ -158,10 +160,10 @@ describe("pushItemToTarget", () => {
     config: { siteId: "site1", siteName: "Acme", collectionId: "col1", collectionName: "Blog Posts", fieldMap: { name: "name", slug: "slug", body: "post-body" }, publishLive: true, canonicalMode: "proxy", autoPush: true },
   };
   const article = { id: "ci1", site_id: "s1", slug: "sso-vs-scim", title: "SSO vs SCIM", description: "d", body_html: "<p>body</p>", frontmatter: { faq: [{ question: "Q?", answer: "A" }] }, published_at: new Date("2026-09-04T00:00:00Z"), canonical_url: "https://acme.com/resources/sso-vs-scim", author_name: null, version_id: "v1", origin: "pipeline" };
-  function ctxWith(fetchImpl: typeof fetch, existing: Record<string, unknown>[] = [], origin: "pipeline" | "cms" = "pipeline") {
+  function ctxWith(fetchImpl: typeof fetch, existing: Record<string, unknown>[] = [], origin: "pipeline" | "cms" = "pipeline", row: Record<string, unknown> = article) {
     const secrets = memorySecrets();
     const sql = fakeSql([
-      [/from content\.content_items ci/, () => [{ ...article, origin }]],
+      [/from content\.content_items ci/, () => [{ ...row, origin }]],
       [/from context\.context_connections where id/, () => [{ id: "conn1", org_id: "o1", site_id: "s1", provider: "webflow", status: "active", enabled: true, config: {}, scope: [], secret_ref: "vault:conn1", external_account_id: null, external_account_name: null, last_synced_at: null, last_error: null }]],
       [/select id, external_id, payload_hash, status from content\.external_publications/, () => existing],
     ]);
@@ -192,6 +194,18 @@ describe("pushItemToTarget", () => {
     expect(forced).toMatchObject({ ok: true, externalId: "item7" });
     expect(wf.calls.filter((c) => c.method === "PATCH")).toHaveLength(1);
     expect(wf.calls.filter((c) => c.method === "POST" && c.path === "/collections/col1/items")).toHaveLength(0);
+  });
+  it("pushes a stored version's body as QA scored it, its FAQ printed once", async () => {
+    // The draft step composed the FAQ into the body that insertVersion stored.
+    const drafted = composeVersion({ draft, brief, site, organization: { name: "Acme" }, author, slug: "sso-vs-scim", datePublished: new Date("2026-09-04T00:00:00Z") });
+    const wf = fakeWebflow();
+    const { ctx, secrets } = ctxWith(wf.fetchImpl, [], "pipeline", { ...article, body_html: drafted.bodyHtml, frontmatter: { faq: drafted.faq } });
+    await secrets.put("vault:conn1", "tok");
+    expect(await pushItemToTarget("ci1", target, ctx)).toMatchObject({ ok: true });
+    const body = String(wf.items.get("item1")!["post-body"]);
+    expect(body).toBe(drafted.bodyHtml);
+    expect(body.match(/Frequently asked questions/g)).toHaveLength(1);
+    expect(webflowBodyHtml({ body_html: drafted.bodyHtml, faq: drafted.faq })).toBe(drafted.bodyHtml);
   });
   it("never pushes a cms-origin item as a new post", async () => {
     const wf = fakeWebflow();

@@ -90,13 +90,13 @@ describe("article document", () => {
 
   it("renders a named byline and a visible updated date (E-E-A-T)", () => {
     const html = renderArticleDocument(input);
-    expect(html).toContain("Dana Reed");
+    expect(html).toContain('By <a class="aeo-author" rel="author" href="https://acme.com/team/dana">Dana Reed</a>');
     expect(html).toContain("Updated <time datetime=\"2026-08-20T00:00:00.000Z\">2026-08-20</time>");
   });
 
   it("owns the h1 and puts the byline under it, not above", () => {
     const html = renderArticleDocument(input);
-    expect(html).toContain("<h1>SSO vs SCIM</h1><p class=\"aeo-meta\">");
+    expect(html).toContain("<h1>SSO vs SCIM</h1><div class=\"aeo-meta\">");
     // Exactly one h1: the body must not carry its own.
     expect(html.match(/<h1[ >]/g)).toHaveLength(1);
   });

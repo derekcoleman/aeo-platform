@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { faqMarkdown, markerKeys, renderMarkdown, resolveMarkers, sanitizeArticleHtml, stripLeadingH1 } from "@/lib/pipeline/markdown";
+import { faqMarkdown, faqSectionCount, markerKeys, renderMarkdown, resolveMarkers, sanitizeArticleHtml, splitFaqSection, stripLeadingH1 } from "@/lib/pipeline/markdown";
 import { gartnerSource } from "./fixtures/pipeline";
 
 describe("resolveMarkers", () => {
@@ -72,5 +72,24 @@ describe("helpers", () => {
   it("faqMarkdown builds an H2 + H3 block, empty for no entries", () => {
     expect(faqMarkdown([])).toBe("");
     expect(faqMarkdown([{ question: " Q? ", answer: " A. " }])).toBe("## Frequently asked questions\n\n### Q?\n\nA.");
+  });
+
+  it("splitFaqSection moves the FAQ section into entries and back out of the body; faqSectionCount counts sections", () => {
+    const faq = [
+      { question: "Does SCIM need SSO?", answer: "No. They are separate protocols." },
+      { question: "Which comes first?", answer: "SSO, usually.\n\nThen SCIM." },
+    ];
+    const md = `Opening answer.\n\n## Setup\n\nSteps.\n\n${faqMarkdown(faq)}`;
+    expect(faqSectionCount(md)).toBe(1);
+    expect(splitFaqSection(md)).toEqual({ bodyMd: "Opening answer.\n\n## Setup\n\nSteps.", faq });
+    // Round trip: the body plus its entries recomposes to the same markdown.
+    expect([splitFaqSection(md).bodyMd, faqMarkdown(splitFaqSection(md).faq)].join("\n\n")).toBe(md);
+    // A section in the middle ends at the next H2; the rest stays in the body.
+    expect(splitFaqSection(`Intro.\n\n${faqMarkdown(faq.slice(0, 1))}\n\n## Pricing\n\nPlans.`)).toEqual({ bodyMd: "Intro.\n\n## Pricing\n\nPlans.", faq: faq.slice(0, 1) });
+    // No `###` questions under it: nothing to move, the body is left as it is.
+    expect(splitFaqSection("Intro.\n\n## Frequently asked questions\n\n**Q?** A.")).toEqual({ bodyMd: "Intro.\n\n## Frequently asked questions\n\n**Q?** A.", faq: [] });
+    expect(splitFaqSection("No FAQ here.")).toEqual({ bodyMd: "No FAQ here.", faq: [] });
+    expect(faqSectionCount(`${md}\n\n${faqMarkdown(faq)}`)).toBe(2);
+    expect(faqSectionCount("Intro mentions ## Frequently asked questions inline.")).toBe(0);
   });
 });

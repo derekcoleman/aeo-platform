@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { TextModel } from "@/lib/ai/model";
+import { ModelRefusalError, type CompletionOptions, type StopReason, type TextModel } from "@/lib/ai/model";
+import { ScoredJsonError } from "@/lib/ai/scored-json";
 import { briefPrompt, generateBrief, insertBrief, loadBrief, loadBriefBrain, materializeFacts, type BriefBrain } from "@/lib/pipeline/briefs";
 import { draftPrompt, generateDraft, slugify } from "@/lib/pipeline/draft";
-import { estimateCostUsd, modelIdFor } from "@/lib/pipeline/model";
+import { estimateCostUsd, modelIdFor, ModelTruncatedError, TASK_SETTINGS } from "@/lib/pipeline/model";
 import { fakeSql } from "./helpers/fake-sql";
 import { brief, draft, groundedBrief, internalFact, MANIFEST_ID, offeredFacts, ORG_ID, scimFact, SITE_ID, soc2Fact } from "./fixtures/pipeline";
 
@@ -14,6 +15,20 @@ function fakeModel(reply: unknown, id = "fake-model"): TextModel & { prompts: st
     async complete(prompt) {
       prompts.push(prompt);
       return { text: "```json\n" + JSON.stringify(reply) + "\n```", usage: { inputTokens: 1000, outputTokens: 500, model: id } };
+    },
+  };
+}
+
+/** A model that answers from a script, reporting how each answer stopped, and records the options it was called with. */
+function scriptedModel(replies: { text: string; stopReason?: StopReason; refusalCategory?: string | null }[], id = "claude-opus-5-5"): TextModel & { calls: CompletionOptions[] } {
+  const calls: CompletionOptions[] = [];
+  return {
+    id,
+    calls,
+    async complete(_prompt, opts = {}) {
+      calls.push(opts);
+      const r = replies.shift()!;
+      return { text: r.text, usage: { inputTokens: 1000, outputTokens: 500, model: id }, stopReason: r.stopReason, refusalCategory: r.refusalCategory ?? null };
     },
   };
 }
@@ -139,11 +154,83 @@ describe("generate*", () => {
   });
 });
 
+describe("runJsonTask stop reasons", () => {
+  const ledger = (sql: ReturnType<typeof fakeSql>) => sql.queries.filter((q) => q.text.includes("insert into ops.llm_calls"));
+
+  it("sends the task's budget and effort, never a temperature", async () => {
+    const model = scriptedModel([{ text: JSON.stringify(brief), stopReason: "end_turn" }]);
+    const { run } = await generateBrief(model, briefCtx, { orgId: ORG_ID, siteId: SITE_ID }, fakeSql());
+    expect(model.calls[0]).toMatchObject({ json: true, maxTokens: TASK_SETTINGS["pipeline.brief"].maxTokens, effort: "high" });
+    expect(model.calls[0]).not.toHaveProperty("temperature");
+    expect(run.stopReason).toBe("end_turn");
+    expect(TASK_SETTINGS["pipeline.draft"]).toEqual({ maxTokens: 20_000, effort: "high" });
+  });
+
+  it("retries a draft cut off at max_tokens once with more room, and records both calls", async () => {
+    const sql = fakeSql();
+    const model = scriptedModel([
+      { text: '{"title": "SSO vs SCIM", "bodyMd": "SSO lets a person', stopReason: "max_tokens" },
+      { text: JSON.stringify(draft), stopReason: "end_turn" },
+    ]);
+    const { draft: out, run } = await generateDraft(model, { brief, author: { name: "D" }, site: { organizationName: "Acme", domain: "acme.com" } }, { orgId: ORG_ID, siteId: SITE_ID, contentItemId: "item-1" }, sql);
+    expect(out.title).toBe(draft.title);
+    expect(model.calls.map((c) => c.maxTokens)).toEqual([20_000, 30_000]);
+    expect(run.stopReason).toBe("end_turn");
+    const rows = ledger(sql);
+    expect(rows).toHaveLength(2);
+    // New ledger columns go before content_item_id, which stays last.
+    for (const r of rows) expect(r.values.at(-1)).toBe("item-1");
+  });
+
+  it("names the truncation when the retry is cut off too", async () => {
+    const sql = fakeSql();
+    const cut = { text: '{"title": "SSO vs', stopReason: "max_tokens" as const };
+    const err = await generateDraft(scriptedModel([cut, cut]), { brief, author: { name: "D" }, site: { organizationName: "Acme", domain: "acme.com" } }, { orgId: ORG_ID, siteId: SITE_ID }, sql).catch((e) => e);
+    expect(err).toBeInstanceOf(ScoredJsonError);
+    expect(err.message).toMatch(/cut off at max_tokens=30000/);
+    expect(ledger(sql)).toHaveLength(2);
+  });
+
+  it("hands a cut-off call back to a caller that retries in its own step, with the budget the retry should get", async () => {
+    const ctx = { brief, author: { name: "D" }, site: { organizationName: "Acme", domain: "acme.com" } };
+    const scope = { orgId: ORG_ID, siteId: SITE_ID, contentItemId: "item-1" };
+    const sql = fakeSql();
+    const cut = scriptedModel([{ text: '{"title": "SSO vs', stopReason: "max_tokens" }]);
+    const err = await generateDraft(cut, ctx, scope, sql, { maxTokens: TASK_SETTINGS["pipeline.draft"].maxTokens, retryTruncated: false }).catch((e) => e);
+    expect(err).toBeInstanceOf(ModelTruncatedError);
+    expect(err).toMatchObject({ model: "claude-opus-5-5", maxTokens: 20_000, retryMaxTokens: 30_000 });
+    // One call, and it is in the ledger before the step returns.
+    expect(cut.calls).toHaveLength(1);
+    expect(ledger(sql)).toHaveLength(1);
+
+    // The retry step asks for the larger budget.
+    const roomy = scriptedModel([{ text: JSON.stringify(draft), stopReason: "end_turn" }]);
+    const { draft: out } = await generateDraft(roomy, ctx, scope, sql, { maxTokens: err.retryMaxTokens, retryTruncated: false });
+    expect(out.title).toBe(draft.title);
+    expect(roomy.calls[0]!.maxTokens).toBe(30_000);
+
+    const briefCut = scriptedModel([{ text: "{", stopReason: "max_tokens" }]);
+    await expect(generateBrief(briefCut, briefCtx, { orgId: ORG_ID, siteId: SITE_ID }, fakeSql(), { retryTruncated: false })).rejects.toMatchObject({ maxTokens: 16_000, retryMaxTokens: 24_000 });
+  });
+
+  it("records a refusal and throws ModelRefusalError instead of parsing it", async () => {
+    const sql = fakeSql();
+    const err = await generateBrief(scriptedModel([{ text: "", stopReason: "refusal", refusalCategory: "cyber" }]), briefCtx, { orgId: ORG_ID, siteId: SITE_ID }, sql).catch((e) => e);
+    expect(err).toBeInstanceOf(ModelRefusalError);
+    expect(err).toMatchObject({ model: "claude-opus-5-5", category: "cyber" });
+    expect(ledger(sql)).toHaveLength(1);
+  });
+});
+
 describe("model helpers", () => {
   it("modelIdFor prefers the task env, then the default env, then the built-in", () => {
     const base = { NODE_ENV: "test" } as NodeJS.ProcessEnv;
-    expect(modelIdFor("pipeline.draft", base)).toBe("claude-opus-5");
-    expect(modelIdFor("pipeline.qa.judge", base)).toBe("claude-sonnet-5");
+    expect(modelIdFor("pipeline.brief", base)).toBe("claude-opus-5-5");
+    expect(modelIdFor("pipeline.draft", base)).toBe("claude-opus-5-5");
+    expect(modelIdFor("pipeline.qa.judge", base)).toBe("claude-sonnet-5-5");
+    expect(modelIdFor("context.manifest.draft", base)).toBe("claude-sonnet-5-5");
+    expect(modelIdFor("site.profile.extract", base)).toBe("claude-sonnet-5-5");
+    expect(modelIdFor("context.facts.extract", base)).toBe("claude-haiku-5-5");
     expect(modelIdFor("pipeline.draft", { ...base, AEO_MODEL_DEFAULT: "x" })).toBe("x");
     expect(modelIdFor("pipeline.draft", { ...base, AEO_MODEL_DEFAULT: "x", AEO_MODEL_DRAFT: "y" })).toBe("y");
   });

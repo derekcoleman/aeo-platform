@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { citationStatus, POST_PUBLISH_WINDOWS_DAYS, windowDate } from "@/lib/pipeline/loop";
+import type { GateStep } from "@/lib/pipeline/gate";
+import { citationStatus, loadPublishedAt, POST_PUBLISH_WINDOWS_DAYS, windowDate, windowsStart } from "@/lib/pipeline/loop";
 import { fakeSql } from "./helpers/fake-sql";
 
 const fetched = new Date("2026-09-01T09:00:00.000Z");
@@ -51,5 +52,46 @@ describe("post-publish windows", () => {
     expect([...POST_PUBLISH_WINDOWS_DAYS]).toEqual([14, 30, 60]);
     expect(windowDate(fetched, 14).toISOString()).toBe("2026-09-15T09:00:00.000Z");
     expect(windowDate(fetched, 60).toISOString()).toBe("2026-10-31T09:00:00.000Z");
+  });
+});
+
+describe("windowsStart", () => {
+  /** `run` executes and round-trips through JSON, as a memoised step result does. */
+  function fakeStep() {
+    const log: string[] = [];
+    const step = {
+      async run(id: string, fn: () => unknown) {
+        log.push(id);
+        return JSON.parse(JSON.stringify(await fn()));
+      },
+    } as unknown as Pick<GateStep, "run">;
+    return { step, log };
+  }
+
+  it("starts from the publish step's memoised timestamp, with no extra step", async () => {
+    const { step, log } = fakeStep();
+    const at = await windowsStart(step, { publishedAt: fetched.toISOString() }, async () => {
+      throw new Error("not read");
+    });
+    expect(at.toISOString()).toBe(fetched.toISOString());
+    expect(log).toEqual([]);
+  });
+
+  it("replays a publish result from before the timestamp existed: reads the item's publish time in its own step", async () => {
+    // What a run published before the fix memoised: no publishedAt.
+    const old: { path: string; canonicalUrl: string; etag: string; cms: boolean; publishedAt?: string } = { path: "/resources/sso-vs-scim", canonicalUrl: "https://acme.com/resources/sso-vs-scim", etag: '"e"', cms: false };
+    const sql = fakeSql([[/from content\.content_items/, () => [{ published_at: fetched }]]]);
+    const { step, log } = fakeStep();
+    const at = await windowsStart(step, old, () => loadPublishedAt("item-1", sql));
+    expect(at.toISOString()).toBe(fetched.toISOString());
+    expect(windowDate(at, 14).toISOString()).toBe("2026-09-15T09:00:00.000Z");
+    expect(log).toEqual(["published-at"]);
+    expect(sql.queries[0]!.values).toEqual(["item-1"]);
+  });
+
+  it("falls back to now when the item has no publish time, never to an Invalid Date", async () => {
+    const { step } = fakeStep();
+    const at = await windowsStart(step, {}, async () => null);
+    expect(Number.isNaN(at.getTime())).toBe(false);
   });
 });

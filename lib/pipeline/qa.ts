@@ -1,5 +1,6 @@
 import { runPageRules, type StructureScore } from "@/lib/aeo/rules";
 import { htmlToMarkdown, parseHtml } from "@/lib/audit/html";
+import { safeFetch } from "@/lib/fetch";
 import { validateArticleJsonLd } from "@/lib/render/jsonld";
 import { assertNoEdgeHostname } from "@/lib/tenancy/urls";
 import { ANY_MARKER_RE, factMarkerKeys, markerKeys, resolveMarkers, stripFactMarkers } from "./markdown";
@@ -13,6 +14,8 @@ import type { BriefFact, Intent, QaGateResult, QaReport, SourceSpec } from "./ty
  * statistic without a `{{src:key}}` marker is a hard failure, every marker
  * must resolve to a ledger row, and (when a fetcher is supplied) the recorded
  * verbatim quote must appear at the URL. A string assertion, not a judgment.
+ * Those URLs come from model output, so in production they are fetched
+ * through safeFetch: SSRF-checked on every redirect hop, size-capped.
  *
  * The grounding gate is its twin for the company's own claims: every
  * `{{fact:key}}` must be a fact the brief offered, still verified, currently
@@ -47,6 +50,14 @@ export interface QaInput {
   facts?: BriefFact[];
   intent: Intent;
   jsonLd?: unknown;
+  /**
+   * The full article document (composeQaDocument). When present the
+   * structure gate scores it, so head, JSON-LD, byline and dates count the
+   * way they will on the published page.
+   */
+  documentHtml?: string;
+  /** The article's canonical URL, scored as the page URL with documentHtml. */
+  canonicalUrl?: string;
   now?: Date;
 }
 
@@ -59,7 +70,9 @@ export interface FactCheck {
 
 export interface QaOptions {
   structureMin?: number;
-  /** Supply a fetcher to live-verify every cited source. Omit to skip (offline / tests). */
+  /** Live-verify every cited source with this fetcher (production: safeSourceFetcher()). Omit both to skip. */
+  fetchSource?: SourceFetcher;
+  /** A raw fetch, for tests and fixtures; fetchSource wins when both are given. */
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
@@ -72,9 +85,12 @@ export interface QaOptions {
 // ── structure ──────────────────────────────────────────────────────────────
 
 export function structureGate(input: QaInput, min: number): QaGateResult & { structure: StructureScore } {
-  const html = `<!doctype html><html><head><title>${escapeHtml(input.title)}</title></head><body><main><h1>${escapeHtml(input.title)}</h1>${input.bodyHtml}</main></body></html>`;
+  const html =
+    input.documentHtml ??
+    `<!doctype html><html><head><title>${escapeHtml(input.title)}</title></head><body><main><h1>${escapeHtml(input.title)}</h1>${input.bodyHtml}</main></body></html>`;
   const $ = parseHtml(html);
-  const structure = runPageRules({ url: "https://preview.invalid/", html, $, markdown: htmlToMarkdown(html), intent: input.intent, now: input.now });
+  const url = (input.documentHtml && input.canonicalUrl) || "https://preview.invalid/";
+  const structure = runPageRules({ url, html, $, markdown: htmlToMarkdown(html), intent: input.intent, now: input.now });
   const failing = structure.findings.filter((f) => !f.passed && !f.notApplicable);
   return {
     gate: "structure",
@@ -127,16 +143,63 @@ export function normalizeForMatch(s: string): string {
     .trim();
 }
 
+/** Fetch one cited URL: status and body, or a throw (blocked, unreachable, timed out). */
+export type SourceFetcher = (url: string, timeoutMs: number) => Promise<{ status: number; ok: boolean; body: string }>;
+
+const VERIFIER_USER_AGENT = "aeo-platform-source-verifier/1.0";
+const VERIFIER_ACCEPT = "text/html,text/plain,*/*";
+/** A source page larger than this is truncated; the quote is near the top of anything we would cite. */
+export const SOURCE_MAX_BYTES = 2_000_000;
+
+/**
+ * The production fetcher: safeFetch refuses private, loopback and metadata
+ * addresses (literal or resolved) on every redirect hop and caps the body.
+ * No retries: a flaky source fails verification and the draft drops it.
+ * `timeoutMs` is one deadline for the whole fetch, redirects and body
+ * included: a source that sends headers and then stalls must not hold the
+ * draft step (and its model call) past the route's time limit.
+ */
+export function safeSourceFetcher(fetchImpl?: typeof fetch): SourceFetcher {
+  return async (url, timeoutMs) => {
+    const res = await safeFetch(url, {
+      timeoutMs,
+      signal: AbortSignal.timeout(timeoutMs),
+      maxBytes: SOURCE_MAX_BYTES,
+      maxRetries: 0,
+      userAgent: VERIFIER_USER_AGENT,
+      headers: { accept: VERIFIER_ACCEPT },
+      ...(fetchImpl ? { fetchImpl } : {}),
+    });
+    return { status: res.status, ok: res.ok, body: res.body };
+  };
+}
+
+/** A bare fetch as a SourceFetcher, for tests and fixtures. No SSRF checks. */
+export function plainSourceFetcher(fetchImpl: typeof fetch): SourceFetcher {
+  return async (url, timeoutMs) => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(url, { signal: ctl.signal, headers: { "user-agent": VERIFIER_USER_AGENT, accept: VERIFIER_ACCEPT }, redirect: "follow" });
+      return { status: res.status, ok: res.ok, body: res.ok ? await res.text() : "" };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
 /** Fetch each source and assert its verbatim quote appears in the page text. */
 export async function verifySources(sources: SourceSpec[], fetchImpl: typeof fetch, timeoutMs = 15_000): Promise<SourceVerification[]> {
+  return verifySourcesWith(sources, plainSourceFetcher(fetchImpl), timeoutMs);
+}
+
+export async function verifySourcesWith(sources: SourceSpec[], fetchSource: SourceFetcher, timeoutMs = 15_000): Promise<SourceVerification[]> {
   return Promise.all(
     sources.map(async (src): Promise<SourceVerification> => {
-      const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), timeoutMs);
       try {
-        const res = await fetchImpl(src.url, { signal: ctl.signal, headers: { "user-agent": "aeo-platform-source-verifier/1.0", accept: "text/html,text/plain,*/*" }, redirect: "follow" });
+        const res = await fetchSource(src.url, timeoutMs);
         if (!res.ok) return { key: src.key, url: src.url, verified: false, status: res.status, reason: `http ${res.status}` };
-        const body = await res.text();
+        const body = res.body;
         const $ = parseHtml(body);
         $("script, style, noscript, svg").remove();
         const text = normalizeForMatch($("body").length ? $("body").text() : body);
@@ -148,8 +211,6 @@ export async function verifySources(sources: SourceSpec[], fetchImpl: typeof fet
         return { key: src.key, url: src.url, verified: false, status: res.status, reason: "quote not found at url" };
       } catch (e) {
         return { key: src.key, url: src.url, verified: false, status: null, reason: `fetch failed: ${(e as Error).message}` };
-      } finally {
-        clearTimeout(timer);
       }
     }),
   );
@@ -158,7 +219,8 @@ export async function verifySources(sources: SourceSpec[], fetchImpl: typeof fet
 export async function sourcesGate(input: QaInput, opts: QaOptions): Promise<QaGateResult & { verifications: SourceVerification[] }> {
   const { unresolved, cited } = resolveMarkers(input.bodyMd, input.sources);
   const unmarked = unmarkedStatistics(input.bodyMd);
-  const verifications = opts.fetchImpl ? await verifySources(cited, opts.fetchImpl, opts.timeoutMs) : [];
+  const fetchSource = opts.fetchSource ?? (opts.fetchImpl ? plainSourceFetcher(opts.fetchImpl) : null);
+  const verifications = fetchSource ? await verifySourcesWith(cited, fetchSource, opts.timeoutMs) : [];
   const failedVerification = verifications.filter((v) => !v.verified);
   const passed = unresolved.length === 0 && unmarked.length === 0 && failedVerification.length === 0;
   return {
@@ -169,7 +231,7 @@ export async function sourcesGate(input: QaInput, opts: QaOptions): Promise<QaGa
       cited: cited.map((s) => s.key),
       unresolved,
       unmarkedStatistics: unmarked,
-      verified: opts.fetchImpl ? verifications.filter((v) => v.verified).length : null,
+      verified: fetchSource ? verifications.filter((v) => v.verified).length : null,
       failedVerification,
     },
     verifications,
@@ -240,6 +302,8 @@ export function mechanicsGate(input: QaInput): QaGateResult {
     if (!($(img).attr("alt") ?? "").trim()) problems.push(`image without alt: ${$(img).attr("src") ?? "?"}`);
   });
   if ($("h1").length > 0) problems.push("body contains an H1 (the document layer owns the title)");
+  const faqSections = $("h2").filter((_, h) => /^\s*frequently asked questions\s*$/i.test($(h).text())).length;
+  if (faqSections > 1) problems.push(`the FAQ section appears ${faqSections} times; return FAQ entries only in the faq array, never as a section in bodyMd`);
   if (input.jsonLd !== undefined) {
     const issues = validateArticleJsonLd(input.jsonLd as Record<string, unknown>);
     for (const i of issues) problems.push(`json-ld: ${i}`);

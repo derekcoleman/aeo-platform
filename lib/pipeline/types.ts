@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { StopReason } from "@/lib/ai/model";
 
 /**
  * Structured shapes that cross pipeline stages. Everything a model returns is
@@ -86,6 +87,8 @@ export interface ModelRun {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  /** How the call that produced this output stopped (absent when the model did not say). */
+  stopReason?: StopReason;
 }
 
 export type ApprovalDecision = "approve" | "changes" | "regenerate";

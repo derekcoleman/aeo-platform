@@ -9,7 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { OPS_SECTIONS, opsHref, resolveTab, settingsHref } from "@/lib/app/nav";
-import { runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
+import { remediateFaqAction, runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
 import { opsFailedSyncs, opsLlmSpend, opsLlmSpendForSite, opsOrganizations, opsSites, type SiteSpendRow } from "@/lib/app/queries";
 import { auditLog } from "@/lib/app/org";
 import { loadSite } from "@/lib/app/store";
@@ -47,6 +47,9 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         {site ? null : <Badge variant="secondary">{sites.length} sites</Badge>}
         {failingSites ? <Badge variant="destructive">{site ? "proxy failing" : `${failingSites} failing`}</Badge> : <Badge variant="success">{site ? "proxy healthy" : "all healthy"}</Badge>}
         {failed.length ? <Badge variant="warning">{failed.length} failed syncs / 7d</Badge> : null}
+        <ActionButton size="sm" variant="outline" action={remediateFaqAction.bind(null, site?.id ?? null)} done="queued" title="Republish pages whose FAQ section was printed twice and push their Webflow copies again. No model call; the audit log lists the paths.">
+          Fix duplicate FAQs
+        </ActionButton>
       </PageHeader>
       <UrlTabs defaultValue="sites" values={sections.map((s) => s.value)}>
         <TabsList>

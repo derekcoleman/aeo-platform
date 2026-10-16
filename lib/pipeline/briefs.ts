@@ -6,7 +6,7 @@ import { formatContextBlock, retrieveContext } from "@/lib/context/retrieve";
 import { appDb } from "@/lib/db/app";
 import { loadExistingContent, type ExistingContent } from "@/lib/refresh/publish";
 import { structuralTargetBlock as structuralTargetBlock_, structuralTargetFor } from "@/lib/strategy/competitors";
-import { runJsonTask } from "./model";
+import { runJsonTask, type LlmCallScope, type TaskBudget } from "./model";
 import { briefSpecSchema, type BriefFact, type BriefSpec, type ModelRun } from "./types";
 
 /**
@@ -129,6 +129,7 @@ export function existingContentBlock(e: ExistingContent): string {
     `Current title: ${e.title}`,
     e.description ? `Current summary: ${e.description}` : "",
     `Current article (Markdown):\n${e.bodyMd}`,
+    e.faq.length ? `Current FAQ:\n${e.faq.map((f) => `- ${f.question}`).join("\n")}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -137,10 +138,11 @@ export function existingContentBlock(e: ExistingContent): string {
 export async function generateBrief(
   model: TextModel,
   ctx: BriefContext,
-  scope: { orgId: string; siteId: string },
+  scope: LlmCallScope & { siteId: string },
   sql: postgres.Sql = appDb(),
+  budget: TaskBudget = {},
 ): Promise<{ spec: BriefSpec; run: ModelRun }> {
-  const { value, run } = await runJsonTask("pipeline.brief", model, { system: briefSystemPrompt(), prompt: briefPrompt(ctx), promptVersion: BRIEF_PROMPT_VERSION, temperature: 0.4 }, briefSpecSchema, scope, sql);
+  const { value, run } = await runJsonTask("pipeline.brief", model, { system: briefSystemPrompt(), prompt: briefPrompt(ctx), promptVersion: BRIEF_PROMPT_VERSION, ...budget }, briefSpecSchema, scope, sql);
   const spec = materializeFacts(value, ctx.brain ?? null);
   return { spec: { ...spec, format: ctx.format ?? spec.format ?? null, structuralTarget: ctx.structuralTarget ?? null }, run };
 }
