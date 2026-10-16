@@ -1,5 +1,6 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
+import { NATIVE_PROVIDERS, type SnapshotProvider } from "@/lib/demand/store";
 
 /**
  * Read models for the Strategy page. Native numbers come from our own SERP
@@ -46,7 +47,7 @@ export async function listPrompts(siteId: string, opts: { topicId?: string | nul
     from measure.questions q
     left join lateral (
       select ss.id, ss.aio_triggered from measure.serp_snapshots ss
-      where ss.question_id = q.id and ss.provider in ('dataforseo', 'serpapi') order by ss.fetched_at desc limit 1
+      where ss.question_id = q.id and ss.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) order by ss.fetched_at desc limit 1
     ) s on true
     left join profound p on p.question_id = q.id
     where q.site_id = ${siteId} and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
@@ -102,15 +103,27 @@ export interface CompetitorDomainRow {
   providers: string[];
 }
 
-/** Who gets cited instead of us, last 30 days, native and Profound sources labelled. */
-export async function competitorDomains(siteId: string, opts: { topicId?: string | null; limit?: number } = {}, sql: postgres.Sql = appDb()): Promise<CompetitorDomainRow[]> {
+/**
+ * Who gets cited instead of us, last 30 days. Native by default: Google AI
+ * Overview citations from our own trackers, `providers` naming which vendor
+ * saw each. Profound is asked for separately (`providers: ["profound"]`) and
+ * shown as its own list, every surface counted, since its answers come from
+ * other engines and are never AI Overview numbers.
+ */
+export async function competitorDomains(
+  siteId: string,
+  opts: { topicId?: string | null; limit?: number; providers?: readonly SnapshotProvider[] } = {},
+  sql: postgres.Sql = appDb(),
+): Promise<CompetitorDomainRow[]> {
+  const providers = [...(opts.providers ?? NATIVE_PROVIDERS)];
   return sql<CompetitorDomainRow[]>`
     select c.domain, count(*)::int as citations, count(distinct s.question_id)::int as questions,
            array_agg(distinct s.provider::text order by s.provider::text) as providers
     from measure.serp_citations c
     join measure.serp_snapshots s on s.id = c.serp_snapshot_id
     join measure.questions q on q.id = s.question_id
-    where c.site_id = ${siteId} and not c.is_owned and c.surface = 'ai_overview' and s.fetched_at >= now() - interval '30 days'
+    where c.site_id = ${siteId} and not c.is_owned and s.provider = any (${providers}::measure.serp_provider[])
+      and (c.surface = 'ai_overview' or s.provider = 'profound') and s.fetched_at >= now() - interval '30 days'
       and not q.excluded and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
     group by c.domain order by citations desc limit ${opts.limit ?? 15}`;
 }

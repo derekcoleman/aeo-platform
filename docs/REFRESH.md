@@ -12,7 +12,7 @@ approval — before updating the post **in place**, same item, same URL.
 |---|---|---|
 | Which collection each item lives in, when it was last modified and last published, its body | Webflow Data API v2, every collection the site token can see | `content.cms_items` |
 | Clicks, impressions, position per page, current 28 days vs the previous 28 | Search Console, site-wide (not filtered to the proxy prefix) | `measure.external_metrics`, surface `gsc_page_window` |
-| How often the URL was cited in AI answers, last 30 days vs the 30 before | Our SERP trackers (`dataforseo`, `serpapi`) and, labelled separately, Profound | `measure.serp_citations` joined on `content.url_key(url)` |
+| How often the URL was cited in AI answers, last 30 days vs the 30 before | Our SERP trackers (`dataforseo`, `serpapi`; Google AI Overview citations only, never an organic ranking) and, labelled separately, Profound (any engine) | `measure.serp_citations` joined on `content.url_key(url)` |
 
 The three meet on one key: `content.url_key()` in SQL and `urlKey()` in
 `lib/refresh/inventory.ts` both reduce a URL to `host/path` without scheme,
@@ -55,7 +55,12 @@ always shown as Profound's.
 
 Never a candidate: drafts, archived items, items deleted in the CMS, items
 without a body, anything modified in the last 45 days (engines have not
-caught up), and anything with a refresh already queued or running.
+caught up), anything with a refresh already queued or running, and a
+protected winner: cited in the AI Overview by our own trackers on at least
+as many questions as the 30 days before, with Search Console clicks at or
+above the inventory's median and neither clicks nor impressions declining
+("protected: cited and holding"). A rewrite is the likeliest way to lose
+what such a page earns.
 
 ## The queue
 

@@ -77,14 +77,32 @@ export interface TopicWeight {
   status: "active" | "paused" | "archived";
 }
 
+/** Business value a question on no topic gets when the site has none to compare it with: neutral. */
+export const NEUTRAL_BUSINESS_VALUE = 50;
+
+/**
+ * Business value for a question on no topic: never above what the site's
+ * median active topic is worth (lower median, so a site with priority 1 and 2
+ * topics gives 20), and never above 60. The old neutral 50 put any stray
+ * question ahead of every priority-1 and priority-2 topic the customer chose.
+ */
+export function defaultBusinessValue(topics: Map<string, TopicWeight>): number {
+  const priorities = [...topics.values()].filter((t) => t.status === "active").map((t) => t.priority).sort((a, b) => a - b);
+  if (priorities.length === 0) return NEUTRAL_BUSINESS_VALUE;
+  const median = priorities[Math.floor((priorities.length - 1) / 2)]!;
+  return Math.min(60, median * 20);
+}
+
 /**
  * Citation gaps → opportunities. The gap is the strongest signal we have, so
- * it dominates. A topic's priority moves business value (5 = 100, 1 = 20);
- * a paused topic contributes nothing new; the topic's first preferred format
- * becomes the brief's format hint.
+ * it dominates. A topic's priority moves business value (5 = 100, 1 = 20),
+ * and a question on no topic is worth at most the median topic
+ * (defaultBusinessValue); a paused topic contributes nothing new; the
+ * topic's first preferred format becomes the brief's format hint.
  */
 export function opportunitiesFromCitationGaps(gaps: CitationGap[], topics: Map<string, TopicWeight> = new Map()): OpportunityInput[] {
   const out: OpportunityInput[] = [];
+  const topicless = defaultBusinessValue(topics);
   for (const g of gaps) {
     const topic = g.topic_id ? topics.get(g.topic_id) : undefined;
     if (topic && topic.status !== "active") continue;
@@ -93,7 +111,7 @@ export function opportunitiesFromCitationGaps(gaps: CitationGap[], topics: Map<s
       demand: g.demand_score,
       citationGap: Math.min(100, 60 + competitors * 10),
       difficulty: Math.min(100, 30 + competitors * 8),
-      businessValue: topic ? topic.priority * 20 : undefined,
+      businessValue: topic ? topic.priority * 20 : topicless,
     });
     out.push({
       source: "citation_gap",
@@ -116,7 +134,18 @@ export interface UpsertSummary {
   updated: number;
 }
 
-/** Insert new opportunities; re-score open ones; never touch queued/in-progress/published/dismissed rows. */
+/**
+ * Insert new opportunities; re-score open ones; never touch queued/in-progress/
+ * published/dismissed rows.
+ *
+ * Several producers share a dedupe key (a citation gap and an unanswered-
+ * question signal are both `question:<id>`), and each used to overwrite the
+ * other's evidence and score. Now every producer's evidence is kept under
+ * `evidence.bySource.<source>` (the row's first producer is filed there the
+ * first time another one writes), the top-level keys merge with the latest
+ * producer's winning, and the score is replaced only when the row's own
+ * source re-scores it; another producer can only raise it.
+ */
 export async function upsertOpportunities(siteId: string, rows: OpportunityInput[], sql: postgres.Sql = appDb()): Promise<UpsertSummary> {
   let inserted = 0;
   let updated = 0;
@@ -126,7 +155,13 @@ export async function upsertOpportunities(siteId: string, rows: OpportunityInput
       values (${siteId}, ${r.source}, ${r.title}, ${r.targetQuery}, ${r.questionId ?? null}, ${r.contentItemId ?? null}, ${r.signalId ?? null}, ${r.topicId ?? null}, ${r.format ?? null},
               ${r.score}, ${sql.json(r.scoreBreakdown as never)}, ${sql.json(r.evidence as never)}, ${r.dedupeKey})
       on conflict (site_id, dedupe_key) do update
-        set score = excluded.score, score_breakdown = excluded.score_breakdown, evidence = excluded.evidence,
+        set score = case when content.opportunities.source = excluded.source then excluded.score
+                         else greatest(content.opportunities.score, excluded.score) end,
+            score_breakdown = case when content.opportunities.source = excluded.source or excluded.score > content.opportunities.score
+                                   then excluded.score_breakdown else content.opportunities.score_breakdown end,
+            evidence = (content.opportunities.evidence - 'bySource') || excluded.evidence || jsonb_build_object('bySource',
+              coalesce(content.opportunities.evidence->'bySource', jsonb_build_object(content.opportunities.source::text, content.opportunities.evidence))
+              || jsonb_build_object(excluded.source::text, excluded.evidence)),
             signal_id = coalesce(excluded.signal_id, content.opportunities.signal_id),
             topic_id = coalesce(excluded.topic_id, content.opportunities.topic_id),
             format = coalesce(content.opportunities.format, excluded.format), updated_at = now()
@@ -145,6 +180,7 @@ export async function loadTopicWeights(siteId: string, sql: postgres.Sql = appDb
 }
 
 export async function scanSite(siteId: string, sql: postgres.Sql = appDb(), limit = 100): Promise<UpsertSummary & { gaps: number }> {
+  // Topic weights also set what a question on no topic is worth (defaultBusinessValue).
   const [gaps, topics] = await Promise.all([citationGaps(siteId, limit, sql), loadTopicWeights(siteId, sql)]);
   const summary = await upsertOpportunities(siteId, opportunitiesFromCitationGaps(gaps, topics), sql);
   return { ...summary, gaps: gaps.length };
@@ -171,7 +207,11 @@ export async function createManualOpportunity(siteId: string, input: ManualOppor
     on conflict (site_id, dedupe_key) do update
       set status = case when content.opportunities.status in ('dismissed', 'failed', 'published') then 'open' else content.opportunities.status end,
           title = excluded.title, topic_id = coalesce(excluded.topic_id, content.opportunities.topic_id), format = coalesce(excluded.format, content.opportunities.format),
-          score = greatest(content.opportunities.score, excluded.score), evidence = excluded.evidence, updated_at = now()
+          score = greatest(content.opportunities.score, excluded.score),
+          evidence = (content.opportunities.evidence - 'bySource') || excluded.evidence || jsonb_build_object('bySource',
+            coalesce(content.opportunities.evidence->'bySource', jsonb_build_object(content.opportunities.source::text, content.opportunities.evidence))
+            || jsonb_build_object(excluded.source::text, excluded.evidence)),
+          updated_at = now()
     returning id`;
   if (!row) throw new Error("opportunity insert returned no row");
   return row;

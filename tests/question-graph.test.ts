@@ -6,9 +6,13 @@ import {
   clusterQuestions,
   dedupeByEmbedding,
   demandScore,
+  discoverQuestions,
   expandSeed,
+  finalizeQuestionGraph,
   isQuestionLike,
+  mergeQuestionNodes,
   normalizeQuestion,
+  type QuestionNode,
   type ScoredQuestion,
 } from "@/lib/demand/question-graph";
 import type { SerpClient, SerpQuery } from "@/lib/serp";
@@ -125,6 +129,58 @@ describe("buildQuestionGraph", () => {
     // "?"-only variant collapses in normalisation, so both remain distinct texts
     expect(g.clusters.length).toBeGreaterThanOrEqual(2);
     expect(g.questions.every((q) => q.clusterIndex !== undefined)).toBe(true);
+  });
+});
+
+describe("discovery in batches (demand-mine's steps)", () => {
+  // Both seeds surface the same two questions; one of them leads one level deeper.
+  const suggestions = {
+    "okta vs": ["okta vs entra which is better", "what is scim provisioning"],
+    "entra vs": ["okta vs entra which is better"],
+    "what entra": ["what is scim provisioning"],
+    "what is scim provisioning": ["what is scim provisioning in okta"],
+  };
+  const shape = (qs: ScoredQuestion[]) =>
+    qs.map((q) => ({ q: q.normalized, seen: q.seenCount, demand: q.demandScore, depth: q.depth, source: q.source })).sort((a, b) => a.q.localeCompare(b.q));
+
+  it("adds up to one walk over every seed: same sightings, same scores, no query issued twice", async () => {
+    const whole = fakeClient(suggestions);
+    const g = await buildQuestionGraph(whole, tenant, { seeds: ["okta", "entra"], locale, depth: 2 });
+
+    const split = fakeClient(suggestions);
+    const a = await discoverQuestions(split, tenant, { seeds: ["okta"], locale, depth: 2 });
+    const b = await discoverQuestions(split, tenant, { seeds: ["entra"], locale, depth: 2, prior: { issued: a.issued, seen: a.nodes.map((n) => n.normalized) } });
+    const stats = { queriesIssued: a.stats.queriesIssued + b.stats.queriesIssued, cachedQueries: 0, costUsd: 0, rawCandidates: 0 };
+    const merged = await finalizeQuestionGraph(mergeQuestionNodes([a.nodes, b.nodes]), stats);
+
+    expect(shape(merged.questions)).toEqual(shape(g.questions));
+    // A question both batches surfaced is scored on both sightings, not on one batch's share.
+    const scim = merged.questions.find((q) => q.normalized === "what is scim provisioning")!;
+    expect(scim.seenCount).toBe(2);
+    expect(scim.demandScore).toBe(demandScore({ seenCount: 2, source: "autocomplete", depth: 1 }));
+    // The second batch neither re-issues the first one's queries nor expands what it already found.
+    expect(new Set(split.issued).size).toBe(split.issued.length);
+    expect([...split.issued].sort()).toEqual([...whole.issued].sort());
+    expect(merged.questions.find((q) => q.normalized === "what is scim provisioning in okta")?.seenCount).toBe(1);
+  });
+
+  it("dedupes and clusters across batches once they are merged", async () => {
+    const node = (text: string, seenCount = 1): QuestionNode => ({ text, normalized: normalizeQuestion(text), source: "autocomplete", seedTerm: "s", parent: null, depth: 1, seenCount });
+    const stats = { queriesIssued: 0, cachedQueries: 0, costUsd: 0, rawCandidates: 0 };
+    // The same phrasing from two batches, a near-duplicate of it from a third, and an unrelated question.
+    const batches = [[node("what is scim provisioning")], [node("what is scim provisioning", 2)], [node("scim provisioning what is"), node("what is the best pizza in rome")]];
+    const g = await finalizeQuestionGraph(mergeQuestionNodes(batches), stats, { embedder: hashEmbedder(), dedupeThreshold: 0.9 });
+    expect(g.questions.map((q) => [q.normalized, q.seenCount])).toEqual([["what is scim provisioning", 4], ["what is the best pizza in rome", 1]]);
+    expect(g.clusters).toHaveLength(2);
+    expect(g.stats.embeddingModel).toBe("hash-bow");
+  });
+
+  it("merges a later batch's PAA sighting, shallower depth and answer into the first batch's node", () => {
+    const first: QuestionNode = { text: "Does SCIM need SSO", normalized: "does scim need sso", source: "autocomplete", seedTerm: "scim", parent: "scim vs", depth: 2, seenCount: 1 };
+    const later: QuestionNode = { ...first, text: "does scim need sso?", seedTerm: "sso", parent: null, source: "paa", depth: 1, seenCount: 2, paaAnswer: { snippet: "ans" } };
+    expect(mergeQuestionNodes([[first], [later]])).toEqual([{ ...first, source: "paa", depth: 1, seenCount: 3, paaAnswer: { snippet: "ans" } }]);
+    // Merging does not touch the batches' own nodes (they are step outputs).
+    expect(first.seenCount).toBe(1);
   });
 });
 

@@ -1083,3 +1083,69 @@ begin;
 rollback;
 
 \echo 'isolation: security hardening assertions passed'
+
+-- ── 0019: measurement integrity ──────────────────────────────────────────────
+do $$ begin
+  if (select count(*) from information_schema.columns where table_schema = 'measure' and table_name = 'questions' and column_name in ('last_mine_batch', 'last_measure_error', 'last_measure_error_at')) <> 3 then
+    raise exception 'FAIL question mining/measure columns missing';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_schema = 'measure' and table_name = 'question_clusters' and column_name = 'updated_by_run') then
+    raise exception 'FAIL question_clusters.updated_by_run missing';
+  end if;
+end $$;
+
+-- org_id deliberately omitted: the site trigger must fill it.
+insert into app.metric_restatements (site_id, metric, old_value, new_value, methodology_version, reason) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'gsc_clicks_28d', 240, 120, '2026-10-r1', 'Each click counted once.'),
+  ('bbbbbbbb-0000-0000-0000-000000000002', 'open_gaps', 7, 3, '2026-10-r1', 'Latest snapshot only.');
+
+do $$ begin
+  if exists (select 1 from app.metric_restatements where org_id is null) then raise exception 'FAIL metric_restatements org trigger'; end if;
+  begin
+    insert into app.metric_restatements (site_id, metric, old_value, new_value, methodology_version, reason)
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'gsc_clicks_28d', 1, 1, '2026-10-r1', 'dup');
+    raise exception 'FAIL a second restatement of one metric under one version must be rejected';
+  exception when unique_violation then null;
+  end;
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member sees own restatements', (select count(*) from app.metric_restatements), 1);
+  select pg_temp.expect('acme member never sees globex restatements',
+    (select count(*) from app.metric_restatements where site_id = 'bbbbbbbb-0000-0000-0000-000000000002'), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every restatement', (select count(*) from app.metric_restatements), 2);
+rollback;
+
+begin;
+  set local role app_user;
+  do $$ begin
+    if (select count(*) from app.metric_restatements) <> 0 then raise exception 'FAIL restatements readable without claims'; end if;
+    raise notice 'ok  absent claims see no restatements';
+  end $$;
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from app.metric_restatements;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read app.metric_restatements';
+    end if;
+    raise notice 'ok  renderer cannot read app.metric_restatements';
+  end $$;
+rollback;
+
+\echo 'isolation: measurement integrity assertions passed'

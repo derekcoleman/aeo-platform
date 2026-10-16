@@ -135,7 +135,11 @@ export interface CandidateInput {
   ageDays: number | null;
   /** A refresh already queued or running for this item. */
   inFlight: boolean;
+  /** A page that is winning and holding (isProtectedWinner): rewriting it risks what it already earns. */
+  protectedWinner?: boolean;
 }
+
+export const PROTECTED_WINNER_EXCLUSION = "protected: cited and holding";
 
 /** Why an item is not a candidate, or null when it is. */
 export function candidateExclusion(c: CandidateInput): string | null {
@@ -145,5 +149,32 @@ export function candidateExclusion(c: CandidateInput): string | null {
   if (!c.hasBody) return "no rich-text body";
   if (c.ageDays !== null && c.ageDays < REFRESH_MIN_AGE_DAYS) return `updated ${c.ageDays}d ago`;
   if (c.inFlight) return "refresh in progress";
+  if (c.protectedWinner) return PROTECTED_WINNER_EXCLUSION;
   return null;
+}
+
+/**
+ * A winner the refresh loop must leave alone, however stale it looks: cited
+ * in Google's AI Overview by our own trackers on at least as many questions as
+ * the 30 days before, with Search Console clicks at or above the inventory's
+ * median, and neither clicks nor impressions declining. A page that is
+ * earning its citations is the wrong place to spend a rewrite, and a rewrite
+ * is the likeliest way to lose them. Needs both signals: without Search
+ * Console there is no way to tell a winner from a page nobody visits.
+ */
+export function isProtectedWinner(s: RefreshSignals, medianClicks: number): boolean {
+  const c = s.citations;
+  if (!c.nativeAvailable || c.native === 0 || c.native < c.nativePrev) return false;
+  if (!s.gsc.available || s.gsc.clicks <= 0 || s.gsc.clicks < medianClicks) return false;
+  const clickDrop = s.gsc.clicksPrev >= 10 ? -pct(s.gsc.clicks, s.gsc.clicksPrev) : 0;
+  const imprDrop = s.gsc.impressionsPrev >= 100 ? -pct(s.gsc.impressions, s.gsc.impressionsPrev) : 0;
+  return clickDrop < 20 && imprDrop < 20;
+}
+
+/** Median of a list (the mean of the middle two for an even count); 0 for none. */
+export function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }

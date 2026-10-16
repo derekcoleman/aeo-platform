@@ -93,6 +93,10 @@ export const serpTrackCompleted = eventType("serp/track.completed", {
     aioTriggered: z.number(),
     ownedCitations: z.number(),
     costUsd: z.number(),
+    /** Questions skipped because their call failed; the error is on the question. */
+    failed: z.number().int().optional(),
+    /** The org's SERP budget ran out before every question was measured. */
+    budgetStopped: z.boolean().optional(),
   }),
 });
 
@@ -269,6 +273,18 @@ export const refreshScanRequested = eventType("content/refresh.scan.requested", 
 /** Push a published item to its external publish targets (one, or every enabled one). */
 export const publishingPushRequested = eventType("publishing/push.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid(), contentItemId: z.guid(), targetId: z.guid().nullable().optional(), force: z.boolean().optional() }),
+});
+
+// ── measurement ─────────────────────────────────────────────────────────────
+
+/** Tie one site's connector metrics and owned citations to their content items (fanned out nightly). */
+export const metricsContentIdsRequested = eventType("metrics/content-ids.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
+});
+
+/** Restate a site's headline numbers under the current methodology (staff, from /ops). No `siteId` = fan out to every measured site. */
+export const metricsRestatementRequested = eventType("metrics/restatement.requested", {
+  schema: z.object({ siteId: z.guid().nullable().optional(), requestedBy: z.guid().nullable().optional() }),
 });
 
 // ── ops ─────────────────────────────────────────────────────────────────────

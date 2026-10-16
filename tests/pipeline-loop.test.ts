@@ -13,7 +13,9 @@ describe("citationStatus", () => {
     expect(sql.queries[0]!.text).toContain("order by fetched_at desc limit 1");
     // Another site's snapshot of the same question id must never answer for this one.
     expect(sql.queries[0]!.text).toContain("where question_id = $1 and site_id = $2");
-    expect(sql.queries[0]!.values).toEqual(["q-1", "site-1"]);
+    // Only our own trackers answer: a newer Profound row (another engine) must not decide whether the page earned its citation.
+    expect(sql.queries[0]!.text).toContain("and provider = any ($3::measure.serp_provider[])");
+    expect(sql.queries[0]!.values).toEqual(["q-1", "site-1", ["dataforseo", "serpapi"]]);
   });
 
   it("reads only AI Overview citations from the latest snapshot and dedupes competitors", async () => {

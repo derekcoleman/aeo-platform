@@ -2,6 +2,7 @@ import type { Route } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/app/action-button";
+import { MethodologyNote } from "@/components/app/methodology-note";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
 import { UrlTabs } from "@/components/app/url-tabs";
@@ -11,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { currentRestatements, METHODOLOGY_PAGE_METRICS } from "@/lib/app/methodology";
 import { resolveTab, sitePage } from "@/lib/app/nav";
 import { listRefreshItems, refreshOverview, type RefreshItemRow } from "@/lib/app/refresh";
 import { refreshItemAction, rescoreRefreshAction, syncInventoryAction } from "@/lib/app/refresh-actions";
@@ -61,7 +63,12 @@ export default async function RefreshPage({ params, searchParams }: { params: Pr
   if (!site || !roleIn(user, site.org_id)) notFound();
   const editor = canEdit(user, site.org_id);
   const manager = canManage(user, site.org_id);
-  const [items, overview, avail] = await Promise.all([listRefreshItems(siteId), refreshOverview(siteId, site.org_id), signalAvailability(siteId)]);
+  const [items, overview, avail, restated] = await Promise.all([
+    listRefreshItems(siteId),
+    refreshOverview(siteId, site.org_id),
+    signalAvailability(siteId),
+    currentRestatements(siteId, METHODOLOGY_PAGE_METRICS.refresh),
+  ]);
   const sections = sitePage("refresh").sections!;
   const tab = resolveTab(sections, requestedTab, "candidates");
   const candidates = items.filter((i) => i.refresh_score !== null && !i.refresh_signals?.exclusion && i.refresh_score >= REFRESH_THRESHOLD);
@@ -75,6 +82,8 @@ export default async function RefreshPage({ params, searchParams }: { params: Pr
         <Badge variant={candidates.length ? "warning" : "outline"}>{candidates.length} need a refresh</Badge>
         {connected ? <Badge variant="success">Webflow synced {when(overview.lastSyncedAt)}</Badge> : <Badge variant="destructive">Webflow not connected</Badge>}
       </PageHeader>
+
+      <MethodologyNote rows={restated} />
 
       {!connected ? (
         <Alert className="mb-4">
@@ -173,7 +182,7 @@ export default async function RefreshPage({ params, searchParams }: { params: Pr
                           <TableCell>{day(i.last_updated)}</TableCell>
                           <TableCell>{day(i.last_published)}</TableCell>
                           <TableCell className="text-right tabular-nums">{s?.gsc.available ? `${n(s.gsc.clicks)} / ${n(s.gsc.impressions)}` : "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums">{s && (s.citations.nativeAvailable || s.citations.profoundAvailable) ? `${s.citations.native + s.citations.profound}` : "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums">{s ? <>{s.citations.nativeAvailable ? `${s.citations.native}` : "—"}{s.citations.profoundAvailable ? <span className="text-muted-foreground ml-1 text-xs">· Profound {s.citations.profound}</span> : null}</> : "—"}</TableCell>
                           <TableCell className="text-right font-mono tabular-nums">{excluded ? <span className="text-muted-foreground text-xs" title={excluded}>{excluded}</span> : i.refresh_score === null ? "—" : Math.round(i.refresh_score)}</TableCell>
                           <TableCell className="text-right">
                             <span className="inline-flex items-center gap-2">

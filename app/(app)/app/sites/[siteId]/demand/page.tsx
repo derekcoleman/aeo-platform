@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/app/action-button";
 import { MineForm } from "@/components/app/demand-forms";
+import { MethodologyNote } from "@/components/app/methodology-note";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -12,13 +13,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { resolveTab, settingsHref, sitePage } from "@/lib/app/nav";
-import { demandCounts, listSiteQuestions, serpSpendSummary } from "@/lib/app/demand";
+import { DEMAND_GAP_LIMIT, demandCounts, listSiteQuestions, serpSpendSummary } from "@/lib/app/demand";
+import { currentRestatements, METHODOLOGY_PAGE_METRICS } from "@/lib/app/methodology";
 import { setTrackingAction, snapshotNowAction, trackTopAction } from "@/lib/app/demand-actions";
 import { loadSite } from "@/lib/app/store";
 import { canEdit, requireUser, roleIn } from "@/lib/auth/session";
 import { listEntities } from "@/lib/context/entities";
 import { demandSeeds, mineLocale } from "@/lib/demand/seeds";
 import { citationGaps, visibilitySummary } from "@/lib/demand/store";
+import { serpConfigured } from "@/lib/serp/env";
 import { listTopics } from "@/lib/strategy/topics";
 
 export const dynamic = "force-dynamic";
@@ -33,18 +36,19 @@ export default async function DemandPage({ params, searchParams }: { params: Pro
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
   const editor = canEdit(user, site.org_id);
-  const [counts, questions, gaps, visibility, spend, entities, topics] = await Promise.all([
+  const [counts, questions, gaps, visibility, spend, entities, topics, restated] = await Promise.all([
     demandCounts(siteId),
     listSiteQuestions(siteId, { limit: 150 }),
-    citationGaps(siteId, 30),
+    citationGaps(siteId, DEMAND_GAP_LIMIT),
     visibilitySummary(siteId),
     serpSpendSummary(site.org_id, siteId),
     listEntities(site.org_id),
     listTopics(siteId),
+    currentRestatements(siteId, METHODOLOGY_PAGE_METRICS.demand),
   ]);
   const seeds = demandSeeds({ siteName: site.name, keywords: site.keywords, profile: site.profile, topics, entities });
   const locale = mineLocale(site.locale);
-  const providerConfigured = !!(process.env.DATAFORSEO_LOGIN || process.env.SERPAPI_KEY);
+  const providerConfigured = serpConfigured();
   const budgetPct = spend.budget_usd > 0 ? Math.min(100, Math.round((spend.org_month_usd / spend.budget_usd) * 100)) : 0;
   const sections = sitePage("demand").sections!;
   const defaultTab = gaps.length ? "gaps" : counts.questions ? "questions" : "mine";
@@ -59,10 +63,12 @@ export default async function DemandPage({ params, searchParams }: { params: Pro
         <Badge variant={budgetPct >= 90 ? "destructive" : "outline"}>SERP spend ${spend.org_month_usd.toFixed(2)} / ${spend.budget_usd.toFixed(0)}</Badge>
       </PageHeader>
 
+      <MethodologyNote rows={restated} />
+
       {!providerConfigured ? (
         <Alert variant="warning" className="mb-4">
           <AlertTitle>No SERP provider configured</AlertTitle>
-          <AlertDescription>Set DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD (cheap bulk autocomplete and PAA) and SERPAPI_KEY (AI Overview citations) to enable mining and snapshots. Everything below still reads what has already been collected.</AlertDescription>
+          <AlertDescription>Set DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD (cheap bulk autocomplete and PAA) and SERPAPI_API_KEY (AI Overview citations) to enable mining and snapshots. Everything below still reads what has already been collected.</AlertDescription>
         </Alert>
       ) : null}
 

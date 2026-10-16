@@ -1,6 +1,7 @@
 import { cacheKey, dayOf, memoryCache, postgresCache, type SerpCache } from "./cache";
 import { memoryBudget, postgresBudget, type BudgetGuard } from "./budget";
 import { dataForSeoProvider } from "./dataforseo";
+import { aioVendorPreference, dataForSeoConfigured, serpApiKey } from "./env";
 import { serpApiProvider } from "./serpapi";
 import type { AiOverview, AutocompleteResult, PaaItem, SerpProvider, SerpProviderName, SerpQuery, SerpResult } from "./types";
 
@@ -86,19 +87,20 @@ export function createSerpClient(opts: SerpClientOptions): SerpClient {
 }
 
 /**
- * Production wiring from env. Bulk defaults to DataForSEO and AIO to SerpApi;
- * when only one vendor is configured it serves both roles, and the recorded
- * `provider` on each snapshot says which.
+ * Production wiring from env. Bulk defaults to DataForSEO and AIO to SerpApi
+ * (AEO_SERP_AIO_PROVIDER can pin AIO to either); when only one vendor is
+ * configured it serves both roles, and the recorded `provider` on each
+ * snapshot says which.
  */
-export function serpClientFromEnv(): SerpClient {
-  const hasDfs = !!process.env.DATAFORSEO_LOGIN && !!process.env.DATAFORSEO_PASSWORD;
-  const hasSa = !!process.env.SERPAPI_API_KEY;
-  if (!hasDfs && !hasSa) throw new Error("no SERP provider configured (DATAFORSEO_LOGIN/PASSWORD or SERPAPI_API_KEY)");
-  const dfs = hasDfs ? dataForSeoProvider() : null;
-  const sa = hasSa ? serpApiProvider() : null;
+export function serpClientFromEnv(env: NodeJS.ProcessEnv = process.env): SerpClient {
+  const saKey = serpApiKey(env);
+  const dfs = dataForSeoConfigured(env) ? dataForSeoProvider({ login: env.DATAFORSEO_LOGIN, password: env.DATAFORSEO_PASSWORD }) : null;
+  const sa = saKey ? serpApiProvider({ apiKey: saKey }) : null;
+  if (!dfs && !sa) throw new Error("no SERP provider configured (DATAFORSEO_LOGIN/PASSWORD or SERPAPI_API_KEY)");
+  const aio = aioVendorPreference(env) === "dataforseo" ? dfs : (sa ?? dfs);
   return createSerpClient({
     bulk: (dfs ?? sa)!,
-    aio: (sa ?? dfs)!,
+    aio: aio!,
     cache: postgresCache(),
     budget: postgresBudget(),
   });

@@ -89,9 +89,13 @@ describe("insertCrawlEvents", () => {
 });
 
 describe("rollupCrawlDaily", () => {
-  it("upserts by the daily key", async () => {
+  it("upserts by the daily key over whole UTC days, never lowering a count", async () => {
     const sql = fakeSql([[/insert into analytics.crawl_daily/, () => [{ n: 4 }]]]);
     expect(await rollupCrawlDaily(2, sql)).toBe(4);
-    expect(sql.queries[0]!.text).toContain("on conflict (site_id, day, bot_family, source, path)");
+    const q = sql.queries[0]!;
+    expect(q.text).toContain("on conflict (site_id, day, bot_family, source, path)");
+    expect(q.text).toContain("ts >= (date_trunc('day', now() at time zone 'UTC') - make_interval(days => $1)) at time zone 'UTC'");
+    expect(q.text).toContain("hits = greatest(analytics.crawl_daily.hits, excluded.hits)");
+    expect(q.values).toEqual([2]);
   });
 });

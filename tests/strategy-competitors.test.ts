@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { analyzeHtml, classifyContentType, structuralTargetBlock, structuralTargetFrom, type CompetitorPageRow } from "@/lib/strategy/competitors";
+import { demandCounts } from "@/lib/app/demand";
+import { competitorDomains } from "@/lib/app/strategy";
+import { loadInventorySignals } from "@/lib/refresh/scan";
+import { analyzeHtml, classifyContentType, collectCompetitorUrls, structuralTargetBlock, structuralTargetFrom, type CompetitorPageRow } from "@/lib/strategy/competitors";
 import { parseHtml } from "@/lib/audit/html";
+import { fakeSql } from "./helpers/fake-sql";
 
 const page = (title: string, body: string) => `<!doctype html><html><head><title>${title}</title></head><body><main><h1>${title}</h1>${body}</main></body></html>`;
 
@@ -53,5 +57,39 @@ describe("structuralTargetFrom", () => {
     expect(t.questionHeadingPct).toBeGreaterThan(50);
     expect(structuralTargetBlock(t)).toContain("dominant format comparison");
     expect(structuralTargetBlock(structuralTargetFrom([]))).toBe("");
+  });
+});
+
+describe("native-only competitor reads", () => {
+  const SITE = "aaaaaaaa-0000-0000-0000-000000000001";
+
+  it("the cited-page set comes from Google AI Overview citations of our own trackers, never Profound's engines", async () => {
+    const sql = fakeSql();
+    await collectCompetitorUrls(SITE, {}, sql);
+    expect(sql.queries[0]!.text).toContain("c.surface = 'ai_overview' and s.provider = any ($2::measure.serp_provider[])");
+    expect(sql.queries[0]!.values[1]).toEqual(["dataforseo", "serpapi"]);
+  });
+
+  it("competitor domains are native by default; Profound is asked for on its own, every surface counted", async () => {
+    const sql = fakeSql();
+    await competitorDomains(SITE, {}, sql);
+    await competitorDomains(SITE, { providers: ["profound"] }, sql);
+    expect(sql.queries[0]!.text).toContain("s.provider = any ($2::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')");
+    expect(sql.queries[0]!.values[1]).toEqual(["dataforseo", "serpapi"]);
+    expect(sql.queries[1]!.values[1]).toEqual(["profound"]);
+  });
+
+  it("the Demand page's 7-day snapshot count is native only", async () => {
+    const sql = fakeSql();
+    await demandCounts(SITE, sql);
+    expect(sql.queries[0]!.text).toContain("s.provider = any ($2::measure.serp_provider[]) and s.fetched_at >= now() - interval '7 days'");
+  });
+
+  it("the refresh scan counts native AI Overview citations only, and Profound's on any surface", async () => {
+    const sql = fakeSql();
+    await loadInventorySignals(SITE, sql);
+    const text = sql.queries.find((q) => q.text.startsWith("with gsc as"))!.text;
+    expect(text).toMatch(/filter \(where c\.surface = 'ai_overview' and s\.provider = any \(\$\d::measure\.serp_provider\[\]\) and s\.fetched_at >= now\(\) - interval '30 days'\) as native,/);
+    expect(text).toContain("filter (where s.provider = 'profound' and s.fetched_at >= now() - interval '30 days') as profound,");
   });
 });

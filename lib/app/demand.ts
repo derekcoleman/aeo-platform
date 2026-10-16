@@ -1,5 +1,6 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
+import { NATIVE_PROVIDERS } from "@/lib/demand/store";
 
 /**
  * Read models for the Demand page: the question graph with each question's
@@ -33,12 +34,15 @@ export async function listSiteQuestions(siteId: string, opts: { trackedOnly?: bo
     from measure.questions q
     left join lateral (
       select ss.id, ss.fetched_at, ss.aio_triggered from measure.serp_snapshots ss
-      where ss.question_id = q.id and ss.provider in ('dataforseo', 'serpapi') order by ss.fetched_at desc limit 1
+      where ss.question_id = q.id and ss.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) order by ss.fetched_at desc limit 1
     ) s on true
     where q.site_id = ${siteId} and (${!opts.trackedOnly}::boolean or q.is_tracked)
     order by q.is_tracked desc, q.demand_score desc, q.seen_count desc
     limit ${limit}`;
 }
+
+/** Demand lists at most this many citation gaps, and the tab's badge counts the list. */
+export const DEMAND_GAP_LIMIT = 30;
 
 export interface DemandCounts {
   questions: number;
@@ -56,7 +60,8 @@ export async function demandCounts(siteId: string, sql: postgres.Sql = appDb()):
            count(*) filter (where is_tracked and tracking_tier = 'daily')::int as daily,
            count(*) filter (where is_tracked and tracking_tier = 'weekly')::int as weekly,
            count(*) filter (where is_tracked and tracking_tier = 'monthly')::int as monthly,
-           (select count(*)::int from measure.serp_snapshots s where s.site_id = ${siteId} and s.fetched_at >= now() - interval '7 days') as snapshots_7d
+           (select count(*)::int from measure.serp_snapshots s
+             where s.site_id = ${siteId} and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and s.fetched_at >= now() - interval '7 days') as snapshots_7d
     from measure.questions where site_id = ${siteId}`;
   return row ?? { questions: 0, tracked: 0, daily: 0, weekly: 0, monthly: 0, snapshots_7d: 0 };
 }
@@ -86,10 +91,10 @@ export async function setQuestionTracking(siteId: string, questionId: string, ti
   return rows.length > 0;
 }
 
-/** Track the top N by demand on a tier; anything already on a faster tier keeps it. */
+/** Track the top N by demand on a tier; anything already on a faster tier keeps it. Excluded questions are never picked. */
 export async function trackTopQuestions(siteId: string, n: number, tier: Exclude<QuestionRow["tracking_tier"], "none">, sql: postgres.Sql = appDb()): Promise<number> {
   const rows = await sql<{ id: string }[]>`
-    with top as (select id from measure.questions where site_id = ${siteId} order by demand_score desc, seen_count desc limit ${n})
+    with top as (select id from measure.questions where site_id = ${siteId} and not excluded order by demand_score desc, seen_count desc limit ${n})
     update measure.questions q set is_tracked = true,
       tracking_tier = case when q.tracking_tier = 'daily' or (q.tracking_tier = 'weekly' and ${tier} = 'monthly') then q.tracking_tier else ${tier}::measure.tracking_tier end
     from top where q.id = top.id returning q.id`;
@@ -97,6 +102,6 @@ export async function trackTopQuestions(siteId: string, n: number, tier: Exclude
 }
 
 export async function trackedQuestionIds(siteId: string, limit = 200, sql: postgres.Sql = appDb()): Promise<string[]> {
-  const rows = await sql<{ id: string }[]>`select id from measure.questions where site_id = ${siteId} and is_tracked order by demand_score desc limit ${limit}`;
+  const rows = await sql<{ id: string }[]>`select id from measure.questions where site_id = ${siteId} and is_tracked and not excluded order by demand_score desc limit ${limit}`;
   return rows.map((r) => r.id);
 }

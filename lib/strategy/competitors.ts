@@ -2,6 +2,7 @@ import type postgres from "postgres";
 import { runPageRules, type StructureScore } from "@/lib/aeo/rules";
 import { htmlToMarkdown, pageTitle, parseHtml, type Doc } from "@/lib/audit/html";
 import { appDb } from "@/lib/db/app";
+import { NATIVE_PROVIDERS } from "@/lib/demand/store";
 import { safeFetch } from "@/lib/fetch";
 
 /**
@@ -103,7 +104,11 @@ export interface CitedUrl {
   topic_id: string | null;
 }
 
-/** Non-owned AI Overview / answer citations in the window, grouped by URL, most cited first. */
+/**
+ * Non-owned Google AI Overview citations from our own trackers in the window,
+ * grouped by URL, most cited first. Profound rows are left out: they come from
+ * other engines, and their pages are not what an AI Overview cites.
+ */
 export async function collectCompetitorUrls(siteId: string, opts: { topicId?: string | null; days?: number; limit?: number } = {}, sql: postgres.Sql = appDb()): Promise<CitedUrl[]> {
   const days = opts.days ?? 30;
   const limit = opts.limit ?? 40;
@@ -114,6 +119,7 @@ export async function collectCompetitorUrls(siteId: string, opts: { topicId?: st
     join measure.serp_snapshots s on s.id = c.serp_snapshot_id
     join measure.questions q on q.id = s.question_id
     where c.site_id = ${siteId} and not c.is_owned and c.surface = 'ai_overview'
+      and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[])
       and s.fetched_at >= now() - make_interval(days => ${days})
       and not q.excluded
       and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)

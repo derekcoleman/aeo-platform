@@ -9,8 +9,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { OPS_SECTIONS, opsHref, resolveTab, settingsHref } from "@/lib/app/nav";
-import { remediateFaqAction, runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
+import { remediateFaqAction, restateMetricsAction, runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
 import { opsFailedSyncs, opsLlmSpend, opsLlmSpendForSite, opsOrganizations, opsSites, type SiteSpendRow } from "@/lib/app/queries";
+import { METHODOLOGY_VERSION } from "@/lib/app/methodology";
 import { auditLog } from "@/lib/app/org";
 import { loadSite } from "@/lib/app/store";
 import { requireStaff } from "@/lib/auth/session";
@@ -49,6 +50,9 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         {failed.length ? <Badge variant="warning">{failed.length} failed syncs / 7d</Badge> : null}
         <ActionButton size="sm" variant="outline" action={remediateFaqAction.bind(null, site?.id ?? null)} done="queued" title="Republish pages whose FAQ section was printed twice and push their Webflow copies again. No model call; the audit log lists the paths.">
           Fix duplicate FAQs
+        </ActionButton>
+        <ActionButton size="sm" variant="outline" action={restateMetricsAction.bind(null, site?.id ?? null)} done="queued" title={`Recompute the headline numbers the old way and the ${METHODOLOGY_VERSION} way, so Strategy, Demand and Attribution can show what moved and why. No vendor calls.`}>
+          Restate metrics
         </ActionButton>
       </PageHeader>
       <UrlTabs defaultValue="sites" values={sections.map((s) => s.value)}>

@@ -84,7 +84,8 @@ describe("topic-aware gap scoring", () => {
     expect(rows[0]!.score).toBeGreaterThan(rows[1]!.score);
     expect(rows[0]!.format).toBe("comparison");
     expect(rows[0]!.topicId).toBe("t-hi");
-    expect(rows[2]!.score).toBeGreaterThan(rows[1]!.score);
+    // A question on no topic is worth at most the median active topic (here the lower one), never more than a topic the customer chose.
+    expect(rows[2]!.score).toBeLessThanOrEqual(rows[1]!.score);
   });
 });
 

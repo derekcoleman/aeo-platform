@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CitationGap } from "@/lib/demand/store";
-import { loadOpportunity, markOpportunity, openRefreshOpportunity, opportunitiesFromCitationGaps, SCORE_WEIGHTS, scanSite, scoreOpportunity, upsertOpportunities } from "@/lib/pipeline/opportunities";
+import { createManualOpportunity, defaultBusinessValue, loadOpportunity, markOpportunity, NEUTRAL_BUSINESS_VALUE, openRefreshOpportunity, opportunitiesFromCitationGaps, SCORE_WEIGHTS, scanSite, scoreOpportunity, upsertOpportunities, type TopicWeight } from "@/lib/pipeline/opportunities";
 import { fakeSql } from "./helpers/fake-sql";
 import { SITE_ID } from "./fixtures/pipeline";
 
@@ -36,7 +36,44 @@ describe("opportunitiesFromCitationGaps", () => {
   });
 });
 
+describe("business value of a question on no topic", () => {
+  const topic = (id: string, priority: number, status: TopicWeight["status"] = "active"): [string, TopicWeight] => [id, { id, priority, formats: [], status }];
+  const gap = (id: string, topicId: string | null): CitationGap => ({ question_id: id, topic_id: topicId, text: id, demand_score: 40, snapshot_id: "s", fetched_at: "", provider: "serpapi", competitor_domains: ["okta.com"] });
+
+  it("is at most the median active topic, capped at 60, and neutral with no topics", () => {
+    expect(defaultBusinessValue(new Map())).toBe(NEUTRAL_BUSINESS_VALUE);
+    expect(defaultBusinessValue(new Map([topic("a", 1), topic("b", 2)]))).toBe(20);
+    expect(defaultBusinessValue(new Map([topic("a", 2), topic("b", 2), topic("c", 5)]))).toBe(40);
+    expect(defaultBusinessValue(new Map([topic("a", 5), topic("b", 4), topic("c", 5)]))).toBe(60);
+    // A paused topic is not one the queue serves.
+    expect(defaultBusinessValue(new Map([topic("a", 1), topic("b", 5, "paused")]))).toBe(20);
+  });
+
+  it("a topicless question does not outrank an equal one on a priority-1 or priority-2 topic", () => {
+    const weights = new Map([topic("p1", 1), topic("p2", 2)]);
+    const rows = opportunitiesFromCitationGaps([gap("none", null), gap("one", "p1"), gap("two", "p2")], weights);
+    const score = (id: string) => rows.find((r) => r.questionId === id)!.score;
+    expect(score("none")).toBeLessThanOrEqual(score("one"));
+    expect(score("none")).toBeLessThan(score("two"));
+    expect((rows.find((r) => r.questionId === "none")!.scoreBreakdown as { businessValue: { value: number } }).businessValue.value).toBe(20);
+  });
+});
+
 describe("upsertOpportunities", () => {
+  it("keeps every producer's evidence under bySource and lets another producer only raise the score", async () => {
+    const sql = fakeSql([[/insert into content\.opportunities/, () => [{ inserted: false }]]]);
+    await upsertOpportunities(SITE_ID, opportunitiesFromCitationGaps([{ question_id: Q1, topic_id: null, text: "a", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "serpapi", competitor_domains: [] }]), sql);
+    const text = sql.queries[0]!.text;
+    expect(text).toContain("evidence = (content.opportunities.evidence - 'bySource') || excluded.evidence || jsonb_build_object('bySource',");
+    expect(text).toContain("coalesce(content.opportunities.evidence->'bySource', jsonb_build_object(content.opportunities.source::text, content.opportunities.evidence))");
+    expect(text).toContain("|| jsonb_build_object(excluded.source::text, excluded.evidence)");
+    expect(text).toContain("score = case when content.opportunities.source = excluded.source then excluded.score else greatest(content.opportunities.score, excluded.score) end");
+    // The hand-made path merges the same way rather than replacing what the scans found.
+    const manual = fakeSql([[/insert into content\.opportunities/, () => [{ id: "o1" }]]]);
+    await createManualOpportunity(SITE_ID, { title: "SSO vs SCIM", questionId: Q1 }, manual);
+    expect(manual.queries[0]!.text).toContain("jsonb_build_object('bySource',");
+  });
+
   it("counts inserts vs rescored rows and skips rows the conflict clause refused", async () => {
     let call = 0;
     const sql = fakeSql([[/insert into content\.opportunities/, () => (++call === 1 ? [{ inserted: true }] : call === 2 ? [{ inserted: false }] : [])]]);

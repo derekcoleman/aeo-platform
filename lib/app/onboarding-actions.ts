@@ -9,6 +9,7 @@ import { inngestConfigured } from "@/lib/jobs/runner";
 import { mineLocale } from "@/lib/demand/seeds";
 import { keywordsToTopics, parseKeywords } from "@/lib/onboarding/profile";
 import { runSiteOnboarding, setProfileStatus } from "@/lib/onboarding/run";
+import { serpConfigured } from "@/lib/serp/env";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";
 
@@ -35,8 +36,6 @@ export async function refreshProfileAction(siteId: string): Promise<ActionResult
   revalidatePath(`/app/sites/${siteId}`);
   return { ok: true };
 }
-
-const serpConfigured = () => !!(process.env.DATAFORSEO_LOGIN || process.env.SERPAPI_KEY);
 
 /**
  * Add keywords (one or many) as topics. Each becomes a topic with itself as

@@ -1,3 +1,5 @@
+import { isRetryable } from "@/lib/fetch/retry";
+
 /**
  * One interface over the SERP vendors. DataForSEO is ~5× cheaper and suits
  * bulk (autocomplete expansion, PAA trees, rank tracking); SerpApi returns the
@@ -101,6 +103,16 @@ export class SerpProviderError extends Error {
     super(`${provider}: ${message}`);
     this.name = "SerpProviderError";
   }
+}
+
+/**
+ * A vendor call that ran out of time is not retried in-process: the vendor
+ * may still be running (and billing) it, and two more full deadlines would
+ * outlast the job step. The step's own retry gets another go later.
+ */
+export function retryUnlessTimedOut(error: unknown): boolean {
+  if (error instanceof Error && error.name === "TimeoutError") return false;
+  return isRetryable(error);
 }
 
 export function domainOf(url: string): string {

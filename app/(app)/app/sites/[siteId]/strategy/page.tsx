@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import { ActionButton } from "@/components/app/action-button";
 import { LiveRefresh } from "@/components/app/live-refresh";
 import { CompetitorDomains, CompetitorDomainsLoading } from "@/components/app/competitor-domains";
+import { MethodologyNote } from "@/components/app/methodology-note";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { SyncStatus } from "@/components/app/sync-status";
 import { when } from "@/components/app/status";
@@ -16,6 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { resolveTab, settingsHref, sitePage } from "@/lib/app/nav";
+import { currentRestatements, METHODOLOGY_PAGE_METRICS } from "@/lib/app/methodology";
 import { loadSite } from "@/lib/app/store";
 import { listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
 import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
@@ -38,7 +40,7 @@ export default async function StrategyPage({ params, searchParams }: { params: P
   if (!site || !roleIn(user, site.org_id)) notFound();
   const editor = canEdit(user, site.org_id);
   const manager = canManage(user, site.org_id);
-  const [topics, stats, prompts, pages, engines, byTopic, profound] = await Promise.all([
+  const [topics, stats, prompts, pages, engines, byTopic, profound, restated] = await Promise.all([
     listTopics(siteId, undefined, true),
     topicStats(siteId),
     listPrompts(siteId, { topicId: topicFilter ?? null, limit: 200 }),
@@ -46,6 +48,7 @@ export default async function StrategyPage({ params, searchParams }: { params: P
     profoundByEngine(siteId),
     profoundByTopic(siteId),
     profoundConnection(siteId, site.org_id),
+    currentRestatements(siteId, METHODOLOGY_PAGE_METRICS.strategy),
   ]);
   const latestRun = profound ? await latestSyncRun(profound.id) : null;
   const sync = profound && profound.mode === "api" ? describeSyncState({ now: new Date(), requestedAt: profound.sync_requested_at, requestedKind: profound.sync_requested_kind, latestRun }) : null;
@@ -62,6 +65,8 @@ export default async function StrategyPage({ params, searchParams }: { params: P
         <Badge variant="secondary">{prompts.filter((p) => p.is_tracked && !p.excluded).length} tracked prompts</Badge>
         {profound ? <Badge variant={profound.status === "active" ? "success" : "destructive"}>Profound {profound.mode}</Badge> : <Badge variant="outline">Profound not connected</Badge>}
       </PageHeader>
+
+      <MethodologyNote rows={restated} />
 
       {topicFilter ? <p className="text-muted-foreground mb-3 text-sm">Filtered to topic <span className="font-medium">{topicName(topicFilter) ?? topicFilter}</span> · <Link className="underline-offset-2 hover:underline" href={`/app/sites/${siteId}/strategy` as Route}>show all</Link></p> : null}
 
@@ -176,10 +181,10 @@ export default async function StrategyPage({ params, searchParams }: { params: P
         <TabsContent value="competitors" className="grid gap-4 pt-4">
           <div className="grid gap-4 lg:grid-cols-2">
             <Card>
-              <CardHeader><CardTitle>Who gets cited instead of you</CardTitle><CardDescription>AI Overview citations, last 30 days, native and Profound sources labelled.</CardDescription></CardHeader>
-              <CardContent>
+              <CardHeader><CardTitle>Who gets cited instead of you</CardTitle><CardDescription>Google AI Overview citations from our own trackers, last 30 days{profound ? "; Profound's engines are listed separately below" : ""}.</CardDescription></CardHeader>
+              <CardContent className="grid gap-4">
                 <Suspense fallback={<CompetitorDomainsLoading />}>
-                  <CompetitorDomains siteId={siteId} topicId={topicFilter ?? null} />
+                  <CompetitorDomains siteId={siteId} topicId={topicFilter ?? null} profound={!!profound} />
                 </Suspense>
               </CardContent>
             </Card>

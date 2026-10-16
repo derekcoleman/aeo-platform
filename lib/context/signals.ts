@@ -75,12 +75,12 @@ export async function detectTermSpikes(orgId: string, siteId: string | null, sql
   return out.sort((a, b) => b.score - a.score).slice(0, 20);
 }
 
-/** Buyer questions seen repeatedly with no published or in-flight answer on the site. */
+/** Buyer questions seen repeatedly with no published or in-flight answer on the site. An excluded question is never one. */
 export async function detectUnansweredQuestions(orgId: string, siteId: string, sql: postgres.Sql = appDb(), limit = 25): Promise<DetectedSignal[]> {
   const rows = await sql<{ id: string; text: string; seen_count: number; demand_score: number; source: string }[]>`
     select q.id, q.text, q.seen_count, q.demand_score::float as demand_score, q.source::text as source
     from measure.questions q
-    where q.org_id = ${orgId} and q.site_id = ${siteId} and q.seen_count >= ${UNANSWERED_MIN_SEEN}
+    where q.org_id = ${orgId} and q.site_id = ${siteId} and q.seen_count >= ${UNANSWERED_MIN_SEEN} and not q.excluded
       and not exists (
         select 1 from content.opportunities o
         where o.site_id = q.site_id and o.question_id = q.id and o.status in ('queued', 'in_progress', 'published')
@@ -192,12 +192,18 @@ export async function upsertSignals(
   return summary;
 }
 
-/** Unanswered questions → opportunities (source 'signal'); other kinds wait for the digest. */
+/**
+ * Unanswered questions → opportunities (source 'signal'); other kinds wait
+ * for the digest. A signal raised before its question was excluded stays
+ * where it is rather than reaching the queue.
+ */
 export async function bridgeSignalsToOpportunities(orgId: string, siteId: string, sql: postgres.Sql = appDb()): Promise<{ bridged: number }> {
   const rows = await sql<{ id: string; title: string; score: number; evidence: Record<string, unknown> }[]>`
-    select id, title, score::float as score, evidence from context.signals
-    where org_id = ${orgId} and site_id = ${siteId} and kind = 'unanswered_question' and status = 'new'
-    order by score desc limit 50`;
+    select s.id, s.title, s.score::float as score, s.evidence from context.signals s
+    left join measure.questions q on q.site_id = s.site_id and q.id::text = s.evidence->>'questionId'
+    where s.org_id = ${orgId} and s.site_id = ${siteId} and s.kind = 'unanswered_question' and s.status = 'new'
+      and q.excluded is not true
+    order by s.score desc limit 50`;
   const inputs: OpportunityInput[] = [];
   for (const s of rows) {
     const questionId = typeof s.evidence.questionId === "string" ? s.evidence.questionId : null;

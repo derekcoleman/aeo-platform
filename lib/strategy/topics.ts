@@ -2,6 +2,7 @@ import type postgres from "postgres";
 import { z } from "zod";
 import { appDb } from "@/lib/db/app";
 import { normalizeQuestion } from "@/lib/demand/question-graph";
+import { GAP_FRESHNESS_DAYS, NATIVE_PROVIDERS } from "@/lib/demand/store";
 
 /**
  * Topics: the customer's control surface over what gets tracked and written.
@@ -220,8 +221,8 @@ export interface TopicStats {
 export async function topicStats(siteId: string, sql: postgres.Sql = appDb()): Promise<Map<string, TopicStats>> {
   const rows = await sql<TopicStats[]>`
     with latest as (
-      select distinct on (s.question_id) s.question_id, s.id, s.aio_triggered
-      from measure.serp_snapshots s where s.site_id = ${siteId} and s.provider in ('dataforseo', 'serpapi')
+      select distinct on (s.question_id) s.question_id, s.id, s.aio_triggered, s.fetched_at
+      from measure.serp_snapshots s where s.site_id = ${siteId} and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[])
       order by s.question_id, s.fetched_at desc
     ), q as (
       select q.topic_id,
@@ -229,7 +230,9 @@ export async function topicStats(siteId: string, sql: postgres.Sql = appDb()): P
              count(*) filter (where q.is_tracked and not q.excluded)::int as tracked,
              count(*) filter (where l.aio_triggered)::int as aio_triggered,
              count(*) filter (where l.aio_triggered and exists (select 1 from measure.serp_citations c where c.serp_snapshot_id = l.id and c.surface = 'ai_overview' and c.is_owned))::int as aio_cited,
-             count(*) filter (where l.aio_triggered and not exists (select 1 from measure.serp_citations c where c.serp_snapshot_id = l.id and c.surface = 'ai_overview' and c.is_owned)
+             -- the same gap citationGaps queues: fresh, not excluded, cited without us
+             count(*) filter (where l.aio_triggered and not q.excluded and l.fetched_at >= now() - make_interval(days => ${GAP_FRESHNESS_DAYS})
+                                and not exists (select 1 from measure.serp_citations c where c.serp_snapshot_id = l.id and c.surface = 'ai_overview' and c.is_owned)
                                 and exists (select 1 from measure.serp_citations c where c.serp_snapshot_id = l.id and c.surface = 'ai_overview'))::int as gaps
       from measure.questions q left join latest l on l.question_id = q.id
       where q.site_id = ${siteId} and q.topic_id is not null

@@ -34,7 +34,14 @@ channels), **error** (the last sync failed; the reason is on the card),
 Console (pick the property) and GA4 (pick the property). Until a property is
 chosen the grant is *pending* and the sync is a no-op. The OAuth client comes
 from `GOOGLE_OAUTH_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI`; the card says
-so when they are missing.
+so when they are missing. After each sync, `resolveMetricContentIds`
+(`lib/connectors/store.ts`) ties the rows it wrote to the asset behind the
+page they name (GA4's landing page, Search Console's page URL on a host the
+project owns): the published page at that path, or a CMS post linked to a
+content item. Per-asset attribution reads `content_id` only, from the GA4
+referral and Search Console page rows; the site-wide refresh windows are
+matched by URL instead and are left alone. A nightly pass, one event per
+site, catches rows from the last 60 days whose asset appeared later.
 
 **Slack** is one install per organisation. The card lists the channels the
 app can see; nothing is read until channels are ticked. The same form sets
@@ -151,9 +158,15 @@ windows by offset. No invocation outlives Vercel's 300-second limit however
 large the report, a killed invocation resumes at the page it was on, and the
 run row's `detail` carries rows, pages and `progress_at` after every page.
 Each page lands in one transaction with multi-row statements, after deleting
-the same (prompt, engine, day) tuples, so a replayed page replaces its rows;
-the first page of a run clears the whole range it will cover. The
-database-backed test in `tests/db/` drives this against the real schema.
+the same (prompt, engine, day) tuples, so a replayed page replaces its rows.
+The first page mints a run marker that the page token carries and every row
+the run writes is stamped with (`raw->>'sync_run'`, `metrics->>'sync_run'`);
+the last page then removes the rows in the range the run did not write (what
+Profound no longer reports) and rebuilds the daily metrics they fed. Nothing
+is deleted before Profound has answered, so a run that fails part way leaves
+the previous data in place. Engine labels keep Google's surfaces apart: AI
+Mode and Gemini are never filed as AI Overviews. The database-backed test in
+`tests/db/` drives this against the real schema.
 
 ## Custom source (API or MCP)
 

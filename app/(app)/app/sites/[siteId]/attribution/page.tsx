@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { MethodologyNote } from "@/components/app/methodology-note";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { when } from "@/components/app/status";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -6,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { assetAttribution, signalsAgreeing, siteSignals } from "@/lib/app/attribution";
+import { currentRestatements, METHODOLOGY_PAGE_METRICS } from "@/lib/app/methodology";
 import { loadSite } from "@/lib/app/store";
 import { requireUser, roleIn } from "@/lib/auth/session";
 import { visibilitySummary } from "@/lib/demand/store";
@@ -24,7 +26,7 @@ export default async function AttributionPage({ params }: { params: Promise<{ si
   const user = await requireUser(`/app/sites/${siteId}/attribution`);
   const site = await loadSite(siteId);
   if (!site || !roleIn(user, site.org_id)) notFound();
-  const [assets, signals, visibility] = await Promise.all([assetAttribution(siteId), siteSignals(siteId), visibilitySummary(siteId)]);
+  const [assets, signals, visibility, restated] = await Promise.all([assetAttribution(siteId), siteSignals(siteId), visibilitySummary(siteId), currentRestatements(siteId, METHODOLOGY_PAGE_METRICS.attribution)]);
   const agreeing = assets.filter((a) => signalsAgreeing(a) >= 2).length;
   return (
     <AppShell user={user} site={site} page="attribution">
@@ -32,6 +34,8 @@ export default async function AttributionPage({ params }: { params: Promise<{ si
         <Badge variant="secondary">{assets.length} published</Badge>
         <Badge variant={agreeing ? "success" : "outline"}>{agreeing} with 2+ signals</Badge>
       </PageHeader>
+
+      <MethodologyNote rows={restated} />
 
       {!signals.has_ga4 && !signals.has_gsc ? (
         <Alert className="mb-4">

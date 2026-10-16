@@ -1,4 +1,4 @@
-import { upsertExternalMetrics, type ExternalMetricInput } from "../store";
+import { resolveMetricContentIds, upsertExternalMetrics, type ExternalMetricInput } from "../store";
 import { ConnectorError, type Connector, type ConnectionRef, type ConnectionRow, type ConnectorContext, type SyncInput, type SyncResult } from "../types";
 import { normalizeGa4Rows, queryGa4AiReferrals } from "./ga4";
 import { GSC_LAG_DAYS, GSC_PAGE_WINDOW_MAX_ROWS, gscPageWindows, normalizeGscPageWindow, normalizeGscRows, queryGsc } from "./gsc";
@@ -125,6 +125,9 @@ export const googleConnector: Connector<GoogleConfig> = {
       metrics += n;
       detail.ga4 = { rows: ga4.length, written: n };
     }
+
+    // Tie the rows just written to the assets behind their pages; attribution joins on content_id only.
+    if (metrics > 0) detail.contentIds = await resolveMetricContentIds(siteConn.site_id, ctx.sql, { since: window.startDate });
 
     return { documentsIngested: 0, metricsIngested: metrics, cursor: { through: window.endDate }, detail };
   },

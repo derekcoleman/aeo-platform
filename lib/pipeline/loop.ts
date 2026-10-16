@@ -1,5 +1,6 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
+import { NATIVE_PROVIDERS } from "@/lib/demand/store";
 import type { GateStep } from "./gate";
 
 /**
@@ -19,11 +20,17 @@ export interface CitationStatus {
   competitorDomains: string[];
 }
 
-/** The latest snapshot for a question, with whether any AI Overview citation is ours. */
+/**
+ * The latest snapshot from our own SERP trackers for a question, with whether
+ * any AI Overview citation is ours. A Profound row is never the answer: its
+ * engines are not Google's AI Overview, and a newer one would otherwise
+ * decide whether the post-publish loop opens a refresh.
+ */
 export async function citationStatus(questionId: string, siteId: string, sql: postgres.Sql = appDb()): Promise<CitationStatus | null> {
   const [snap] = await sql<{ id: string; fetched_at: Date; aio_triggered: boolean | null }[]>`
     select id, fetched_at, aio_triggered from measure.serp_snapshots
-    where question_id = ${questionId} and site_id = ${siteId} order by fetched_at desc limit 1`;
+    where question_id = ${questionId} and site_id = ${siteId} and provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[])
+    order by fetched_at desc limit 1`;
   if (!snap) return null;
   const cites = await sql<{ domain: string; is_owned: boolean }[]>`
     select domain, is_owned from measure.serp_citations

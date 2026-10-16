@@ -1,7 +1,8 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
+import { NATIVE_PROVIDERS } from "@/lib/demand/store";
 import { upsertOpportunities, type OpportunityInput, type UpsertSummary } from "@/lib/pipeline/opportunities";
-import { candidateExclusion, REFRESH_MAX_OPPORTUNITIES, REFRESH_THRESHOLD, scoreRefresh, type RefreshScore, type RefreshSignals } from "./score";
+import { candidateExclusion, isProtectedWinner, median, REFRESH_MAX_OPPORTUNITIES, REFRESH_THRESHOLD, scoreRefresh, type RefreshScore, type RefreshSignals } from "./score";
 
 /**
  * The refresh scan: join the CMS inventory with Search Console traffic and
@@ -45,7 +46,7 @@ export interface SignalAvailability {
 export async function signalAvailability(siteId: string, sql: postgres.Sql = appDb()): Promise<SignalAvailability> {
   const [row] = await sql<SignalAvailability[]>`
     select exists (select 1 from measure.external_metrics where site_id = ${siteId} and surface = 'gsc_page_window') as gsc,
-           exists (select 1 from measure.serp_snapshots where site_id = ${siteId} and provider in ('dataforseo', 'serpapi') and fetched_at >= now() - interval '60 days') as native,
+           exists (select 1 from measure.serp_snapshots where site_id = ${siteId} and provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and fetched_at >= now() - interval '60 days') as native,
            exists (select 1 from measure.serp_snapshots where site_id = ${siteId} and provider = 'profound' and fetched_at >= now() - interval '60 days') as profound`;
   return row ?? { gsc: false, native: false, profound: false };
 }
@@ -53,8 +54,11 @@ export async function signalAvailability(siteId: string, sql: postgres.Sql = app
 /**
  * One row per inventory item with its signals. GSC rows are the latest
  * `gsc_page_window` per page and window; citations count distinct questions
- * in the last 30 days and the 30 before, split by provider family. Both join
- * on content.url_key so scheme, www and trailing slashes do not matter.
+ * in the last 30 days and the 30 before, split by provider family. Native
+ * counts are Google AI Overview citations from our own trackers only (an
+ * organic ranking is not a citation); Profound counts take every surface,
+ * since its engines are not Google's. Both join on content.url_key so
+ * scheme, www and trailing slashes do not matter.
  */
 export async function loadInventorySignals(siteId: string, sql: postgres.Sql = appDb(), opts: { itemId?: string | null } = {}): Promise<InventorySignalRow[]> {
   return sql<InventorySignalRow[]>`
@@ -77,8 +81,8 @@ export async function loadInventorySignals(siteId: string, sql: postgres.Sql = a
     ),
     cites as (
       select content.url_key(c.url) as key,
-        count(distinct s.question_id) filter (where s.provider <> 'profound' and s.fetched_at >= now() - interval '30 days') as native,
-        count(distinct s.question_id) filter (where s.provider <> 'profound' and s.fetched_at < now() - interval '30 days') as native_prev,
+        count(distinct s.question_id) filter (where c.surface = 'ai_overview' and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and s.fetched_at >= now() - interval '30 days') as native,
+        count(distinct s.question_id) filter (where c.surface = 'ai_overview' and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and s.fetched_at < now() - interval '30 days') as native_prev,
         count(distinct s.question_id) filter (where s.provider = 'profound' and s.fetched_at >= now() - interval '30 days') as profound,
         count(distinct s.question_id) filter (where s.provider = 'profound' and s.fetched_at < now() - interval '30 days') as profound_prev
       from measure.serp_citations c join measure.serp_snapshots s on s.id = c.serp_snapshot_id
@@ -131,15 +135,24 @@ export interface ScoredItem {
   exclusion: string | null;
 }
 
-/** Score every inventory row; candidates are the non-excluded ones over the threshold, best first. */
-export function scoreInventory(rows: InventorySignalRow[], avail: SignalAvailability, now: Date): { items: ScoredItem[]; candidates: ScoredItem[] } {
+/**
+ * Score every inventory row; candidates are the non-excluded ones over the
+ * threshold, best first. A winner (isProtectedWinner) is excluded, "winning"
+ * judged against the median clicks of the live items scored together. (The
+ * app's "Refresh now" scores one row and ignores exclusions: a human asked.)
+ */
+export function scoreInventory(rows: InventorySignalRow[], avail: SignalAvailability, now: Date): { items: ScoredItem[]; candidates: ScoredItem[]; medianClicks: number } {
+  const medianClicks = median(rows.filter((r) => !r.missing && !r.is_draft && !r.is_archived).map((r) => r.clicks));
   const items = rows.map((row) => {
     const signals = signalsFor(row, avail, now);
-    const exclusion = candidateExclusion({ isDraft: row.is_draft, isArchived: row.is_archived, missing: row.missing, hasBody: row.has_body, ageDays: signals.ageDays, inFlight: row.in_flight });
+    const exclusion = candidateExclusion({
+      isDraft: row.is_draft, isArchived: row.is_archived, missing: row.missing, hasBody: row.has_body, ageDays: signals.ageDays, inFlight: row.in_flight,
+      protectedWinner: isProtectedWinner(signals, medianClicks),
+    });
     return { row, signals, scored: scoreRefresh(signals), exclusion };
   });
   const candidates = items.filter((i) => !i.exclusion && i.scored.score >= REFRESH_THRESHOLD).sort((a, b) => b.scored.score - a.scored.score);
-  return { items, candidates };
+  return { items, candidates, medianClicks };
 }
 
 /**

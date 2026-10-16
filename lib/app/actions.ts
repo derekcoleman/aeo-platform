@@ -15,6 +15,7 @@ import {
   contentRemediateFaqRequested,
   contextSignalsScanRequested,
   inngest,
+  metricsRestatementRequested,
   opportunitiesScanRequested,
   siteHealthCheckRequested,
   sitePreflightRequested,
@@ -202,6 +203,14 @@ export async function setFeatureAction(orgId: string, feature: string, enabled: 
 export async function remediateFaqAction(siteId: string | null): Promise<ActionResult> {
   const staff = await requireStaff();
   const jobError = await queueJob(contentRemediateFaqRequested.create({ siteId, requestedBy: staff.id }), undefined, "FAQ remediation");
+  if (jobError) return fail(jobError);
+  return { ok: true };
+}
+
+/** Restate the headline numbers under the current methodology (one site, or every measured site). The job writes the audit rows. */
+export async function restateMetricsAction(siteId: string | null): Promise<ActionResult> {
+  const staff = await requireStaff();
+  const jobError = await queueJob(metricsRestatementRequested.create({ siteId, requestedBy: staff.id }), undefined, "metrics restatement");
   if (jobError) return fail(jobError);
   return { ok: true };
 }

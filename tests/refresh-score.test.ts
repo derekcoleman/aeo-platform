@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { candidateExclusion, demandFromImpressions, REFRESH_MIN_AGE_DAYS, REFRESH_THRESHOLD, REFRESH_WEIGHTS, scoreRefresh, type RefreshSignals } from "@/lib/refresh/score";
+import { candidateExclusion, demandFromImpressions, isProtectedWinner, median, PROTECTED_WINNER_EXCLUSION, REFRESH_MIN_AGE_DAYS, REFRESH_THRESHOLD, REFRESH_WEIGHTS, scoreRefresh, type RefreshSignals } from "@/lib/refresh/score";
 import { ageDays, refreshDedupeKey, refreshOpportunityFor, scoreInventory, signalsFor, type InventorySignalRow } from "@/lib/refresh/scan";
 
 const NOW = new Date("2026-09-15T12:00:00Z");
@@ -87,6 +87,32 @@ describe("candidateExclusion", () => {
     expect(candidateExclusion({ ...base, ageDays: REFRESH_MIN_AGE_DAYS - 1 })).toMatch(/updated 44d ago/);
     expect(candidateExclusion({ ...base, ageDays: null })).toBeNull();
     expect(candidateExclusion({ ...base, inFlight: true })).toBe("refresh in progress");
+    expect(candidateExclusion({ ...base, protectedWinner: true })).toBe(PROTECTED_WINNER_EXCLUSION);
+  });
+});
+
+describe("protected winners", () => {
+  const winner = signals({ gsc: { clicks: 60, clicksPrev: 55, impressions: 2000, impressionsPrev: 1900 }, citations: { native: 3, nativePrev: 3 } });
+
+  it("protects a page cited natively and holding, with clicks at or above the median and no decline", () => {
+    expect(isProtectedWinner(winner, 60)).toBe(true);
+    expect(isProtectedWinner(winner, 40)).toBe(true);
+  });
+
+  it("does not protect a page that lost citations, sits below the median, is declining, or that only Profound cites", () => {
+    expect(isProtectedWinner({ ...winner, citations: { ...winner.citations, native: 2 } }, 40)).toBe(false);
+    expect(isProtectedWinner(winner, 61)).toBe(false);
+    expect(isProtectedWinner({ ...winner, gsc: { ...winner.gsc, clicks: 30, clicksPrev: 60 } }, 10)).toBe(false);
+    expect(isProtectedWinner({ ...winner, gsc: { ...winner.gsc, impressions: 1000, impressionsPrev: 2000 } }, 40)).toBe(false);
+    expect(isProtectedWinner({ ...winner, citations: { ...winner.citations, native: 0, nativePrev: 0, profound: 5, profoundPrev: 4 } }, 40)).toBe(false);
+    // No Search Console: a winner cannot be told from a page nobody visits.
+    expect(isProtectedWinner({ ...winner, gsc: { ...winner.gsc, available: false } }, 0)).toBe(false);
+  });
+
+  it("median handles odd, even and empty lists", () => {
+    expect(median([5, 1, 3])).toBe(3);
+    expect(median([4, 1, 3, 2])).toBe(2.5);
+    expect(median([])).toBe(0);
   });
 });
 
@@ -148,6 +174,21 @@ describe("scoreInventory", () => {
     expect(candidates.map((c) => c.row.id)).not.toContain("fresh");
     expect(candidates.map((c) => c.row.id)).not.toContain("cited-holding");
     for (let i = 1; i < candidates.length; i++) expect(candidates[i - 1]!.scored.score).toBeGreaterThanOrEqual(candidates[i]!.scored.score);
+  });
+
+  it("keeps a stale winner out of the queue, judged against the inventory's median clicks", () => {
+    const rows = [
+      // Old and thin enough to score as a candidate, but cited and holding with traffic.
+      row({ id: "winner", word_count: 300, clicks: 90, clicks_prev: 85, impressions: 3000, impressions_prev: 3000, cited_native: 2, cited_native_prev: 2 }),
+      row({ id: "loser", clicks: 10, clicks_prev: 40 }),
+      row({ id: "quiet", clicks: 5, clicks_prev: 5, impressions: 200, impressions_prev: 200 }),
+    ];
+    const { items, candidates, medianClicks } = scoreInventory(rows, avail, NOW);
+    expect(medianClicks).toBe(10);
+    expect(items.find((i) => i.row.id === "winner")!.scored.score).toBeGreaterThan(0);
+    expect(items.find((i) => i.row.id === "winner")!.exclusion).toBe(PROTECTED_WINNER_EXCLUSION);
+    expect(candidates.map((c) => c.row.id)).not.toContain("winner");
+    expect(candidates.map((c) => c.row.id)).toContain("loser");
   });
 
   it("builds a refresh opportunity whose dedupe key changes when the post changes", () => {

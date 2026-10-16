@@ -31,6 +31,7 @@ describe("poissonZ / detectors", () => {
     const out = await detectUnansweredQuestions(ORG, SITE, sql);
     expect(out).toEqual([{ kind: "unanswered_question", title: "does scim require sso", dedupeText: "unanswered question does scim require sso", evidence: { questionId: "q1", seenCount: 4, demandScore: 60, source: "paa" }, score: 50, questionId: "q1" }]);
     expect(sql.queries[0]!.text).toContain("status in ('queued', 'in_progress', 'published')");
+    expect(sql.queries[0]!.text).toContain("and not q.excluded");
   });
 
   it("detectCompetitorSpikes queries each competitor's aliases as quoted FTS phrases, never substrings", async () => {
@@ -89,6 +90,9 @@ describe("upsertSignals / bridge", () => {
     expect(ins.values[6]).toBe("s1");
     expect(ins.values[12]).toBe("question:q1");
     expect(sql.queries.at(-1)!.text).toContain("set status = 'bridged'");
+    // A signal whose question was excluded after it was raised never reaches the queue.
+    expect(sql.queries[0]!.text).toContain("left join measure.questions q on q.site_id = s.site_id and q.id::text = s.evidence->>'questionId'");
+    expect(sql.queries[0]!.text).toContain("and q.excluded is not true");
   });
 
   it("scanSignals runs the three detectors, upserts and bridges", async () => {
