@@ -5,22 +5,32 @@ finds the citation gap, generates content grounded in real company context,
 publishes it on the customer's own domain via reverse proxy, then re-measures
 and attributes the lift.
 
-Strategy and architecture: `/root/.claude/plans/` (see the approved plan).
+Strategy, phases, the bug list and what ships next: `docs/ROADMAP.md`. How
+every visibility number is measured and labelled: `docs/MEASUREMENT.md`.
 
-## Status — Phase 0
+## Status
 
-The foundation and the render/proxy vertical slice.
+The render/proxy foundation, and most of Phase 1 of the roadmap.
 
 | | |
 |---|---|
 | ✅ | Tenancy model, RLS, least-privilege renderer role |
 | ✅ | Host → site resolution and the proxy contract |
 | ✅ | Zero-JS article renderer + AEO artifacts (sitemap, llms.txt, feed, `.md`) |
-| ✅ | Install config generation for all four proxy modes |
+| ✅ | Install config generation for all four proxy modes; Cloudflare Worker v2, with an upgrade notice for older installs (`docs/EDGE_SETUP.md`) |
 | ✅ | Connectors page: every source listed connected or not; Google property and Slack channel setup; custom API / MCP sources (`docs/CONNECTORS.md`) |
 | ✅ | Content refresh: Webflow inventory × Search Console × citations → ranked, updated in place (`docs/REFRESH.md`) |
+| ✅ | Ops console, content pipeline (brief → approval → draft → QA → publish → re-measure), brand brain, readiness audit |
+| ✅ | Approvals resume from the app or Slack; Claude 5 model calls; published HTML is the HTML QA scored |
+| ✅ | Forged internal headers refused, `/render` only on edge hosts, IPv6 SSRF guard, site-in-org checks, webhook re-drive (`docs/SECURITY.md`) |
+| ✅ | AI Overview numbers from our own trackers only, per-asset attribution, versioned methodology with restatements (`docs/MEASUREMENT.md`) |
+| ✅ | Takedown: noindex, retire (410), restore, rollback without a model call; project pause and staff kill switches |
+| ✅ | Spend governor: atomic budgets for pipeline model, SERP and answer-probe calls; per-article cap (audit and embedding calls not yet covered) |
+| ✅ | Named competitors; Reddit, G2, Wikipedia and the rest listed as sources shaping answers |
+| ✅ | Answer ledger; AI engines probed through OpenRouter, labelled API-grounded, never blended with AI Overview or Profound data |
 | ✅ | One expected-value scorer for the whole queue; coverage guard, topical floor, publishing pace, QA safety gate |
-| ⬜ | Ops console, publish pipeline, brand brain, audit port |
+| ✅ | Competitor organic keyword gap (DataForSEO Labs) |
+| ⬜ | Rest of Phase 1: pipeline hardening, outcome ledger, Search Console / GA4 widening, event consumers and activity log, onboarding readiness gate, audit fixes, enterprise trust pack (`docs/ROADMAP.md`) |
 
 ## Architecture in one diagram
 
@@ -29,12 +39,13 @@ acme.com/resources/*            customer's edge — they install one rewrite
    └─> acme-8fj2.blogedge…      our edge — cache, crawl logging, R2 fallback
         └─> middleware.ts       Host → site_id, cookie strip, loop guard
              └─> /render/{siteId}/…   tenant-in-path, so caches can't cross tenants
-                  └─> content.published_pages   read by a role that sees one table
+                  └─> content.published_pages + site_render_config   the renderer role's only two tables
 ```
 
 The rest of the customer's site is structurally untouched: only their content
-prefix routes to us, and if we are unavailable that prefix serves stale cache or
-a static mirror.
+prefix routes to us, so if we are unavailable only that prefix is affected. A
+stale-cache and static-mirror fallback for that prefix is planned, not yet
+working (bug 39 in `docs/ROADMAP.md`).
 
 ## Invariants
 
@@ -68,6 +79,11 @@ cp .env.example .env.local     # fill in Supabase + edge settings
 npm run dev
 npm run check                  # typecheck + lint + unit tests
 ```
+
+Cloud sessions install dependencies at startup: `.claude/settings.json` runs
+`scripts/session-start.sh`, which does nothing locally and, in a cloud
+session, runs `npm ci` unless `node_modules` was already built from the
+current `package-lock.json`.
 
 ### Database
 
@@ -192,9 +208,11 @@ content.
 
 ### Spend budgets
 
-Every paid call goes through one governor (`lib/ops/spend.ts`, migration
-0021): model calls (`llm`), SERP calls (`serp`) and AI-answer probes
-(`answer_probe`).
+One governor (`lib/ops/spend.ts`, migration 0021) holds budget for model
+calls made through `runJsonTask` (`llm`), every SERP call through
+`cachedCall` (`serp`) and AI-answer probes (`answer_probe`). Audit model
+calls (`lib/audit`) and embeddings do not go through it yet
+(`docs/ROADMAP.md`, `spend-governor`).
 
 - **Before the call** it holds the call's worst-case cost on every budget
   that covers it: the organisation's and, when one is set, the project's.

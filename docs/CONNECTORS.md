@@ -144,6 +144,46 @@ citations and updated in place. See `docs/REFRESH.md`.
 after the requested delay. Set `WEBFLOW_API_BASE` only to point at a test
 double.
 
+## SERP vendors and answer probes (environment)
+
+These are not per-project connectors: the platform holds one set of keys, in
+the environment, for every organisation. Every call they make holds its cost
+on the organisation's budget first (`lib/ops/spend.ts`), and SERP and answer
+results are cached by day (or, for DataForSEO Labs, by month) and shared
+across tenants. Settings → Deployment shows whether the SERP vendors and a
+model key are configured.
+
+| Source | Variables | Feeds |
+|---|---|---|
+| DataForSEO | `DATAFORSEO_LOGIN` and `DATAFORSEO_PASSWORD` (both required) | Demand mining (autocomplete, People Also Ask), rank and AI Overview tracking |
+| DataForSEO Labs | The same login | The competitor organic gap (`ranked_keywords` per domain), monthly or on demand from Strategy → Competitors |
+| SerpApi | `SERPAPI_API_KEY` | AI Overview citations |
+| OpenRouter | `OPENROUTER_API_KEY` | AI answer probes (Strategy → Visibility → Engines) |
+
+**SerpApi's key name.** The key is `SERPAPI_API_KEY`. The old name,
+`SERPAPI_KEY`, is still read, with a deprecation warning logged once, and
+the setup checklist flags it with "Rename SERPAPI_KEY to SERPAPI_API_KEY".
+One reader, `lib/serp/env.ts`, serves every screen and job.
+Before it existed, the client and four screens read different names, so a
+deployment could look configured and still fail every call.
+
+**Which vendor answers AI Overview questions.** When both are configured,
+SerpApi answers them by default; `AEO_SERP_AIO_PROVIDER=dataforseo` switches
+that. A vendor that is not configured is ignored.
+
+**Locations.** DataForSEO locations come from the site's country as ISO 3166
+numeric (2000 + code). An unknown country falls back to the US, and the
+snapshot records `localeFallback`. Labs covers fewer markets: a domain it
+refuses is skipped, and non-Latin-script markets are skipped before any
+call is paid for.
+
+**Answer probes** ask each engine's model a site's tracked prompts through
+OpenRouter, with web search on. They are labelled as API-grounded probes, not
+the consumer apps, and never added to the AI Overview or Profound numbers
+(`docs/MEASUREMENT.md`). They are off until staff turn on *Answer probes* for
+the organisation in Ops → Organisations. `AEO_ANSWER_ENGINES` and
+`AEO_ANSWER_ENGINES_ENABLED` configure the engines.
+
 ## Sync status and errors
 
 Every run is a `context.context_sync_runs` row. The Visibility card reads the
