@@ -13,14 +13,16 @@ import { PROFOUND_FEATURE } from "@/lib/connectors/profound";
 import { PROFOUND_DEFAULT_BASE, ProfoundApi, ProfoundApiError, ProfoundDiscoveryError, type DiscoveryAttempt } from "@/lib/connectors/profound/api";
 import { appDb } from "@/lib/db/app";
 import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
+import { OVERRIDE_SOURCE_ROLES, removeCompetitor, saveCompetitor, seedCompetitorsFromDomains, setSourceOverride, SourceRoleInputError } from "@/lib/measure/source-roles";
 import { createManualOpportunity } from "@/lib/pipeline/opportunities";
-import { OutOfSiteError, addManualPrompt, assertSiteScopedIds, assignQuestionsToTopics, createTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
+import { OutOfSiteError, addManualPrompt, assertSiteScopedIds, assignQuestionsToTopics, createTopic, loadTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";
 
 /**
  * Server actions for the Strategy page: topics, prompt control, manual
- * content requests, competitor analysis and the Profound API connection.
+ * content requests, named competitors and source roles, competitor
+ * analysis and the Profound API connection.
  */
 
 const fail = (error: string): ActionResult => ({ ok: false, error });
@@ -58,11 +60,16 @@ export async function saveTopicAction(_prev: ActionResult | null, form: FormData
   if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid topic.");
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const before = topicId ? await loadTopic(siteId, topicId) : null;
   const row = topicId ? await updateTopic(siteId, topicId, parsed.data) : await createTopic(siteId, parsed.data);
   if (!row) return fail("Topic not found.");
   await assignQuestionsToTopics(siteId).catch(() => undefined);
+  // A domain newly watched becomes an unconfirmed competitor, as 0022 did for the topics then;
+  // one already watched is left alone, so removing its competitor sticks.
+  const added = row.competitor_domains.filter((d) => !before?.competitor_domains.includes(d));
+  const seeded = await seedCompetitorsFromDomains({ id: site.org_id }, added).catch(() => null);
   refresh(siteId);
-  return { ok: true, id: row.id };
+  return { ok: true, id: row.id, note: seeded?.added.length ? `New competitors to confirm on the Competitors tab: ${seeded.added.join(", ")}.` : undefined };
 }
 
 export async function setTopicStatusAction(siteId: string, topicId: string, status: "active" | "paused" | "archived"): Promise<ActionResult> {
@@ -143,6 +150,83 @@ export async function createContentAction(_prev: ActionResult | null, form: Form
   }
   refresh(siteId);
   return { ok: true, id };
+}
+
+// ── named competitors and source roles ─────────────────────────────────────
+
+const listOf = (v: string) => v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+
+const competitorForm = z.object({
+  siteId: z.guid(),
+  entityId: z.guid().optional().or(z.literal("")).default(""),
+  name: z.string().trim().min(1, "Give the competitor a name.").max(120),
+  domains: z.string().max(2000).default(""),
+  aliases: z.string().max(2000).default(""),
+});
+
+/**
+ * Name a competitor, or confirm or edit one: the org's competitor entity
+ * with its domains and aliases. An entity id from the form must be this
+ * site's org's (saveCompetitor checks); this site's own role for a domain
+ * it names is cleared, and every citation on the org's sites from the
+ * domains that moved is restated.
+ */
+export async function saveCompetitorAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
+  const parsed = competitorForm.safeParse(Object.fromEntries(form));
+  if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid competitor.");
+  const { siteId, entityId, name, domains, aliases } = parsed.data;
+  const { user, site, error } = await guard(siteId, "edit");
+  if (!site || error) return fail(error ?? "Site not found.");
+  try {
+    const r = await saveCompetitor({ id: site.org_id }, { entityId: entityId || null, name, domains: listOf(domains), aliases: listOf(aliases), siteId: site.id }, user.id);
+    refresh(siteId);
+    const notes = [
+      r.clearedOverrides.length ? `The role you set for ${r.clearedOverrides.join(", ")} on this site is cleared.` : "",
+      r.reclassified ? `${r.reclassified} citation${r.reclassified === 1 ? "" : "s"} restated.` : "",
+    ].filter(Boolean);
+    return { ok: true, id: r.entityId, note: notes.length ? notes.join(" ") : undefined };
+  } catch (e) {
+    if (e instanceof SourceRoleInputError) return fail(e.message);
+    throw e;
+  }
+}
+
+/** "Not a competitor": see removeCompetitor. */
+export async function removeCompetitorAction(siteId: string, entityId: string): Promise<ActionResult> {
+  const { user, site, error } = await guard(siteId, "edit");
+  if (!site || error) return fail(error ?? "Site not found.");
+  try {
+    const r = await removeCompetitor({ id: site.org_id }, entityId, user.id);
+    refresh(siteId);
+    return { ok: true, note: r.reclassified ? `${r.reclassified} citation${r.reclassified === 1 ? "" : "s"} restated.` : undefined };
+  } catch (e) {
+    if (e instanceof SourceRoleInputError) return fail(e.message);
+    throw e;
+  }
+}
+
+const sourceRoleForm = z.object({
+  siteId: z.guid(),
+  domain: z.string().trim().min(3).max(253),
+  // Empty clears the site's override and the catalogue decides again.
+  role: z.enum(OVERRIDE_SOURCE_ROLES).or(z.literal("")),
+});
+
+/** This site's own role for a cited domain (and its subdomains), or back to the catalogue's. */
+export async function setSourceRoleAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
+  const parsed = sourceRoleForm.safeParse(Object.fromEntries(form));
+  if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid role.");
+  const { siteId, domain, role } = parsed.data;
+  const { user, site, error } = await guard(siteId, "edit");
+  if (!site || error) return fail(error ?? "Site not found.");
+  try {
+    const r = await setSourceOverride(site, domain, role || null, user.id);
+    refresh(siteId);
+    return { ok: true, note: r.reclassified ? `${r.reclassified} citation${r.reclassified === 1 ? "" : "s"} restated.` : undefined };
+  } catch (e) {
+    if (e instanceof SourceRoleInputError) return fail(e.message);
+    throw e;
+  }
 }
 
 export async function analyzeCompetitorsAction(siteId: string, topicId?: string | null): Promise<ActionResult> {

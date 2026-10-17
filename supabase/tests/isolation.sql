@@ -1369,3 +1369,278 @@ begin;
 rollback;
 
 \echo 'isolation: spend governor assertions passed'
+
+-- ── 0022: source roles ───────────────────────────────────────────────────────
+do $$ begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'context' and table_name = 'entities' and column_name = 'domains') then
+    raise exception 'FAIL entities.domains missing';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_schema = 'measure' and table_name = 'serp_citations' and column_name = 'source_role' and is_nullable = 'NO') then
+    raise exception 'FAIL serp_citations.source_role missing or nullable';
+  end if;
+  if (select count(*) from measure.source_domains where classified_by = 'seed') < 200 then
+    raise exception 'FAIL the source catalogue seed is missing';
+  end if;
+end $$;
+
+-- The 0004 fixture citation was written after 0022 without a role: the trigger gave it one.
+select pg_temp.expect('a citation written without a role is classified on insert',
+  (select count(*) from measure.serp_citations where domain = 'competitor.com' and source_role = 'unknown'), 1);
+
+-- Acme names Okta (the 0007 fixture) with its domain; each site overrides one catalogue domain.
+update context.entities set domains = '{okta.com}' where id = 'eeeeeeee-2000-0000-0000-000000000002';
+-- org_id deliberately omitted: the site trigger must fill it.
+insert into measure.site_source_overrides (site_id, domain, role) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'medium.com', 'vendor_other'),
+  ('bbbbbbbb-0000-0000-0000-000000000002', 'reddit.com', 'review_platform');
+
+do $$ begin
+  if exists (select 1 from measure.site_source_overrides where org_id is null) then raise exception 'FAIL site_source_overrides org trigger'; end if;
+  begin
+    insert into measure.site_source_overrides (site_id, domain, role) values ('aaaaaaaa-0000-0000-0000-000000000001', 'medium.com', 'analyst');
+    raise exception 'FAIL a second override of one domain on one site must be rejected';
+  exception when unique_violation then null;
+  end;
+  begin
+    insert into measure.site_source_overrides (site_id, domain, role) values ('aaaaaaaa-0000-0000-0000-000000000001', 'okta.com', 'competitor');
+    raise exception 'FAIL an override must not name a competitor (that is an entity)';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into measure.site_source_overrides (site_id, domain, role) values ('aaaaaaaa-0000-0000-0000-000000000001', 'acme.io', 'owned');
+    raise exception 'FAIL an override must not claim ownership';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into measure.site_source_overrides (site_id, domain, role) values ('aaaaaaaa-0000-0000-0000-000000000001', 'https://www.quora.com/x', 'video');
+    raise exception 'FAIL an override domain must be normalised';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into measure.source_domains (domain, role) values ('rival.example', 'competitor');
+    raise exception 'FAIL the global catalogue must not name competitors';
+  exception when check_violation then null;
+  end;
+  begin
+    update context.entities set domains = '{WWW.Okta.com}' where id = 'eeeeeeee-2000-0000-0000-000000000002';
+    raise exception 'FAIL entity domains must be normalised';
+  exception when check_violation then null;
+  end;
+  raise notice 'ok  overrides, catalogue rows and entity domains are well formed';
+end $$;
+
+-- Precedence: owned, override, competitor, catalogue (longest match), unknown.
+select pg_temp.expect('the site''s own domain and subdomains are owned',
+  (select count(*) from measure.classify_source('aaaaaaaa-0000-0000-0000-000000000001', 'https://docs.acme.com/x') where role = 'owned'), 1);
+select pg_temp.expect('a competitor''s domain and its subdomains are that competitor',
+  (select count(*) from measure.classify_source('aaaaaaaa-0000-0000-0000-000000000001', 'www.blog.okta.com')
+    where role = 'competitor' and entity_id = 'eeeeeeee-2000-0000-0000-000000000002'), 1);
+select pg_temp.expect('another org''s competitor is not this site''s',
+  (select count(*) from measure.classify_source('bbbbbbbb-0000-0000-0000-000000000002', 'okta.com') where role = 'unknown'), 1);
+select pg_temp.expect('a site override beats the catalogue',
+  (select count(*) from measure.classify_source('aaaaaaaa-0000-0000-0000-000000000001', 'medium.com') where role = 'vendor_other'), 1);
+select pg_temp.expect('an override is its own site''s only',
+  (select count(*) from measure.classify_source('bbbbbbbb-0000-0000-0000-000000000002', 'medium.com') where role = 'publisher_editorial'), 1);
+select pg_temp.expect('the longest catalogue match wins',
+  (select count(*) from measure.classify_source('aaaaaaaa-0000-0000-0000-000000000001', 'answers.microsoft.com') where role = 'ugc_forum'), 1);
+select pg_temp.expect('a subdomain takes its catalogue domain''s role',
+  (select count(*) from measure.classify_source('aaaaaaaa-0000-0000-0000-000000000001', 'en.wikipedia.org') where role = 'reference_wiki'), 1);
+select pg_temp.expect('an unlisted domain is unknown',
+  (select count(*) from measure.classify_source('aaaaaaaa-0000-0000-0000-000000000001', 'rival.example') where role = 'unknown' and entity_id is null), 1);
+
+-- The insert trigger applies the same precedence.
+begin;
+  insert into measure.serp_citations (site_id, serp_snapshot_id, surface, url, domain, position, is_owned) values
+    ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-0000-0000-0000-000000000001', 'ai_overview', 'https://blog.okta.com/scim', 'blog.okta.com', 2, false),
+    ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-0000-0000-0000-000000000001', 'ai_overview', 'https://www.reddit.com/r/sso', 'reddit.com', 3, false),
+    ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-0000-0000-0000-000000000001', 'ai_overview', 'https://acme.com/resources/scim', 'acme.com', 4, true);
+  select pg_temp.expect('a competitor citation carries its entity',
+    (select count(*) from measure.serp_citations where domain = 'blog.okta.com' and source_role = 'competitor' and entity_id = 'eeeeeeee-2000-0000-0000-000000000002'), 1);
+  select pg_temp.expect('reddit is a forum, not a competitor',
+    (select count(*) from measure.serp_citations where domain = 'reddit.com' and source_role = 'ugc_forum' and entity_id is null), 1);
+  select pg_temp.expect('an owned citation is owned',
+    (select count(*) from measure.serp_citations where domain = 'acme.com' and source_role = 'owned'), 1);
+rollback;
+
+-- Watched topic domains become competitors: by name when one entity spells it, unconfirmed otherwise.
+begin;
+  insert into context.entities (org_id, type, name) values ('11111111-1111-1111-1111-111111111111', 'competitor', 'OneLogin');
+  select pg_temp.expect('seeding reports what it attached or added',
+    (select count(*) from measure.seed_competitor_domains('11111111-1111-1111-1111-111111111111',
+      '{https://www.onelogin.com/blog,jumpcloud.com,login.jumpcloud.com,okta.com,blog.okta.com,g2.com,acme.com,docs.acme.com,salesforce.com,app.rippling.com,rippling.com,not a domain}')), 4);
+  select pg_temp.expect('a watched domain joins the competitor whose name it spells',
+    (select count(*) from context.entities where org_id = '11111111-1111-1111-1111-111111111111' and name = 'OneLogin' and domains = '{onelogin.com}'), 1);
+  select pg_temp.expect('an unmatched watched domain becomes an unconfirmed competitor',
+    (select count(*) from context.entities where org_id = '11111111-1111-1111-1111-111111111111' and name = 'jumpcloud.com'
+       and type = 'competitor' and domains = '{jumpcloud.com}' and metadata ? 'seeded_from'), 1);
+  select pg_temp.expect('a vendor watched as a rival is a competitor',
+    (select count(*) from context.entities where org_id = '11111111-1111-1111-1111-111111111111' and 'salesforce.com' = any (domains)), 1);
+  select pg_temp.expect('a review site watched as a rival stays a review site',
+    (select count(*) from context.entities where 'g2.com' = any (domains)), 0);
+  select pg_temp.expect('the org''s own domains are never competitors',
+    (select count(*) from context.entities where domains && '{acme.com,docs.acme.com}'), 0);
+  select pg_temp.expect('a domain a competitor has already is left alone',
+    (select count(*) from context.entities where 'okta.com' = any (domains)), 1);
+  select pg_temp.expect('a subdomain of a competitor''s domain is that competitor''s, whichever was watched first',
+    (select count(*) from context.entities where domains && '{blog.okta.com,login.jumpcloud.com,app.rippling.com}'), 0);
+  select pg_temp.expect('a watched subdomain folds into its domain''s competitor',
+    (select count(*) from context.entities where org_id = '11111111-1111-1111-1111-111111111111' and domains = '{rippling.com}'), 1);
+  select pg_temp.expect('a watched subdomain is that competitor''s citation',
+    (select count(*) from measure.classify_source('aaaaaaaa-0000-0000-0000-000000000001', 'login.jumpcloud.com') r
+       join context.entities e on e.id = r.entity_id where e.name = 'jumpcloud.com'), 1);
+  select pg_temp.expect('seeding is per org',
+    (select count(*) from context.entities where org_id = '22222222-2222-2222-2222-222222222222' and type = 'competitor'), 0);
+rollback;
+
+-- "Not a competitor" sticks: a watched domain named after an entity someone removed is not seeded again.
+begin;
+  insert into context.entities (org_id, type, name, metadata)
+  values ('11111111-1111-1111-1111-111111111111', 'other', 'ping.example', '{"removed_as_competitor_at": "2026-10-01T00:00:00Z"}');
+  select pg_temp.expect('a removed competitor''s domain is not seeded again',
+    (select count(*) from measure.seed_competitor_domains('11111111-1111-1111-1111-111111111111', '{ping.example}')), 0);
+  select pg_temp.expect('the removed entity stays an ordinary one',
+    (select count(*) from context.entities where name = 'ping.example' and type = 'other' and domains = '{}'), 1);
+rollback;
+
+-- A watched domain an entity of another kind is named after is not a competitor, and is not reported as one.
+begin;
+  insert into context.entities (org_id, type, name) values
+    ('11111111-1111-1111-1111-111111111111', 'integration', 'slack.example'),
+    ('11111111-1111-1111-1111-111111111111', 'other', 'asana.example');
+  create temp table seeded on commit drop as
+    select domain from measure.seed_competitor_domains('11111111-1111-1111-1111-111111111111', '{slack.example,asana.example}');
+  select pg_temp.expect('seeding reports only what landed on a competitor',
+    (select count(*) from seeded), 1);
+  select pg_temp.expect('the domain reported is the one now a competitor''s',
+    (select count(*) from seeded where domain = 'asana.example'), 1);
+  select pg_temp.expect('an integration named after a watched domain keeps its type and gets no domain',
+    (select count(*) from context.entities where name = 'slack.example' and type = 'integration' and domains = '{}'), 1);
+  select pg_temp.expect('no competitor holds a domain an integration is named after',
+    (select count(*) from context.entities where 'slack.example' = any (domains)), 0);
+  select pg_temp.expect('an ordinary entity named after a watched domain becomes the competitor',
+    (select count(*) from context.entities where name = 'asana.example' and type = 'competitor' and domains = '{asana.example}'), 1);
+rollback;
+
+grant insert, update, delete on measure.site_source_overrides to app_user;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member reads the source catalogue', (select (count(*) >= 200)::int from measure.source_domains), 1);
+  select pg_temp.expect('acme member sees own overrides', (select count(*) from measure.site_source_overrides), 1);
+  select pg_temp.expect('acme member never sees globex overrides',
+    (select count(*) from measure.site_source_overrides where site_id = 'bbbbbbbb-0000-0000-0000-000000000002'), 0);
+  select pg_temp.expect('acme member sees own competitor domains',
+    (select count(*) from context.entities where 'okta.com' = any (domains)), 1);
+  update measure.site_source_overrides set role = 'analyst';
+  select pg_temp.expect('tenant_write on overrides touches own rows only', (select count(*) from measure.site_source_overrides where role = 'analyst'), 1);
+rollback;
+
+-- An override is filed under its site's org whoever writes it and whatever org they pass.
+begin;
+  insert into measure.site_source_overrides (site_id, org_id, domain, role)
+  values ('aaaaaaaa-0000-0000-0000-000000000001', '22222222-2222-2222-2222-222222222222', 'quora.com', 'video');
+  select pg_temp.expect('an override takes its site''s org, not the one written',
+    (select count(*) from measure.site_source_overrides where domain = 'quora.com' and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+  update measure.site_source_overrides set org_id = '22222222-2222-2222-2222-222222222222' where domain = 'quora.com';
+  select pg_temp.expect('an override''s org cannot be changed away from its site''s',
+    (select count(*) from measure.site_source_overrides where domain = 'quora.com' and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+  update measure.site_source_overrides set site_id = 'bbbbbbbb-0000-0000-0000-000000000002' where domain = 'quora.com';
+  select pg_temp.expect('an override moved to another site takes that site''s org',
+    (select count(*) from measure.site_source_overrides where domain = 'quora.com' and org_id = '22222222-2222-2222-2222-222222222222'), 1);
+rollback;
+
+-- Even a row filed under the wrong org some other way never steers the site it names.
+begin;
+  alter table measure.site_source_overrides disable trigger site_source_overrides_org;
+  insert into measure.site_source_overrides (site_id, org_id, domain, role)
+  values ('bbbbbbbb-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'quora.com', 'video');
+  select pg_temp.expect('classify_source ignores an override filed under another org',
+    (select count(*) from measure.classify_source('bbbbbbbb-0000-0000-0000-000000000002', 'quora.com') where role = 'ugc_forum'), 1);
+rollback;
+
+-- A member cannot file an override against another org's site under their own org, or move one there.
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  do $$
+  declare refused boolean := false;
+  begin
+    begin
+      insert into measure.site_source_overrides (site_id, org_id, domain, role)
+      values ('bbbbbbbb-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111', 'acme.com', 'publisher_editorial');
+    exception when insufficient_privilege then
+      refused := true;
+    end;
+    if not refused then raise exception 'FAIL an acme member filed an override against a globex site under acme'; end if;
+    refused := false;
+    begin
+      update measure.site_source_overrides set site_id = 'bbbbbbbb-0000-0000-0000-000000000002', role = 'ugc_forum'
+        where domain = 'medium.com';
+    exception when insufficient_privilege then
+      refused := true;
+    end;
+    if not refused then raise exception 'FAIL an acme member moved its override onto a globex site'; end if;
+    raise notice 'ok  a member cannot steer another org''s site through an override';
+  end $$;
+rollback;
+select pg_temp.expect('globex''s roles are untouched by acme''s attempts',
+  (select count(*) from measure.site_source_overrides where site_id = 'bbbbbbbb-0000-0000-0000-000000000002'), 1);
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      insert into measure.site_source_overrides (site_id, org_id, domain, role)
+      values ('aaaaaaaa-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'quora.com', 'video');
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL a globex member must not override a role on an acme site';
+    end if;
+    raise notice 'ok  a member cannot write another org''s overrides';
+  end $$;
+  select pg_temp.expect('globex member never sees acme competitor domains',
+    (select count(*) from context.entities where 'okta.com' = any (domains)), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every override', (select count(*) from measure.site_source_overrides), 2);
+rollback;
+
+begin;
+  set local role app_user;
+  do $$ begin
+    if (select count(*) from measure.site_source_overrides) <> 0 then raise exception 'FAIL overrides readable without claims'; end if;
+    raise notice 'ok  absent claims see no overrides';
+  end $$;
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare t text;
+  declare denied boolean;
+  begin
+    foreach t in array array['measure.source_domains', 'measure.site_source_overrides'] loop
+      denied := false;
+      begin
+        execute format('select 1 from %s limit 1', t);
+      exception when insufficient_privilege then
+        denied := true;
+      end;
+      if not denied then
+        raise exception 'FAIL renderer must not read %', t;
+      end if;
+    end loop;
+    raise notice 'ok  renderer cannot read the source catalogue or overrides';
+  end $$;
+rollback;
+
+\echo 'isolation: source role assertions passed'

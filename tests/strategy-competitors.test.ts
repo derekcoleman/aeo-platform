@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { demandCounts } from "@/lib/app/demand";
-import { competitorDomains } from "@/lib/app/strategy";
+import { groupByRole, namedCompetitors, sourcesShapingAnswers, type SourceDomainRow } from "@/lib/app/strategy";
+import { NON_TARGET_SOURCE_ROLES } from "@/lib/measure/source-roles";
 import { loadInventorySignals } from "@/lib/refresh/scan";
 import { analyzeHtml, classifyContentType, collectCompetitorUrls, structuralTargetBlock, structuralTargetFrom, type CompetitorPageRow } from "@/lib/strategy/competitors";
 import { parseHtml } from "@/lib/audit/html";
@@ -66,17 +67,44 @@ describe("native-only competitor reads", () => {
   it("the cited-page set comes from Google AI Overview citations of our own trackers, never Profound's engines", async () => {
     const sql = fakeSql();
     await collectCompetitorUrls(SITE, {}, sql);
-    expect(sql.queries[0]!.text).toContain("c.surface = 'ai_overview' and s.provider = any ($2::measure.serp_provider[])");
-    expect(sql.queries[0]!.values[1]).toEqual(["dataforseo", "serpapi"]);
+    expect(sql.queries[0]!.text).toContain("c.surface = 'ai_overview' and c.source_role <> all ($2::measure.source_role[]) and s.provider = any ($3::measure.serp_provider[])");
+    expect(sql.queries[0]!.values[2]).toEqual(["dataforseo", "serpapi"]);
   });
 
-  it("competitor domains are native by default; Profound is asked for on its own, every surface counted", async () => {
+  it("forums, video, social, review sites, wikis, directories and marketplaces are never a structural target; publishers, vendors and unknown domains are", async () => {
     const sql = fakeSql();
-    await competitorDomains(SITE, {}, sql);
-    await competitorDomains(SITE, { providers: ["profound"] }, sql);
-    expect(sql.queries[0]!.text).toContain("s.provider = any ($2::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')");
-    expect(sql.queries[0]!.values[1]).toEqual(["dataforseo", "serpapi"]);
-    expect(sql.queries[1]!.values[1]).toEqual(["profound"]);
+    await collectCompetitorUrls(SITE, {}, sql);
+    const excluded = sql.queries[0]!.values[1] as string[];
+    expect(excluded).toEqual(["owned", "ugc_forum", "video", "professional_social", "review_platform", "reference_wiki", "directory", "partner_marketplace"]);
+    expect(excluded).toEqual([...NON_TARGET_SOURCE_ROLES]);
+    for (const kept of ["competitor", "publisher_editorial", "analyst", "vendor_other", "unknown"]) expect(excluded).not.toContain(kept);
+  });
+
+  it("named competitors and sources shaping answers are native by default; Profound is asked for on its own, every surface counted", async () => {
+    const sql = fakeSql();
+    await namedCompetitors(SITE, {}, sql);
+    await namedCompetitors(SITE, { providers: ["profound"] }, sql);
+    await sourcesShapingAnswers(SITE, {}, sql);
+    await sourcesShapingAnswers(SITE, { providers: ["profound"] }, sql);
+    const [named, namedProfound, sources, sourcesProfound] = sql.queries;
+    expect(named!.text).toContain("c.source_role = 'competitor' and c.entity_id is not null and s.provider = any ($2::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')");
+    // Every competitor the org named is listed, cited or not, and only this site's org's.
+    expect(named!.text).toContain("from context.entities e join app.sites st on st.id = $5 and st.org_id = e.org_id left join cited ci on ci.entity_id = e.id where e.type = 'competitor'");
+    expect(named!.values[1]).toEqual(["dataforseo", "serpapi"]);
+    expect(namedProfound!.values[1]).toEqual(["profound"]);
+    expect(sources!.text).toContain("not c.is_owned and c.source_role not in ('owned', 'competitor') and s.provider = any ($3::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')");
+    expect(sources!.values[2]).toEqual(["dataforseo", "serpapi"]);
+    expect(sourcesProfound!.values[2]).toEqual(["profound"]);
+  });
+
+  it("sources group by role, the most cited role first and the unclassified last", () => {
+    const row = (role: SourceDomainRow["role"], domain: string, citations: number): SourceDomainRow => ({ role, domain, citations, questions: 1, providers: ["serpapi"], overridden: false });
+    const groups = groupByRole([row("unknown", "rival.example", 30), row("ugc_forum", "reddit.com", 12), row("review_platform", "g2.com", 9), row("ugc_forum", "quora.com", 8)]);
+    expect(groups.map((g) => [g.role, g.label, g.citations, g.domains.map((d) => d.domain)])).toEqual([
+      ["ugc_forum", "Forums and communities", 20, ["reddit.com", "quora.com"]],
+      ["review_platform", "Review sites", 9, ["g2.com"]],
+      ["unknown", "Not classified yet", 30, ["rival.example"]],
+    ]);
   });
 
   it("the Demand page's 7-day snapshot count is native only", async () => {

@@ -92,7 +92,13 @@ export interface EntityInput {
   description?: string | null;
 }
 
-/** Insert by (org, lower(name)); on conflict merge aliases and fill blanks, never demote a type someone set. */
+/**
+ * Insert by (org, lower(name)); on conflict merge aliases and fill blanks,
+ * never demote a type someone set, and never make an entity someone removed
+ * as a competitor (removeCompetitor) one again: a re-crawl's profile or an
+ * extracted fact still naming it is not a person changing their mind, and
+ * the Strategy page is where they do.
+ */
 export async function upsertEntity(orgId: string, input: EntityInput, sql: postgres.Sql = appDb()): Promise<EntityRow> {
   const name = input.name.trim();
   const aliases = [...new Set((input.aliases ?? []).map((a) => a.trim()).filter((a) => a && normalizeAlias(a) !== normalizeAlias(name)))];
@@ -101,7 +107,9 @@ export async function upsertEntity(orgId: string, input: EntityInput, sql: postg
     values (${orgId}, ${input.type}, ${name}, ${sql.array(aliases)}, ${input.wikidataId ?? null}, ${input.description ?? null})
     on conflict (org_id, lower(name)) do update
       set aliases = (select array_agg(distinct a) from unnest(context.entities.aliases || excluded.aliases) as a),
-          type = case when context.entities.type = 'other' then excluded.type else context.entities.type end,
+          type = case when context.entities.type = 'other'
+                       and not (excluded.type = 'competitor' and context.entities.metadata ? 'removed_as_competitor_at')
+                      then excluded.type else context.entities.type end,
           wikidata_id = coalesce(context.entities.wikidata_id, excluded.wikidata_id),
           description = coalesce(context.entities.description, excluded.description),
           updated_at = now()

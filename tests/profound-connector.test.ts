@@ -152,6 +152,7 @@ describe("profoundConnector", () => {
 
   it("ingests an upload into questions / snapshots / citations / external_metrics with provider attribution", async () => {
     const nextId = idSequence();
+    const RIVAL = "eeeeeeee-2000-0000-0000-000000000009";
     type Rows<T> = { __rows: T[] };
     const c = ctx(true, [
       [/from app\.sites where id/, () => [{ id: conn.site_id, org_id: conn.org_id, canonical_domain: "www.acme.com", path_prefix: "/resources" }]],
@@ -159,6 +160,8 @@ describe("profoundConnector", () => {
       [/insert into measure\.questions/, (q) => (q.values[0] as Rows<{ normalized: string }>).__rows.map((r) => ({ id: nextId(), normalized: r.normalized, inserted: true }))],
       [/insert into measure\.external_metrics/, () => [{ id: nextId() }, { id: nextId() }]],
       [/from content\.content_items/, () => []],
+      // The org has named rival.com a competitor.
+      [/from context\.entities/, () => [{ domain: "rival.com", entity_id: RIVAL }]],
     ]);
     const r = await profoundConnector.sync({ connection: conn, kind: "upload", cursor: null, payload: { csv, filename: "export.csv" } }, c);
     expect(r.detail).toMatchObject({ questionsInserted: 1, questionsMatched: 0, snapshots: 2, citations: 3, ownedCitations: 1, metrics: 2, rows: 2, skipped: [] });
@@ -184,11 +187,15 @@ describe("profoundConnector", () => {
     expect(snapRows.map((x) => (x.raw.__json as unknown as { row_hash: string }).row_hash)).toEqual(hashes);
     const cites = q.filter((x) => /insert into measure\.serp_citations/.test(x.text));
     expect(cites).toHaveLength(1);
-    const citeRows = (cites[0]!.values[0] as Rows<{ domain: string; is_owned: boolean; serp_snapshot_id: string }>).__rows;
-    expect(citeRows.map((x) => [x.domain, x.is_owned])).toEqual([
-      ["acme.com", true],
-      ["rival.com", false],
-      ["rival.com", false],
+    // The roles are read in the ingest's transaction, after the site was loaded, before the citations are written.
+    const rolesAt = q.findIndex((x) => /from context\.entities/.test(x.text));
+    expect(rolesAt).toBeGreaterThan(q.findIndex((x) => /from app\.sites where id/.test(x.text)));
+    expect(rolesAt).toBeLessThan(q.indexOf(cites[0]!));
+    const citeRows = (cites[0]!.values[0] as Rows<{ domain: string; is_owned: boolean; serp_snapshot_id: string; source_role: string; entity_id: string | null }>).__rows;
+    expect(citeRows.map((x) => [x.domain, x.is_owned, x.source_role, x.entity_id])).toEqual([
+      ["acme.com", true, "owned", null],
+      ["rival.com", false, "competitor", RIVAL],
+      ["rival.com", false, "competitor", RIVAL],
     ]);
     expect(new Set(citeRows.map((x) => x.serp_snapshot_id))).toEqual(new Set(snapRows.map((x) => (x as unknown as { id: string }).id)));
     // Daily metrics are recomputed from the stored snapshots of the touched prompt × engine × day groups.

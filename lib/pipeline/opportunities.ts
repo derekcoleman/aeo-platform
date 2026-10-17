@@ -95,10 +95,15 @@ export function defaultBusinessValue(topics: Map<string, TopicWeight>): number {
 
 /**
  * Citation gaps → opportunities. The gap is the strongest signal we have, so
- * it dominates. A topic's priority moves business value (5 = 100, 1 = 20),
- * and a question on no topic is worth at most the median topic
- * (defaultBusinessValue); a paused topic contributes nothing new; the
- * topic's first preferred format becomes the brief's format hint.
+ * it dominates, and it is sized by who took the citation: each named
+ * competitor adds 10 to the gap and 8 to the difficulty (once, however many
+ * of its hosts were cited), every other cited site (a forum, a review
+ * platform, a publisher) only 3 to the gap. Reddit
+ * in an AI Overview is a reason to answer the question, not a rival. A
+ * topic's priority moves business value (5 = 100, 1 = 20), and a question
+ * on no topic is worth at most the median topic (defaultBusinessValue); a
+ * paused topic contributes nothing new; the topic's first preferred format
+ * becomes the brief's format hint.
  */
 export function opportunitiesFromCitationGaps(gaps: CitationGap[], topics: Map<string, TopicWeight> = new Map()): OpportunityInput[] {
   const out: OpportunityInput[] = [];
@@ -106,11 +111,12 @@ export function opportunitiesFromCitationGaps(gaps: CitationGap[], topics: Map<s
   for (const g of gaps) {
     const topic = g.topic_id ? topics.get(g.topic_id) : undefined;
     if (topic && topic.status !== "active") continue;
-    const competitors = g.competitor_domains.length;
+    const named = g.named_competitors;
+    const others = Math.max(0, g.competitor_domains.length - g.named_competitor_domains.length);
     const scored = scoreOpportunity({
       demand: g.demand_score,
-      citationGap: Math.min(100, 60 + competitors * 10),
-      difficulty: Math.min(100, 30 + competitors * 8),
+      citationGap: Math.min(100, 60 + named * 10 + others * 3),
+      difficulty: Math.min(100, 30 + named * 8),
       businessValue: topic ? topic.priority * 20 : topicless,
     });
     out.push({
@@ -122,7 +128,7 @@ export function opportunitiesFromCitationGaps(gaps: CitationGap[], topics: Map<s
       format: (topic?.formats[0] as OpportunityInput["format"]) ?? null,
       score: scored.score,
       scoreBreakdown: scored.breakdown,
-      evidence: { snapshotId: g.snapshot_id, provider: g.provider, competitorDomains: g.competitor_domains, fetchedAt: g.fetched_at, topicId: g.topic_id ?? null },
+      evidence: { snapshotId: g.snapshot_id, provider: g.provider, competitorDomains: g.competitor_domains, namedCompetitorDomains: g.named_competitor_domains, namedCompetitors: g.named_competitors, fetchedAt: g.fetched_at, topicId: g.topic_id ?? null },
       dedupeKey: `question:${g.question_id}`,
     });
   }

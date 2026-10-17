@@ -20,7 +20,7 @@ import { loadSite } from "@/lib/app/store";
 import { canEdit, requireUser, roleIn } from "@/lib/auth/session";
 import { listEntities } from "@/lib/context/entities";
 import { demandSeeds, mineLocale } from "@/lib/demand/seeds";
-import { citationGaps, visibilitySummary } from "@/lib/demand/store";
+import { citationGaps, visibilitySummary, type CitationGap } from "@/lib/demand/store";
 import { serpConfigured } from "@/lib/serp/env";
 import { listTopics } from "@/lib/strategy/topics";
 
@@ -28,6 +28,12 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const TIERS = ["daily", "weekly", "monthly", "none"] as const;
+
+/** A gap's cited domains, named competitors first. */
+const citedInstead = (g: CitationGap) => {
+  const named = new Set(g.named_competitor_domains);
+  return [...g.named_competitor_domains.map((domain) => ({ domain, named: true })), ...g.competitor_domains.filter((d) => !named.has(d)).map((domain) => ({ domain, named: false }))];
+};
 
 export default async function DemandPage({ params, searchParams }: { params: Promise<{ siteId: string }>; searchParams: Promise<{ tab?: string }> }) {
   const { siteId } = await params;
@@ -77,7 +83,7 @@ export default async function DemandPage({ params, searchParams }: { params: Pro
         <Card><CardHeader className="pb-2"><CardDescription>Tracked questions</CardDescription><CardTitle className="text-3xl tabular-nums">{visibility.questions_tracked}</CardTitle></CardHeader><CardContent className="text-muted-foreground text-xs">{counts.daily} daily · {counts.weekly} weekly · {counts.monthly} monthly</CardContent></Card>
         <Card><CardHeader className="pb-2"><CardDescription>AI Overview triggers</CardDescription><CardTitle className="text-3xl tabular-nums">{visibility.aio_triggered}</CardTitle></CardHeader><CardContent className="text-muted-foreground text-xs">of the latest snapshot per question</CardContent></Card>
         <Card><CardHeader className="pb-2"><CardDescription>Cited in the AI Overview</CardDescription><CardTitle className="text-3xl tabular-nums">{visibility.aio_cited} <span className="text-muted-foreground text-base font-normal">({share}%)</span></CardTitle></CardHeader><CardContent className="text-muted-foreground text-xs">native providers only; Profound is shown separately</CardContent></Card>
-        <Card><CardHeader className="pb-2"><CardDescription>Top competitors cited</CardDescription><CardTitle className="text-base">{visibility.top_competitors.slice(0, 3).map((c) => `${c.domain} (${c.citations})`).join(", ") || "—"}</CardTitle></CardHeader><CardContent className="text-muted-foreground text-xs">{counts.snapshots_7d} snapshots in 7d</CardContent></Card>
+        <Card><CardHeader className="pb-2"><CardDescription>Top competitors cited</CardDescription><CardTitle className="text-base">{visibility.top_competitors.slice(0, 3).map((c) => `${c.domain} (${c.citations})`).join(", ") || "—"}</CardTitle></CardHeader><CardContent className="text-muted-foreground text-xs">named competitors only · {counts.snapshots_7d} snapshots in 7d</CardContent></Card>
       </div>
 
       <UrlTabs defaultValue={defaultTab} values={sections.map((s) => s.value)}>
@@ -89,7 +95,7 @@ export default async function DemandPage({ params, searchParams }: { params: Pro
 
         <TabsContent value="gaps" className="grid gap-4 pt-4">
           <Card>
-            <CardHeader><CardTitle>Where a competitor is cited and you are not</CardTitle><CardDescription>The highest-value opportunity type in the product. These land in the opportunity queue automatically on each scan; start one from the project page.</CardDescription></CardHeader>
+            <CardHeader><CardTitle>Where others are cited and you are not</CardTitle><CardDescription>The highest-value opportunity type in the product. These land in the opportunity queue automatically on each scan, ranked higher when a named competitor took the citation (listed first, in bold); start one from the project page.</CardDescription></CardHeader>
             <CardContent>
               {gaps.length === 0 ? <p className="text-muted-foreground text-sm">No gaps recorded yet. Track questions and take a snapshot.</p> : (
                 <Table>
@@ -99,7 +105,7 @@ export default async function DemandPage({ params, searchParams }: { params: Pro
                       <TableRow key={g.question_id}>
                         <TableCell className="max-w-md font-medium">{g.text}</TableCell>
                         <TableCell className="font-mono">{g.demand_score.toFixed(0)}</TableCell>
-                        <TableCell className="text-muted-foreground text-xs">{g.competitor_domains.slice(0, 4).join(", ")}{g.competitor_domains.length > 4 ? ` +${g.competitor_domains.length - 4}` : ""}</TableCell>
+                        <TableCell className="text-muted-foreground text-xs">{citedInstead(g).slice(0, 4).map((d, i) => <span key={d.domain}>{i ? ", " : ""}{d.named ? <span className="text-foreground font-medium">{d.domain}</span> : d.domain}</span>)}{g.competitor_domains.length > 4 ? ` +${g.competitor_domains.length - 4}` : ""}</TableCell>
                         <TableCell className="text-xs">{when(g.fetched_at)} · {g.provider}</TableCell>
                       </TableRow>
                     ))}

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { contentIdForUrl, isOwnedUrl, loadSiteOwnership, type SiteOwnership } from "@/lib/demand/store";
+import { citationRole, contentIdForUrl, isOwnedUrl, loadSiteOwnership, type SiteOwnership } from "@/lib/demand/store";
 import { normalizeQuestion } from "@/lib/demand/question-graph";
+import { loadSourceRoleContext, type SourceRole } from "@/lib/measure/source-roles";
 import { isFeatureEnabled } from "../store";
 import { ConnectorError, FeatureDisabledError, type Connector, type SyncInput, type SyncPageInput, type SyncPageResult, type SyncResult } from "../types";
 import { ANSWERS_PAGE_SIZE, ProfoundApi, ProfoundApiError, profoundApiConfigSchema } from "./api";
@@ -18,8 +19,10 @@ export * from "./api";
  * the `connector:profound` org feature flag, and native metrics read only
  * NATIVE_PROVIDERS. Their data is mapped into our schema rather than
  * mirrored: prompts → measure.questions (source 'profound'), citations →
- * measure.serp_citations under a snapshot with provider 'profound', and
- * visibility → measure.external_metrics (surface 'profound_visibility').
+ * measure.serp_citations under a snapshot with provider 'profound' (each
+ * with its source role, so a rival and a review site are told apart here
+ * too), and visibility → measure.external_metrics (surface
+ * 'profound_visibility').
  * Every derived row carries the provider so the UI can attribute it.
  */
 
@@ -149,9 +152,12 @@ export async function ingestProfoundRecords(
     }
     out.snapshots = snaps.length;
 
-    // 3. Citations, with owned URLs resolved to content once per URL.
+    // 3. Citations, with owned URLs resolved to content once per URL and
+    // every cited site given its role (competitor, review site, forum…),
+    // read here so a competitor named or removed since `own` was loaded counts.
+    const roles = await loadSourceRoleContext(own.siteId, own.orgId, tx, own.domains);
     const contentIds = new Map<string, string | null>();
-    const cites: { site_id: string; serp_snapshot_id: string; surface: string; url: string; domain: string; position: number; is_owned: boolean; content_id: string | null; title: null; snippet: null }[] = [];
+    const cites: { site_id: string; serp_snapshot_id: string; surface: string; url: string; domain: string; position: number; is_owned: boolean; content_id: string | null; title: null; snippet: null; source_role: SourceRole; entity_id: string | null }[] = [];
     for (const x of snaps) {
       for (const c of x.r.citations) {
         const isOwned = isOwnedUrl(c.url, own);
@@ -161,7 +167,8 @@ export async function ingestProfoundRecords(
           if (!contentIds.has(c.url)) contentIds.set(c.url, await contentIdForUrl(c.url, own, tx));
           contentId = contentIds.get(c.url) ?? null;
         }
-        cites.push({ site_id: own.siteId, serp_snapshot_id: x.id, surface: "ai_overview", url: c.url, domain: c.domain, position: c.position, is_owned: isOwned, content_id: contentId, title: null, snippet: null });
+        const source = citationRole(c.url, c.domain, own, roles);
+        cites.push({ site_id: own.siteId, serp_snapshot_id: x.id, surface: "ai_overview", url: c.url, domain: c.domain, position: c.position, is_owned: isOwned, content_id: contentId, title: null, snippet: null, source_role: source.role, entity_id: source.entityId });
       }
     }
     for (const batch of chunks(cites, INSERT_CHUNK * 2)) await tx`insert into measure.serp_citations ${tx(batch)}`;

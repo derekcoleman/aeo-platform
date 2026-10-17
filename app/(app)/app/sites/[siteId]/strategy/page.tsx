@@ -4,12 +4,12 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { ActionButton } from "@/components/app/action-button";
 import { LiveRefresh } from "@/components/app/live-refresh";
-import { CompetitorDomains, CompetitorDomainsLoading } from "@/components/app/competitor-domains";
+import { CompetitorDomainsLoading, NamedCompetitors, SourcesShapingAnswers } from "@/components/app/competitor-domains";
 import { MethodologyNote } from "@/components/app/methodology-note";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { SyncStatus } from "@/components/app/sync-status";
 import { when } from "@/components/app/status";
-import { ContentRequestForm, EditTopic, KeywordsForm, ProfoundConnectForm, PromptForm, TopicForm } from "@/components/app/strategy-forms";
+import { CompetitorForm, ContentRequestForm, EditTopic, KeywordsForm, ProfoundConnectForm, PromptForm, TopicForm } from "@/components/app/strategy-forms";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -181,15 +181,21 @@ export default async function StrategyPage({ params, searchParams }: { params: P
         <TabsContent value="competitors" className="grid gap-4 pt-4">
           <div className="grid gap-4 lg:grid-cols-2">
             <Card>
-              <CardHeader><CardTitle>Who gets cited instead of you</CardTitle><CardDescription>Google AI Overview citations from our own trackers, last 30 days{profound ? "; Profound's engines are listed separately below" : ""}.</CardDescription></CardHeader>
+              <CardHeader><CardTitle>Competitors</CardTitle><CardDescription>The rivals you name, and how often each was cited in Google AI Overviews instead of you, from our own trackers, last 30 days{profound ? "; Profound's engines in their own column" : ""}. A competitor&apos;s subdomains count as it. Only these count as competitors in the queue&apos;s scores.</CardDescription></CardHeader>
               <CardContent className="grid gap-4">
                 <Suspense fallback={<CompetitorDomainsLoading />}>
-                  <CompetitorDomains siteId={siteId} topicId={topicFilter ?? null} profound={!!profound} />
+                  <NamedCompetitors siteId={siteId} topicId={topicFilter ?? null} profound={!!profound} editor={editor} />
                 </Suspense>
+                {editor ? (
+                  <details>
+                    <summary className="text-muted-foreground cursor-pointer text-sm">Add a competitor</summary>
+                    <div className="mt-3"><CompetitorForm siteId={siteId} /></div>
+                  </details>
+                ) : null}
               </CardContent>
             </Card>
             <Card>
-              <CardHeader><CardTitle>What their content looks like</CardTitle><CardDescription>Cited pages fetched and scored with the same rules the audit and the linter use. This is the structural target every brief is told to beat.</CardDescription></CardHeader>
+              <CardHeader><CardTitle>What their content looks like</CardTitle><CardDescription>Cited pages fetched and scored with the same rules the audit and the linter use; forums, review sites, wikis, social, video, directories and marketplaces are left out. This is the structural target every brief is told to beat.</CardDescription></CardHeader>
               <CardContent className="grid gap-2 text-sm">
                 {editor ? <div><ActionButton size="sm" variant="outline" action={analyzeCompetitorsAction.bind(null, siteId, topicFilter ?? null)} done="Analysis queued">Analyse cited pages now</ActionButton></div> : null}
                 {target.pages === 0 ? <p className="text-muted-foreground">No pages analysed yet.</p> : (
@@ -202,6 +208,14 @@ export default async function StrategyPage({ params, searchParams }: { params: P
               </CardContent>
             </Card>
           </div>
+          <Card>
+            <CardHeader><CardTitle>Sources shaping answers</CardTitle><CardDescription>Sites cited in AI Overviews that are neither yours nor a competitor, last 30 days{profound ? "; Profound's engines listed separately below" : ""}: forums, review platforms, publishers, reference sites, analysts. They are where to be mentioned, not who to beat. Change a site&apos;s role for this project if it is wrong, or mark it a competitor.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4">
+              <Suspense fallback={<CompetitorDomainsLoading />}>
+                <SourcesShapingAnswers siteId={siteId} topicId={topicFilter ?? null} profound={!!profound} editor={editor} />
+              </Suspense>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader><CardTitle>Cited pages</CardTitle></CardHeader>
             <CardContent>

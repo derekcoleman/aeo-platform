@@ -2,6 +2,7 @@ import type postgres from "postgres";
 import { vectorLiteral } from "@/lib/ai/embed";
 import { appDb } from "@/lib/db/app";
 import { METHODOLOGY_VERSION } from "@/lib/app/methodology";
+import { classifySource, loadSourceRoleContext, type SourceClassification, type SourceRoleContext } from "@/lib/measure/source-roles";
 import type { SerpProviderName, SerpResult } from "@/lib/serp";
 import type { QuestionGraph } from "./question-graph";
 
@@ -23,12 +24,26 @@ export async function loadSiteOwnership(siteId: string, sql: postgres.Sql = appD
     select id, org_id, canonical_domain, path_prefix from app.sites where id = ${siteId}`;
   if (!site) return null;
   const extra = await sql<{ hostname: string }[]>`select hostname from app.site_domains where site_id = ${siteId}`;
-  const domains = [site.canonical_domain, ...extra.map((d) => d.hostname)].map(stripWww);
-  return { siteId: site.id, orgId: site.org_id, domains: [...new Set(domains)], pathPrefix: site.path_prefix };
+  const domains = [...new Set([site.canonical_domain, ...extra.map((d) => d.hostname)].map(stripWww))];
+  return { siteId: site.id, orgId: site.org_id, domains, pathPrefix: site.path_prefix };
 }
 
 export function stripWww(host: string): string {
   return host.toLowerCase().replace(/^www\./, "");
+}
+
+/**
+ * A citation's role for this site: owned when its URL is on the site (the
+ * same test as is_owned), otherwise classifySource on its domain. `roles` is
+ * read by the writer in the transaction that writes the row
+ * (loadSourceRoleContext), never carried on SiteOwnership: serp-track
+ * memoises its SiteOwnership for the whole run, and a competitor named or
+ * removed meanwhile would be written with the role it had before (a removed
+ * one's entity id failing the citation's foreign key).
+ */
+export function citationRole(url: string, domain: string, own: Pick<SiteOwnership, "domains">, roles: SourceRoleContext): SourceClassification {
+  if (isOwnedUrl(url, own)) return { role: "owned", entityId: null };
+  return classifySource(domain || safeHost(url), roles);
 }
 
 export function isOwnedUrl(url: string, own: Pick<SiteOwnership, "domains">): boolean {
@@ -201,8 +216,13 @@ export async function listTrackedQuestions(tier: TrackedQuestion["tracking_tier"
 
 /**
  * Persist one SERP fetch as a snapshot plus its citations, across all four
- * surfaces. `is_owned` and `content_id` are computed here — the snapshot is
- * the record of what Google showed, the citation rows are the join to us.
+ * surfaces. `is_owned`, `content_id` and the cited site's `source_role`
+ * (with its competitor entity) are computed here — the snapshot is the
+ * record of what Google showed, the citation rows are the join to us and to
+ * the competitors. One transaction: a citation that cannot be written leaves
+ * no snapshot behind to stand as the question's latest measurement. The
+ * roles are read inside it, against the competitors and overrides as they
+ * are now, not as the caller loaded `own`.
  */
 /** A SERP result from our providers, or a Profound record shaped like one (provider 'profound'). */
 export type SnapshotInput = Omit<SerpResult, "provider"> & { provider: SerpProviderName | "profound"; cached?: boolean };
@@ -214,18 +234,6 @@ export async function recordSnapshot(
   sql: postgres.Sql = appDb(),
 ): Promise<{ snapshotId: string; citations: number; ownedCitations: number; aioTriggered: boolean | null }> {
   const aio = result.aiOverview;
-  const [snap] = await sql<{ id: string }[]>`
-    insert into measure.serp_snapshots
-      (site_id, question_id, provider, fetched_at, locale, device, aio_triggered, aio_text,
-       featured_snippet_url, organic_count, cached, raw, cost_usd)
-    values
-      (${own.siteId}, ${questionId}, ${result.provider}, ${result.fetchedAt},
-       ${`${result.locale.country}-${result.locale.language}`}, ${result.device},
-       ${aio ? aio.triggered : null}, ${aio?.text ?? null}, ${result.featuredSnippet?.url ?? null},
-       ${result.organic.length}, ${result.cached ?? false}, ${sql.json((result.raw ?? null) as never)}, ${result.costUsd})
-    returning id`;
-  const snapshotId = snap!.id;
-
   type Row = { surface: "ai_overview" | "featured_snippet" | "organic" | "paa"; url: string; domain: string; position: number; title?: string; snippet?: string };
   const rows: Row[] = [];
   for (const r of aio?.references ?? []) rows.push({ surface: "ai_overview", url: r.url, domain: r.domain, position: r.position, title: r.title });
@@ -235,19 +243,36 @@ export async function recordSnapshot(
     if (p.sourceUrl) rows.push({ surface: "paa", url: p.sourceUrl, domain: stripWww(safeHost(p.sourceUrl)), position: i + 1, title: p.sourceTitle, snippet: p.answerSnippet });
   });
 
-  let owned = 0;
-  for (const r of rows) {
-    const isOwned = isOwnedUrl(r.url, own);
-    const contentId = isOwned ? await contentIdForUrl(r.url, own, sql) : null;
-    if (isOwned) owned += 1;
-    await sql`
-      insert into measure.serp_citations
-        (site_id, serp_snapshot_id, surface, url, domain, position, is_owned, content_id, title, snippet)
+  return sql.begin(async (trx) => {
+    const tx = trx as unknown as postgres.Sql;
+    const roles = await loadSourceRoleContext(own.siteId, own.orgId, tx, own.domains);
+    const [snap] = await tx<{ id: string }[]>`
+      insert into measure.serp_snapshots
+        (site_id, question_id, provider, fetched_at, locale, device, aio_triggered, aio_text,
+         featured_snippet_url, organic_count, cached, raw, cost_usd)
       values
-        (${own.siteId}, ${snapshotId}, ${r.surface}, ${r.url}, ${r.domain}, ${r.position}, ${isOwned}, ${contentId},
-         ${r.title ?? null}, ${r.snippet ?? null})`;
-  }
-  return { snapshotId, citations: rows.length, ownedCitations: owned, aioTriggered: aio ? aio.triggered : null };
+        (${own.siteId}, ${questionId}, ${result.provider}, ${result.fetchedAt},
+         ${`${result.locale.country}-${result.locale.language}`}, ${result.device},
+         ${aio ? aio.triggered : null}, ${aio?.text ?? null}, ${result.featuredSnippet?.url ?? null},
+         ${result.organic.length}, ${result.cached ?? false}, ${tx.json((result.raw ?? null) as never)}, ${result.costUsd})
+      returning id`;
+    const snapshotId = snap!.id;
+
+    let owned = 0;
+    for (const r of rows) {
+      const isOwned = isOwnedUrl(r.url, own);
+      const contentId = isOwned ? await contentIdForUrl(r.url, own, tx) : null;
+      const source = citationRole(r.url, r.domain, own, roles);
+      if (isOwned) owned += 1;
+      await tx`
+        insert into measure.serp_citations
+          (site_id, serp_snapshot_id, surface, url, domain, position, is_owned, content_id, title, snippet, source_role, entity_id)
+        values
+          (${own.siteId}, ${snapshotId}, ${r.surface}, ${r.url}, ${r.domain}, ${r.position}, ${isOwned}, ${contentId},
+           ${r.title ?? null}, ${r.snippet ?? null}, ${source.role}, ${source.entityId})`;
+    }
+    return { snapshotId, citations: rows.length, ownedCitations: owned, aioTriggered: aio ? aio.triggered : null };
+  });
 }
 
 function safeHost(url: string): string {
@@ -266,7 +291,12 @@ export interface CitationGap {
   snapshot_id: string;
   fetched_at: string;
   provider: string;
+  /** Every non-owned domain the AI Overview cited. */
   competitor_domains: string[];
+  /** The ones that are named competitors (source role competitor); forums, review sites and the rest are not. */
+  named_competitor_domains: string[];
+  /** How many named competitors those domains are: okta.com and blog.okta.com are one. */
+  named_competitors: number;
 }
 
 /**
@@ -304,7 +334,9 @@ export async function citationGaps(
     )
     select q.id as question_id, q.topic_id, q.text, q.demand_score::float as demand_score,
            l.id as snapshot_id, l.fetched_at, l.provider,
-           array_agg(distinct c.domain order by c.domain) as competitor_domains
+           array_agg(distinct c.domain order by c.domain) as competitor_domains,
+           coalesce(array_agg(distinct c.domain order by c.domain) filter (where c.source_role = 'competitor'), '{}') as named_competitor_domains,
+           (count(distinct coalesce(c.entity_id::text, c.domain)) filter (where c.source_role = 'competitor'))::int as named_competitors
     from latest l
     join measure.questions q on q.id = l.question_id
     join measure.serp_citations c on c.serp_snapshot_id = l.id and c.surface = 'ai_overview'
@@ -322,6 +354,7 @@ export interface VisibilitySummary {
   aio_triggered: number;
   aio_cited: number;
   featured_snippets_owned: number;
+  /** Named competitors only (source role competitor), by domain; forums, review sites and the like are not competitors. */
   top_competitors: { domain: string; citations: number }[];
   /** How these numbers are computed; see lib/app/methodology.ts. */
   methodology_version: string;
@@ -356,7 +389,7 @@ export async function visibilitySummary(
     )
     select c.domain, count(*)::int as citations
     from measure.serp_citations c join latest on latest.id = c.serp_snapshot_id
-    where c.surface = 'ai_overview' and not c.is_owned
+    where c.surface = 'ai_overview' and c.source_role = 'competitor'
     group by c.domain order by citations desc limit 10`;
   return { ...row!, top_competitors: top, methodology_version: METHODOLOGY_VERSION };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QuestionGraph } from "@/lib/demand/question-graph";
-import { citationGaps, GAP_FRESHNESS_DAYS, isOwnedUrl, listTrackedQuestions, stripWww, upsertQuestionGraph, vectorLiteral } from "@/lib/demand/store";
+import { citationGaps, GAP_FRESHNESS_DAYS, isOwnedUrl, listTrackedQuestions, stripWww, upsertQuestionGraph, vectorLiteral, visibilitySummary } from "@/lib/demand/store";
 import { batchBySite } from "@/lib/inngest/demand";
 import { cosine, hashEmbedder, normalize } from "@/lib/ai/embed";
 import { fakeSql, idSequence } from "./helpers/fake-sql";
@@ -68,6 +68,20 @@ describe("tracking scope", () => {
     expect(q.text).toContain("fetched_at >= now() - make_interval(days => $3)");
     expect(q.text).toContain("where l.aio_triggered is true and not q.excluded");
     expect(q.values.slice(0, 3)).toEqual([SITE, ["dataforseo", "serpapi"], GAP_FRESHNESS_DAYS]);
+  });
+
+  it("a gap lists every cited domain and, apart, the named competitors among them", async () => {
+    const sql = fakeSql();
+    await citationGaps(SITE, 10, sql);
+    expect(sql.queries[0]!.text).toContain("coalesce(array_agg(distinct c.domain order by c.domain) filter (where c.source_role = 'competitor'), '{}') as named_competitor_domains");
+    // Named competitors are counted by entity: two hosts of one rival are one.
+    expect(sql.queries[0]!.text).toContain("(count(distinct coalesce(c.entity_id::text, c.domain)) filter (where c.source_role = 'competitor'))::int as named_competitors");
+  });
+
+  it("the Demand page's top competitors are named competitors, not every cited site", async () => {
+    const sql = fakeSql([[/as questions_tracked/, () => [{ questions_tracked: 0, aio_triggered: 0, aio_cited: 0, featured_snippets_owned: 0 }]]]);
+    await visibilitySummary(SITE, sql);
+    expect(sql.queries[1]!.text).toContain("where c.surface = 'ai_overview' and c.source_role = 'competitor' group by c.domain");
   });
 });
 

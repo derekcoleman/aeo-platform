@@ -1,6 +1,7 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
 import { NATIVE_PROVIDERS, type SnapshotProvider } from "@/lib/demand/store";
+import { SOURCE_ROLE_LABELS, type SourceRole } from "@/lib/measure/source-roles";
 
 /**
  * Read models for the Strategy page. Native numbers come from our own SERP
@@ -96,36 +97,115 @@ export async function profoundByTopic(siteId: string, sql: postgres.Sql = appDb(
   return new Map(rows.map((r) => [r.topic_id ?? "", r]));
 }
 
-export interface CompetitorDomainRow {
-  domain: string;
+/** The 30-day window and provider rule both competitor read models share. */
+interface CitedOpts {
+  topicId?: string | null;
+  limit?: number;
+  providers?: readonly SnapshotProvider[];
+}
+
+export interface NamedCompetitorRow {
+  entity_id: string;
+  name: string;
+  aliases: string[];
+  domains: string[];
+  /** Seeded from a topic's watched domains and not yet confirmed by a person. */
+  unconfirmed: boolean;
   citations: number;
   questions: number;
+  /** The competitor's domains that were cited in the window (a subdomain counts as its domain). */
+  cited_domains: string[];
   providers: string[];
 }
 
 /**
- * Who gets cited instead of us, last 30 days. Native by default: Google AI
- * Overview citations from our own trackers, `providers` naming which vendor
- * saw each. Profound is asked for separately (`providers: ["profound"]`) and
- * shown as its own list, every surface counted, since its answers come from
- * other engines and are never AI Overview numbers.
+ * The org's named competitors (competitor entities with their domains) and
+ * how often each was cited instead of us in the last 30 days, every one
+ * listed even when it was not. Native by default: Google AI Overview
+ * citations from our own trackers. Profound is asked for separately
+ * (`providers: ["profound"]`), every surface counted, and shown as its own
+ * column, never added to the native one.
  */
-export async function competitorDomains(
-  siteId: string,
-  opts: { topicId?: string | null; limit?: number; providers?: readonly SnapshotProvider[] } = {},
-  sql: postgres.Sql = appDb(),
-): Promise<CompetitorDomainRow[]> {
+export async function namedCompetitors(siteId: string, opts: CitedOpts = {}, sql: postgres.Sql = appDb()): Promise<NamedCompetitorRow[]> {
   const providers = [...(opts.providers ?? NATIVE_PROVIDERS)];
-  return sql<CompetitorDomainRow[]>`
-    select c.domain, count(*)::int as citations, count(distinct s.question_id)::int as questions,
-           array_agg(distinct s.provider::text order by s.provider::text) as providers
+  return sql<NamedCompetitorRow[]>`
+    with cited as (
+      select c.entity_id, count(*)::int as citations, count(distinct s.question_id)::int as questions,
+             array_agg(distinct c.domain order by c.domain) as cited_domains,
+             array_agg(distinct s.provider::text order by s.provider::text) as providers
+      from measure.serp_citations c
+      join measure.serp_snapshots s on s.id = c.serp_snapshot_id
+      join measure.questions q on q.id = s.question_id
+      where c.site_id = ${siteId} and c.source_role = 'competitor' and c.entity_id is not null
+        and s.provider = any (${providers}::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')
+        and s.fetched_at >= now() - interval '30 days'
+        and not q.excluded and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
+      group by c.entity_id
+    )
+    select e.id as entity_id, e.name, e.aliases, e.domains, (e.metadata ? 'seeded_from') as unconfirmed,
+           coalesce(ci.citations, 0)::int as citations, coalesce(ci.questions, 0)::int as questions,
+           coalesce(ci.cited_domains, '{}') as cited_domains, coalesce(ci.providers, '{}') as providers
+    from context.entities e
+    join app.sites st on st.id = ${siteId} and st.org_id = e.org_id
+    left join cited ci on ci.entity_id = e.id
+    where e.type = 'competitor'
+    order by citations desc, e.name
+    limit ${opts.limit ?? 50}`;
+}
+
+export interface SourceDomainRow {
+  role: SourceRole;
+  domain: string;
+  citations: number;
+  questions: number;
+  providers: string[];
+  /** This site set the role itself (an override on exactly this domain). */
+  overridden: boolean;
+}
+
+export interface SourceRoleGroup {
+  role: SourceRole;
+  label: string;
+  citations: number;
+  domains: SourceDomainRow[];
+}
+
+/**
+ * The sites that shape the answers without competing: every cited domain
+ * that is neither ours nor a named competitor, last 30 days, grouped by
+ * role (forums, review sites, publishers…; unknown last) and most cited
+ * first within each. These are earned-media targets. Native by default, as
+ * namedCompetitors; Profound is its own list.
+ */
+export async function sourcesShapingAnswers(siteId: string, opts: CitedOpts = {}, sql: postgres.Sql = appDb()): Promise<SourceRoleGroup[]> {
+  const providers = [...(opts.providers ?? NATIVE_PROVIDERS)];
+  const rows = await sql<SourceDomainRow[]>`
+    select c.source_role::text as role, c.domain, count(*)::int as citations, count(distinct s.question_id)::int as questions,
+           array_agg(distinct s.provider::text order by s.provider::text) as providers,
+           exists (select 1 from measure.site_source_overrides o where o.site_id = ${siteId} and o.domain = measure.normalize_domain(c.domain)) as overridden
     from measure.serp_citations c
     join measure.serp_snapshots s on s.id = c.serp_snapshot_id
     join measure.questions q on q.id = s.question_id
-    where c.site_id = ${siteId} and not c.is_owned and s.provider = any (${providers}::measure.serp_provider[])
-      and (c.surface = 'ai_overview' or s.provider = 'profound') and s.fetched_at >= now() - interval '30 days'
+    where c.site_id = ${siteId} and not c.is_owned and c.source_role not in ('owned', 'competitor')
+      and s.provider = any (${providers}::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')
+      and s.fetched_at >= now() - interval '30 days'
       and not q.excluded and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
-    group by c.domain order by citations desc limit ${opts.limit ?? 15}`;
+    group by c.source_role, c.domain
+    order by citations desc, c.domain
+    limit ${opts.limit ?? 40}`;
+  return groupByRole(rows);
+}
+
+/** Rows (most cited first) → one group per role, the most cited role first and unknown last. */
+export function groupByRole(rows: SourceDomainRow[]): SourceRoleGroup[] {
+  const groups = new Map<SourceRole, SourceRoleGroup>();
+  for (const r of rows) {
+    const g = groups.get(r.role) ?? { role: r.role, label: SOURCE_ROLE_LABELS[r.role] ?? r.role, citations: 0, domains: [] };
+    g.citations += r.citations;
+    g.domains.push(r);
+    groups.set(r.role, g);
+  }
+  return [...groups.values()].sort((a, b) => Number(a.role === "unknown") - Number(b.role === "unknown") || b.citations - a.citations);
 }
 
 export interface ProfoundConnectionSummary {

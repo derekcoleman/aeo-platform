@@ -9,7 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import type { ActionResult } from "@/lib/app/actions";
-import { addPromptAction, connectProfoundAction, createContentAction, saveTopicAction } from "@/lib/app/strategy-actions";
+import { addPromptAction, connectProfoundAction, createContentAction, saveCompetitorAction, saveTopicAction, setSourceRoleAction } from "@/lib/app/strategy-actions";
+import type { SourceRole } from "@/lib/measure/source-roles";
 import type { TopicRow } from "@/lib/strategy/topics";
 
 const FORMATS = ["comparison", "howto", "guide", "listicle", "faq"] as const;
@@ -81,7 +82,7 @@ export function TopicForm({ siteId, topic, onDone }: { siteId: string; topic?: T
         <Textarea name="seedTerms" rows={4} defaultValue={topic?.seed_terms.join("\n") ?? ""} placeholder={"scim\nuser provisioning\nscim vs sso"} />
       </div>
       <div className="grid gap-1">
-        <Label>Competitor domains to watch (one per line)</Label>
+        <Label>Competitor domains to watch (one per line; each becomes a competitor to confirm)</Label>
         <Textarea name="competitorDomains" rows={4} defaultValue={topic?.competitor_domains.join("\n") ?? ""} placeholder={"okta.com\nonelogin.com"} />
       </div>
       <div className="grid gap-1 sm:col-span-2">
@@ -212,6 +213,88 @@ export function ProfoundConnectForm({ siteId }: { siteId: string }) {
         <Button type="submit" disabled={pending}>{pending ? "Checking…" : "Connect Profound"}</Button>
         <Note state={state} okText="Connected." />
       </div>
+    </form>
+  );
+}
+
+// ── named competitors and source roles ─────────────────────────────────────
+
+export interface CompetitorFormValue {
+  entity_id: string;
+  name: string;
+  domains: string[];
+  aliases: string[];
+}
+
+/** Name a competitor, or confirm or edit one: its name, the domains that count as it, and what else it is called. */
+export function CompetitorForm({ siteId, competitor, defaultDomain, onDone }: { siteId: string; competitor?: CompetitorFormValue | null; defaultDomain?: string; onDone?: () => void }) {
+  const [state, action, pending] = useActionState<ActionResult | null, FormData>(async (prev, form) => {
+    const r = await saveCompetitorAction(prev, form);
+    if (r.ok) onDone?.();
+    return r;
+  }, null);
+  const key = competitor?.entity_id ?? defaultDomain ?? "new";
+  return (
+    <form action={action} className="grid gap-3 sm:grid-cols-2">
+      <input type="hidden" name="siteId" value={siteId} />
+      {competitor ? <input type="hidden" name="entityId" value={competitor.entity_id} /> : null}
+      <div className="grid gap-1 sm:col-span-2">
+        <Label htmlFor={`competitor-name-${key}`}>Competitor</Label>
+        <Input id={`competitor-name-${key}`} name="name" required maxLength={120} defaultValue={competitor?.name ?? defaultDomain ?? ""} placeholder="Okta" />
+      </div>
+      <div className="grid gap-1">
+        <Label htmlFor={`competitor-domains-${key}`}>Domains (one per line; subdomains count too)</Label>
+        <Textarea id={`competitor-domains-${key}`} name="domains" rows={3} defaultValue={competitor?.domains.join("\n") ?? defaultDomain ?? ""} placeholder={"okta.com\nauth0.com"} />
+      </div>
+      <div className="grid gap-1">
+        <Label htmlFor={`competitor-aliases-${key}`}>Also called (one per line)</Label>
+        <Textarea id={`competitor-aliases-${key}`} name="aliases" rows={3} defaultValue={competitor?.aliases.join("\n") ?? ""} placeholder={"Okta Workforce Identity\nAuth0"} />
+      </div>
+      <div className="flex items-center gap-3 sm:col-span-2">
+        <Button type="submit" size="sm" disabled={pending}>{pending ? "Saving…" : competitor ? "Save competitor" : "Add competitor"}</Button>
+        <Note state={state} />
+      </div>
+    </form>
+  );
+}
+
+/** Edit or confirm a named competitor in place. */
+export function EditCompetitor({ siteId, competitor, confirm }: { siteId: string; competitor: CompetitorFormValue; confirm?: boolean }) {
+  const [open, setOpen] = useState(false);
+  if (!open) return <Button size="sm" variant={confirm ? "outline" : "ghost"} className="h-7 px-2 text-xs" onClick={() => setOpen(true)}>{confirm ? "Confirm" : "Edit"}</Button>;
+  return (
+    <div className="mt-2 rounded-md border p-3 text-left">
+      <CompetitorForm siteId={siteId} competitor={competitor} onDone={() => setOpen(false)} />
+      <Button size="sm" variant="ghost" className="mt-2" onClick={() => setOpen(false)}>Close</Button>
+    </div>
+  );
+}
+
+/** "This is a competitor": opens the competitor form with the cited domain filled in. */
+export function MarkCompetitor({ siteId, domain }: { siteId: string; domain: string }) {
+  const [open, setOpen] = useState(false);
+  if (!open) return <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setOpen(true)}>Competitor</Button>;
+  return (
+    <div className="mt-2 rounded-md border p-3 text-left">
+      <CompetitorForm siteId={siteId} defaultDomain={domain} onDone={() => setOpen(false)} />
+      <Button size="sm" variant="ghost" className="mt-2" onClick={() => setOpen(false)}>Close</Button>
+    </div>
+  );
+}
+
+/** Set this site's role for a cited domain, or (when it set one) hand it back to the catalogue. */
+export function SourceRoleForm({ siteId, domain, role, overridden, roles }: { siteId: string; domain: string; role: SourceRole; overridden: boolean; roles: { value: SourceRole; label: string }[] }) {
+  const [state, action, pending] = useActionState<ActionResult | null, FormData>(setSourceRoleAction, null);
+  return (
+    <form action={action} className="inline-flex items-center gap-1">
+      <input type="hidden" name="siteId" value={siteId} />
+      <input type="hidden" name="domain" value={domain} />
+      <select name="role" defaultValue={overridden ? role : ""} aria-label={`Role of ${domain}`} className="border-input bg-background h-7 rounded-md border px-2 text-xs">
+        <option value="">{overridden ? "Catalogue default" : `Catalogue: ${roles.find((r) => r.value === role)?.label ?? role}`}</option>
+        {roles.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+      </select>
+      <Button type="submit" size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={pending}>{pending ? "…" : "Set"}</Button>
+      <Note state={state} />
     </form>
   );
 }

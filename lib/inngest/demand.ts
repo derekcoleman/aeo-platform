@@ -129,6 +129,9 @@ export const serpTrackFunction = inngest.createFunction(
   async ({ event, step, attempt }) => {
     const { siteId, orgId, questionIds } = event.data;
 
+    // Memoised for the whole run, so it carries only the site's domains:
+    // recordSnapshot reads the competitors and overrides it classifies
+    // citations with when it writes them.
     const own = await step.run("load-site", () => loadSiteOwnership(siteId));
     if (!own) return { skipped: "site not found" as const };
 

@@ -30,6 +30,7 @@ export const METHODOLOGY_CHANGES: MethodologyChange[] = [
       "The site's Search Console click total counts each click once; it summed the page and the query reports.",
       "Crawler hits are rolled up over whole UTC days, and a day's count never goes down.",
       "Excluded questions, paused sites and organisations whose plan has lapsed are no longer tracked.",
+      "Competitors are the rivals you name. Forums, review platforms, reference sites, publishers and other cited sites are listed as sources shaping answers, no longer as competitors, and count for less in the queue's scores.",
     ],
   },
 ];

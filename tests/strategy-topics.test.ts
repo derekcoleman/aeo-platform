@@ -72,7 +72,7 @@ describe("addManualPrompt", () => {
 });
 
 describe("topic-aware gap scoring", () => {
-  const gap = (id: string, topic: string | null) => ({ question_id: id, topic_id: topic, text: id, demand_score: 50, snapshot_id: "s", fetched_at: "", provider: "serpapi", competitor_domains: ["okta.com"] });
+  const gap = (id: string, topic: string | null) => ({ question_id: id, topic_id: topic, text: id, demand_score: 50, snapshot_id: "s", fetched_at: "", provider: "serpapi", competitor_domains: ["okta.com"], named_competitor_domains: ["okta.com"], named_competitors: 1 });
   it("boosts by priority, skips paused topics, and carries the topic's format", () => {
     const weights = new Map([
       ["t-hi", { id: "t-hi", priority: 5, formats: ["comparison"], status: "active" as const }],
