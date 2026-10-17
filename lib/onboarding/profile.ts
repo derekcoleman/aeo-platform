@@ -98,7 +98,7 @@ export async function extractBusinessProfile(
   scope: { orgId: string; siteId: string },
   sql: postgres.Sql = appDb(),
 ): Promise<{ profile: BusinessProfile; run: ModelRun }> {
-  const { value, run } = await runJsonTask("site.profile.extract", model, { system: SYSTEM, prompt: profilePrompt(pages, site), promptVersion: PROFILE_PROMPT_VERSION, maxTokens: 4096, temperature: 0.1 }, businessProfileSchema, scope, sql);
+  const { value, run } = await runJsonTask("site.profile.extract", model, { system: SYSTEM, prompt: profilePrompt(pages, site), promptVersion: PROFILE_PROMPT_VERSION }, businessProfileSchema, scope, sql);
   return { profile: value, run };
 }
 

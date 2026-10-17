@@ -18,11 +18,13 @@ import { decideApprovalAction, dismissOpportunityAction, runHealthCheckAction, r
 import { listHealthChecks, listOpportunities, listPendingApprovals, listPreflights, listPublished } from "@/lib/app/queries";
 import { loadSite } from "@/lib/app/store";
 import { canManage, requireUser, roleIn } from "@/lib/auth/session";
-import { buildInstall } from "@/lib/proxy/install";
+import { buildInstall, workerUpgradeNotice } from "@/lib/proxy/install";
 import { crawlSummary } from "@/lib/analytics/crawl";
 import { CrawlersPanel } from "@/components/app/crawlers-panel";
 import { BusinessProfileCard } from "@/components/app/business-profile";
 import { DeleteSiteDialog } from "@/components/app/delete-site-dialog";
+import { DismissOpportunity } from "@/components/app/opportunity-forms";
+import { explainEV0, PERSON_DISMISS_REASONS } from "@/lib/pipeline/opportunities";
 import { canEdit } from "@/lib/auth/session";
 import { listTopics } from "@/lib/strategy/topics";
 
@@ -45,15 +47,17 @@ export default async function SitePage({ params, searchParams }: { params: Promi
     listTopics(siteId),
   ]);
   const trackedKeywords = topics.flatMap((t) => [t.name, ...t.seed_terms]);
+  const manage = canManage(user, site.org_id);
   const install = buildInstall({
     site: { id: site.id, canonicalDomain: site.canonical_domain, pathPrefix: site.path_prefix, edgeHostname: site.edge_hostname, proxyMode: site.proxy_mode, name: site.name },
     mirrorOrigin: process.env.AEO_MIRROR_ORIGIN,
     crawlEndpoint: process.env.APP_URL ? `${process.env.APP_URL}/api/ingest/crawl` : undefined,
-    hmacSecret: site.proxy_hmac_secret,
+    // The signing secret is a manager's to see and paste; everyone else gets a placeholder.
+    hmacSecret: manage ? site.proxy_hmac_secret : null,
   });
+  const workerUpgrade = workerUpgradeNotice({ proxyMode: site.proxy_mode, workerVersion: site.worker_version, installed: site.status !== "provisioning", canonicalDomain: site.canonical_domain });
   const latestPreflight = preflights.find((p) => p.kind === "preflight");
   const latestReport = preflights.find((p) => p.crawler_access)?.crawler_access ?? null;
-  const manage = canManage(user, site.org_id);
   const sections = sitePage("overview").sections!;
   const defaultTab = site.status === "active" ? "content" : "install";
   const tab = resolveTab(sections, requestedTab, defaultTab);
@@ -105,6 +109,18 @@ export default async function SitePage({ params, searchParams }: { params: Promi
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
+              {workerUpgrade ? (
+                <Alert variant="warning">
+                  <AlertTitle>Update your Worker</AlertTitle>
+                  <AlertDescription>{workerUpgrade}</AlertDescription>
+                </Alert>
+              ) : null}
+              {install.secretWithheld ? (
+                <Alert>
+                  <AlertTitle>Signing secret hidden</AlertTitle>
+                  <AlertDescription>Only organisation owners and admins can see the secret that signs this Worker&apos;s requests. Ask one to deploy it, or to paste the secret in place of the placeholder.</AlertDescription>
+                </Alert>
+              ) : null}
               {install.warnings.length ? (
                 <Alert variant="warning">
                   <AlertTitle>What this mode gives up</AlertTitle>
@@ -112,7 +128,7 @@ export default async function SitePage({ params, searchParams }: { params: Promi
                 </Alert>
               ) : null}
               <CopyBlock filename={install.filename} text={install.config} />
-              {install.routePattern ? <p className="text-muted-foreground text-xs">Route pattern: <span className="font-mono">{install.routePattern}</span></p> : null}
+              {install.routePattern ? <p className="text-muted-foreground text-xs">Route pattern: <span className="font-mono">{install.routePattern}</span>{install.routeNote ? ` · ${install.routeNote}` : null}</p> : null}
               <div className="text-sm">
                 <p className="font-medium">Also rewrite these root paths to us (we merge with anything you already serve):</p>
                 <ul className="text-muted-foreground mt-1 list-disc pl-4 font-mono text-xs">{install.extraRewrites.map((r) => <li key={r.source}>{r.source} <span className="font-sans">— {r.reason}</span></li>)}</ul>
@@ -228,25 +244,26 @@ export default async function SitePage({ params, searchParams }: { params: Promi
           <Card>
             <CardHeader>
               <CardTitle>Opportunity queue</CardTitle>
-              <CardDescription>Citation gaps, buyer questions and signals, scored so the number is arguable. Start one to run it through brief → draft → QA → approval → publish.</CardDescription>
+              <CardDescription>Citation gaps, buyer questions, signals and refreshes, ranked on expected value: demand × intent × how likely the gap is to close × the topic&apos;s priority × fit with the site, divided by the work. Hover a score for its factors. Start one to run it through brief → draft → QA → approval → publish.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
               <div><ActionButton size="sm" variant="outline" action={scanOpportunitiesAction.bind(null, siteId)} done="Scan queued">Rescan now</ActionButton></div>
               {opportunities.length === 0 ? <p className="text-muted-foreground text-sm">Nothing queued. Connect Search Console or mine a question graph to fill this.</p> : (
                 <Table>
-                  <TableHeader><TableRow><TableHead>Score</TableHead><TableHead>Opportunity</TableHead><TableHead>Source</TableHead><TableHead>Status</TableHead><TableHead></TableHead></TableRow></TableHeader>
+                  <TableHeader><TableRow><TableHead>Score</TableHead><TableHead>Opportunity</TableHead><TableHead>Source</TableHead><TableHead>Action</TableHead><TableHead>Status</TableHead><TableHead></TableHead></TableRow></TableHeader>
                   <TableBody>
                     {opportunities.map((o) => (
                       <TableRow key={o.id}>
-                        <TableCell className="font-mono">{o.score.toFixed(0)}</TableCell>
+                        <TableCell className="font-mono" title={explainEV0(o.score_breakdown) ?? "Scored before expected value; the next scan re-scores it"}>{o.score.toFixed(o.score < 10 ? 1 : 0)}</TableCell>
                         <TableCell className="max-w-md"><p className="truncate font-medium">{o.title}</p><p className="text-muted-foreground truncate text-xs">{o.target_query}</p></TableCell>
                         <TableCell><Badge variant="outline">{o.source}</Badge></TableCell>
+                        <TableCell><Badge variant={o.action_type === "new_page" ? "secondary" : "outline"}>{o.action_type.replace("_", " ")}</Badge></TableCell>
                         <TableCell>{o.status}</TableCell>
                         <TableCell className="text-right">
                           {o.status === "open" ? (
                             <span className="inline-flex gap-2">
                               <ActionButton size="sm" action={startPipelineAction.bind(null, o.id, undefined)} done="Started">Draft it</ActionButton>
-                              <ActionButton size="sm" variant="ghost" action={dismissOpportunityAction.bind(null, o.id)} done="Dismissed">Dismiss</ActionButton>
+                              <DismissOpportunity action={dismissOpportunityAction.bind(null, o.id)} reasons={PERSON_DISMISS_REASONS} />
                             </span>
                           ) : null}
                         </TableCell>
@@ -261,7 +278,7 @@ export default async function SitePage({ params, searchParams }: { params: Promi
             <CardHeader><CardTitle>Published</CardTitle></CardHeader>
             <CardContent>
               {published.length === 0 ? <p className="text-muted-foreground text-sm">Nothing published yet.</p> : (
-                <ul className="grid gap-1 text-sm">{published.map((p) => <li key={p.path} className="flex justify-between gap-4"><a className="truncate underline-offset-2 hover:underline" href={`https://${site.canonical_domain}${p.path}`} target="_blank" rel="noreferrer">{p.title ?? p.path}</a><span className="text-muted-foreground shrink-0 text-xs">{when(p.updated_at)}</span></li>)}</ul>
+                <ul className="grid gap-1 text-sm">{published.map((p) => <li key={p.path} className="flex justify-between gap-4"><a className="truncate underline-offset-2 hover:underline" href={`https://${site.canonical_domain}${p.path}`} target="_blank" rel="noreferrer">{p.title ?? p.path}</a><span className="text-muted-foreground shrink-0 text-xs">{p.status !== "live" ? `${p.status} · ` : ""}{when(p.updated_at)}</span></li>)}</ul>
               )}
             </CardContent>
           </Card>

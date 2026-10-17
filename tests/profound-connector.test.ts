@@ -57,6 +57,17 @@ describe("field parsers", () => {
     expect(parseBool("maybe")).toBeNull();
     expect(normalizeEngine("ChatGPT (GPT-4o)")).toBe("chatgpt");
     expect(normalizeEngine("Google AI Overviews")).toBe("google_aio");
+    expect(normalizeEngine("AIO")).toBe("google_aio");
+    // Google's other surfaces are not AI Overviews, however the export spells them.
+    expect(normalizeEngine("Google AI Mode")).toBe("ai_mode");
+    expect(normalizeEngine("google_ai_mode")).toBe("ai_mode");
+    expect(normalizeEngine("Google Gemini")).toBe("gemini");
+    expect(normalizeEngine("Gemini 2.5 Pro")).toBe("gemini");
+    expect(normalizeEngine("aimode")).toBe("ai_mode");
+    // "AI Mode" as words of its own: a model name that merely contains "ai mode" is not Google's surface.
+    expect(normalizeEngine("ChatGPT (OpenAI model gpt-4o)")).toBe("chatgpt");
+    expect(normalizeEngine("OpenAI Model")).toBe("chatgpt");
+    expect(normalizeEngine("Meta AI Model")).toBe("meta_ai_model");
     expect(normalizeEngine("Microsoft Copilot")).toBe("copilot");
     expect(normalizeEngine("")).toBe("unknown");
     expect(normalizeEngine("Some New Engine")).toBe("some_new_engine");
@@ -141,6 +152,7 @@ describe("profoundConnector", () => {
 
   it("ingests an upload into questions / snapshots / citations / external_metrics with provider attribution", async () => {
     const nextId = idSequence();
+    const RIVAL = "eeeeeeee-2000-0000-0000-000000000009";
     type Rows<T> = { __rows: T[] };
     const c = ctx(true, [
       [/from app\.sites where id/, () => [{ id: conn.site_id, org_id: conn.org_id, canonical_domain: "www.acme.com", path_prefix: "/resources" }]],
@@ -148,6 +160,8 @@ describe("profoundConnector", () => {
       [/insert into measure\.questions/, (q) => (q.values[0] as Rows<{ normalized: string }>).__rows.map((r) => ({ id: nextId(), normalized: r.normalized, inserted: true }))],
       [/insert into measure\.external_metrics/, () => [{ id: nextId() }, { id: nextId() }]],
       [/from content\.content_items/, () => []],
+      // The org has named rival.com a competitor.
+      [/from context\.entities/, () => [{ domain: "rival.com", entity_id: RIVAL }]],
     ]);
     const r = await profoundConnector.sync({ connection: conn, kind: "upload", cursor: null, payload: { csv, filename: "export.csv" } }, c);
     expect(r.detail).toMatchObject({ questionsInserted: 1, questionsMatched: 0, snapshots: 2, citations: 3, ownedCitations: 1, metrics: 2, rows: 2, skipped: [] });
@@ -158,11 +172,16 @@ describe("profoundConnector", () => {
     expect(q.filter((x) => /insert into measure\.questions/.test(x.text))).toHaveLength(1);
     const snaps = q.filter((x) => /insert into measure\.serp_snapshots/.test(x.text));
     expect(snaps).toHaveLength(1);
-    const snapRows = (snaps[0]!.values[0] as Rows<{ provider: string; fetched_at: string; raw: { __json: { engine: string } } }>).__rows;
+    const snapRows = (snaps[0]!.values[0] as Rows<{ provider: string; fetched_at: string; engine: string; collection_method: string; aio_triggered: boolean | null; raw: { __json: { engine: string } } }>).__rows;
     expect(snapRows).toHaveLength(2);
     expect(snapRows.map((x) => [x.provider, x.fetched_at, x.raw.__json.engine])).toEqual([
       ["profound", "2026-08-20T00:00:00.000Z", "chatgpt"],
       ["profound", "2026-08-21T00:00:00.000Z", "perplexity"],
+    ]);
+    // Third-party answers on their own engines: not AI Overviews, never a SERP row.
+    expect(snapRows.map((x) => [x.engine, x.collection_method, x.aio_triggered])).toEqual([
+      ["chatgpt", "third_party", null],
+      ["perplexity", "third_party", null],
     ]);
     // The same rows (by content hash) are removed before the insert, so a replayed page cannot double them.
     const wipe = q.find((x) => /delete from measure\.serp_snapshots s using unnest/.test(x.text))!;
@@ -173,11 +192,15 @@ describe("profoundConnector", () => {
     expect(snapRows.map((x) => (x.raw.__json as unknown as { row_hash: string }).row_hash)).toEqual(hashes);
     const cites = q.filter((x) => /insert into measure\.serp_citations/.test(x.text));
     expect(cites).toHaveLength(1);
-    const citeRows = (cites[0]!.values[0] as Rows<{ domain: string; is_owned: boolean; serp_snapshot_id: string }>).__rows;
-    expect(citeRows.map((x) => [x.domain, x.is_owned])).toEqual([
-      ["acme.com", true],
-      ["rival.com", false],
-      ["rival.com", false],
+    // The roles are read in the ingest's transaction, after the site was loaded, before the citations are written.
+    const rolesAt = q.findIndex((x) => /from context\.entities/.test(x.text));
+    expect(rolesAt).toBeGreaterThan(q.findIndex((x) => /from app\.sites where id/.test(x.text)));
+    expect(rolesAt).toBeLessThan(q.indexOf(cites[0]!));
+    const citeRows = (cites[0]!.values[0] as Rows<{ domain: string; is_owned: boolean; serp_snapshot_id: string; source_role: string; entity_id: string | null; surface: string }>).__rows;
+    expect(citeRows.map((x) => [x.domain, x.is_owned, x.source_role, x.entity_id, x.surface])).toEqual([
+      ["acme.com", true, "owned", null, "llm_answer"],
+      ["rival.com", false, "competitor", RIVAL, "llm_answer"],
+      ["rival.com", false, "competitor", RIVAL, "llm_answer"],
     ]);
     expect(new Set(citeRows.map((x) => x.serp_snapshot_id))).toEqual(new Set(snapRows.map((x) => (x as unknown as { id: string }).id)));
     // Daily metrics are recomputed from the stored snapshots of the touched prompt × engine × day groups.
@@ -186,7 +209,7 @@ describe("profoundConnector", () => {
     expect(metrics[0]!.text).toContain("from unnest(");
     expect(metrics[0]!.text).toContain("join measure.serp_snapshots s on");
     expect(metrics[0]!.text).toContain("'samples', count(distinct s.id)");
-    expect((metrics[0]!.values[3] as { __array: string[] }).__array.length).toBe(2);
+    expect((metrics[0]!.values[4] as { __array: string[] }).__array.length).toBe(2);
   });
 
   it("hashes a row by everything Profound gave us, so two samples of one prompt/engine/day stay distinct", async () => {
@@ -256,7 +279,7 @@ describe("paged API sync", () => {
       [/org_feature_enabled/, () => [{ enabled: true }]],
       [/select id, org_id, canonical_domain, path_prefix from app\.sites/, () => [{ id: apiConn.site_id, org_id: apiConn.org_id, canonical_domain: "acme.com", path_prefix: "/resources" }]],
       [/insert into measure\.questions/, (q) => ((q.values[0] as { __rows: { normalized: string }[] }).__rows).map((r) => ({ id: next(), normalized: r.normalized, inserted: true }))],
-      [/insert into measure\.external_metrics/, (q) => (q.values[3] as { __array: string[] }).__array.map(() => ({ id: next() }))],
+      [/insert into measure\.external_metrics/, (q) => (q.values[4] as { __array: string[] }).__array.map(() => ({ id: next() }))],
     ]);
     const secrets = memorySecrets();
     secrets.store.set(apiConn.secret_ref!, "key");
@@ -272,18 +295,26 @@ describe("paged API sync", () => {
     expect(profoundConnector.pagesSync!({ ...apiConn, config: { mode: "csv" } }, "incremental")).toBe(false);
   });
 
-  it("the first page fixes the range, clears it, and hands back a page token; the last page hands back the cursor", async () => {
+  const rangeSweep = /delete from measure\.serp_snapshots where site_id = \$1 and provider = 'profound' and fetched_at >= \$2 and fetched_at < \$3 and raw->>'sync_run' is distinct from \$4/;
+
+  it("the first page fixes the range and mints the run marker; only the last page sweeps the range for rows the run did not write", async () => {
     const { ctx, sql, calls } = pagedCtx([[row(1, "2026-08-08"), row(2, "2026-08-08")], []], 2);
     const first = await profoundConnector.syncPage!({ connection: apiConn, kind: "backfill", cursor: null, page: null }, ctx);
     expect(calls[0]).toEqual({ start: "2026-08-08", end: "2026-09-06", offset: 0 });
-    expect(sql.queries.some((q) => /delete from measure\.serp_snapshots where site_id = \$1 and provider = 'profound' and fetched_at >= \$2 and fetched_at < \$3/.test(q.text) && q.values[1] === "2026-08-08T00:00:00.000Z" && q.values[2] === "2026-09-18T00:00:00.000Z")).toBe(true);
+    // Nothing is cleared up front: the old rows stay until the run has everything.
+    expect(sql.queries.some((q) => rangeSweep.test(q.text))).toBe(false);
+    expect(sql.queries.some((q) => /delete from measure\.external_metrics/.test(q.text))).toBe(false);
     expect(sql.queries.some((q) => /delete from measure\.serp_snapshots s using unnest/.test(q.text))).toBe(true);
-    expect(sql.queries.some((q) => /delete from measure\.external_metrics where connection_id = \$1/.test(q.text) && q.values[1] === "2026-08-08" && q.values[2] === "2026-09-17")).toBe(true);
-    expect(sql.queries.filter((q) => /insert into measure\.serp_snapshots/.test(q.text)).length).toBe(1);
+    const inserted = sql.queries.filter((q) => /insert into measure\.serp_snapshots/.test(q.text));
+    expect(inserted).toHaveLength(1);
+    const run = (first.next as { run: string }).run;
+    expect(run).toMatch(/^[0-9a-f-]{36}$/);
+    const stamped = (inserted[0]!.values[0] as { __rows: { raw: { __json: { sync_run: string } } }[] }).__rows;
+    expect(stamped.every((r) => r.raw.__json.sync_run === run)).toBe(true);
     expect(sql.queries.filter((q) => /insert into measure\.serp_citations/.test(q.text)).length).toBe(1);
     expect(first.metricsIngested).toBe(2);
     // A short page (2 < 2000) ends the first window; the next window starts the day after it.
-    expect(first.next).toEqual({ rangeStart: "2026-08-08", rangeEnd: "2026-09-17", start: "2026-09-07", end: "2026-09-17", offset: 0 });
+    expect(first.next).toEqual({ rangeStart: "2026-08-08", rangeEnd: "2026-09-17", start: "2026-09-07", end: "2026-09-17", offset: 0, run });
     expect(first.cursor).toBeNull();
     expect(first.detail).toMatchObject({ rows: 2, snapshots: 2, citations: 1 * 2, ownedCitations: 2, window: { start: "2026-08-08", end: "2026-09-17" } });
 
@@ -291,8 +322,29 @@ describe("paged API sync", () => {
     expect(calls[1]).toEqual({ start: "2026-09-07", end: "2026-09-17", offset: 0 });
     expect(last.next).toBeNull();
     expect(last.cursor).toEqual({ through: "2026-09-17" });
-    // The range was cleared once, on the first page only.
-    expect(sql.queries.filter((q) => /delete from measure\.serp_snapshots where site_id/.test(q.text)).length).toBe(1);
+    const sweeps = sql.queries.filter((q) => rangeSweep.test(q.text));
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0]!.values).toEqual([apiConn.site_id, "2026-08-08T00:00:00.000Z", "2026-09-18T00:00:00.000Z", run]);
+    const metricsSweep = sql.queries.find((q) => /delete from measure\.external_metrics/.test(q.text))!;
+    expect(metricsSweep.text).toContain("metrics->>'sync_run' is distinct from $4");
+    expect(metricsSweep.values).toEqual([apiConn.site_id, "2026-08-08", "2026-09-17", run]);
+  });
+
+  it("a run whose first page fails writes and deletes nothing", async () => {
+    const { ctx, sql } = pagedCtx([], 0);
+    const failing: ConnectorContext = { ...ctx, fetchImpl: (async () => new Response("upstream down", { status: 400 })) as unknown as typeof fetch };
+    await expect(profoundConnector.syncPage!({ connection: apiConn, kind: "backfill", cursor: null, page: null }, failing)).rejects.toThrow();
+    expect(sql.queries.filter((q) => /^(delete|insert|update)/.test(q.text))).toEqual([]);
+  });
+
+  it("a page token from before run markers neither stamps nor sweeps", async () => {
+    const { ctx, sql } = pagedCtx([[row(1, "2026-09-10")]], 1);
+    const legacy = { rangeStart: "2026-09-10", rangeEnd: "2026-09-17", start: "2026-09-10", end: "2026-09-17", offset: 0 };
+    const r = await profoundConnector.syncPage!({ connection: apiConn, kind: "incremental", cursor: { through: "2026-09-10" }, page: legacy }, ctx);
+    expect(r.next).toBeNull();
+    expect(sql.queries.some((q) => rangeSweep.test(q.text))).toBe(false);
+    const inserted = sql.queries.find((q) => /insert into measure\.serp_snapshots/.test(q.text))!;
+    expect((inserted.values[0] as { __rows: { raw: { __json: { sync_run: string | null } } }[] }).__rows[0]!.raw.__json.sync_run).toBeNull();
   });
 
   it("an incremental run starts at the cursor and a bad page token starts over", async () => {

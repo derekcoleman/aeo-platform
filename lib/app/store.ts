@@ -111,11 +111,16 @@ export interface SiteRow {
   profile_status: "none" | "queued" | "running" | "ready" | "failed";
   profile_error: string | null;
   profile_updated_at: string | Date | null;
+  /** What the site's Cloudflare Worker last reported in telemetry; null for none yet or a v1 Worker. */
+  worker_version: string | null;
+  worker_seen_at: string | Date | null;
+  /** The owner's site-wide indexing pause (setIndexingPaused); staff controls are read separately. */
+  indexing_paused: boolean;
 }
 
 
 /** Column list shared by every site read/insert so a new column cannot be forgotten in one place. */
-export const SITE_COLUMNS = "id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at, keywords, profile, profile_status, profile_error, profile_updated_at";
+export const SITE_COLUMNS = "id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, locale, status, proxy_hmac_secret, verified_at, health_failures, last_health_ok, last_health_at, created_at, keywords, profile, profile_status, profile_error, profile_updated_at, worker_version, worker_seen_at, indexing_paused";
 
 export class SiteInputError extends Error {}
 
@@ -168,9 +173,40 @@ export async function loadSite(siteId: string, sql: postgres.Sql = appDb()): Pro
   return row ?? null;
 }
 
+/**
+ * Pause, resume or disable a site. Publishing holds while it is paused or
+ * disabled (lib/pipeline/guard.ts). Middleware reads `status` through
+ * SiteResolver's per-isolate cache, so other isolates see the change within
+ * that cache's 60s TTL; the invalidation here only clears this process's.
+ */
 export async function setSiteStatus(siteId: string, orgId: string, status: "paused" | "active" | "disabled", userId: string, sql: postgres.Sql = appDb()): Promise<void> {
-  await sql`update app.sites set status = ${status} where id = ${siteId} and org_id = ${orgId}`;
+  const [row] = await sql<{ edge_hostname: string }[]>`update app.sites set status = ${status} where id = ${siteId} and org_id = ${orgId} returning edge_hostname`;
   await sql`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, after) values (${orgId}, ${userId}, 'site.status', 'site', ${siteId}, ${sql.json({ status } as never)})`;
+  if (row) invalidateSite(row.edge_hostname);
+}
+
+/**
+ * The owner's site-wide takedown: every page serves noindex, the sitemap,
+ * feed and llms files list nothing, and publishing holds. The trigger from
+ * migration 0020 copies the effective pause into content.site_render_config,
+ * which the renderer reads on every request, so it holds from the next one.
+ * Returns false when the site is not in that org.
+ */
+export async function setIndexingPaused(siteId: string, orgId: string, paused: boolean, userId: string, reason: string | null = null, sql: postgres.Sql = appDb()): Promise<boolean> {
+  const [row] = await sql<{ edge_hostname: string }[]>`update app.sites set indexing_paused = ${paused} where id = ${siteId} and org_id = ${orgId} returning edge_hostname`;
+  if (!row) return false;
+  await sql`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, after)
+    values (${orgId}, ${userId}, ${paused ? "site.indexing_paused" : "site.indexing_resumed"}, 'site', ${siteId}, ${sql.json({ indexingPaused: paused, reason: reason?.trim().slice(0, 500) || null } as never)})`;
+  invalidateSite(row.edge_hostname);
+  return true;
+}
+
+function invalidateSite(edgeHostname: string): void {
+  try {
+    siteResolver().invalidate(edgeHostname);
+  } catch {
+    // The resolver needs Supabase env; without it there is no cache to clear.
+  }
 }
 
 /**
@@ -191,9 +227,5 @@ export async function deleteSite(site: Pick<SiteRow, "id" | "org_id" | "name" | 
              values (${site.org_id}, ${userId}, 'site.delete', 'site', ${site.id}, ${tx.json({ name: site.name, domain: site.canonical_domain, pathPrefix: site.path_prefix, edgeHostname: site.edge_hostname, connections: refs.length } as never)})`;
     await tx`delete from app.sites where id = ${site.id} and org_id = ${site.org_id}`;
   });
-  try {
-    siteResolver().invalidate(site.edge_hostname);
-  } catch {
-    // The resolver needs Supabase env; without it there is no cache to clear.
-  }
+  invalidateSite(site.edge_hostname);
 }

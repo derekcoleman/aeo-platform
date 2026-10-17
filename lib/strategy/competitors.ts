@@ -3,6 +3,7 @@ import { runPageRules, type StructureScore } from "@/lib/aeo/rules";
 import { htmlToMarkdown, pageTitle, parseHtml, type Doc } from "@/lib/audit/html";
 import { appDb } from "@/lib/db/app";
 import { safeFetch } from "@/lib/fetch";
+import { NON_TARGET_SOURCE_ROLES } from "@/lib/measure/source-roles";
 
 /**
  * Competitor content analysis. The pages currently cited for a topic are
@@ -103,7 +104,16 @@ export interface CitedUrl {
   topic_id: string | null;
 }
 
-/** Non-owned AI Overview / answer citations in the window, grouped by URL, most cited first. */
+/**
+ * Non-owned Google AI Overview citations from our own trackers
+ * (measure.v_native_aio) in the window, grouped by URL, most cited first.
+ * Profound rows and answer probes are left out: they come from other
+ * engines, and their pages are not what an AI Overview cites. So are
+ * forums, video, social, review sites, wikis, directories and marketplaces
+ * (NON_TARGET_SOURCE_ROLES): a Reddit thread or a G2 listing is cited for its
+ * crowd, not its structure, and is no target for a brief. Unknown domains
+ * stay, so a site with no named competitors still gets one.
+ */
 export async function collectCompetitorUrls(siteId: string, opts: { topicId?: string | null; days?: number; limit?: number } = {}, sql: postgres.Sql = appDb()): Promise<CitedUrl[]> {
   const days = opts.days ?? 30;
   const limit = opts.limit ?? 40;
@@ -111,9 +121,10 @@ export async function collectCompetitorUrls(siteId: string, opts: { topicId?: st
     select c.url, c.domain, count(*)::int as citations, max(s.fetched_at) as last_cited_at,
            (array_agg(q.topic_id order by s.fetched_at desc) filter (where q.topic_id is not null))[1] as topic_id
     from measure.serp_citations c
-    join measure.serp_snapshots s on s.id = c.serp_snapshot_id
+    join measure.v_native_aio s on s.id = c.serp_snapshot_id
     join measure.questions q on q.id = s.question_id
     where c.site_id = ${siteId} and not c.is_owned and c.surface = 'ai_overview'
+      and c.source_role <> all (${[...NON_TARGET_SOURCE_ROLES]}::measure.source_role[])
       and s.fetched_at >= now() - make_interval(days => ${days})
       and not q.excluded
       and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
@@ -138,8 +149,14 @@ export async function upsertCompetitorPage(siteId: string, cited: CitedUrl, a: C
       fetch_status = excluded.fetch_status, fetch_error = excluded.fetch_error, fetched_at = now(), updated_at = now()`;
 }
 
-/** Refresh the cited-page set for a site (or one topic); pages fetched in the last 7 days keep their analysis and only update citation counts. */
-export async function analyzeCompetitors(siteId: string, opts: { topicId?: string | null; limit?: number; fetchImpl?: typeof fetch } = {}, sql: postgres.Sql = appDb()): Promise<{ considered: number; fetched: number; failed: number }> {
+/**
+ * Refresh the cited-page set for a site (or one topic); pages fetched in the
+ * last 7 days keep their analysis and only update citation counts. Pages on
+ * a site that is no longer a target (an override made it a forum, the
+ * catalogue learned it is a review site) are dropped first.
+ */
+export async function analyzeCompetitors(siteId: string, opts: { topicId?: string | null; limit?: number; fetchImpl?: typeof fetch } = {}, sql: postgres.Sql = appDb()): Promise<{ considered: number; fetched: number; failed: number; pruned: number }> {
+  const pruned = await pruneNonTargetPages(siteId, sql);
   const cited = await collectCompetitorUrls(siteId, { topicId: opts.topicId, limit: opts.limit ?? 40 }, sql);
   const fresh = new Set(
     (await sql<{ url: string }[]>`select url from measure.competitor_pages where site_id = ${siteId} and fetched_at >= now() - interval '7 days' and fetch_error is null`).map((r) => r.url),
@@ -156,7 +173,22 @@ export async function analyzeCompetitors(siteId: string, opts: { topicId?: strin
     if (a.ok) fetched++;
     else failed++;
   }
-  return { considered: cited.length, fetched, failed };
+  return { considered: cited.length, fetched, failed, pruned };
+}
+
+/** Delete this site's analysed pages whose domain is now in NON_TARGET_SOURCE_ROLES; returns how many. */
+export async function pruneNonTargetPages(siteId: string, sql: postgres.Sql = appDb()): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    with roles as materialized (
+      select d.domain, r.role
+      from (select distinct domain from measure.competitor_pages where site_id = ${siteId}) d
+      cross join lateral measure.classify_source(${siteId}, d.domain) r
+    )
+    delete from measure.competitor_pages p using roles
+    where p.site_id = ${siteId} and p.domain = roles.domain
+      and roles.role = any (${[...NON_TARGET_SOURCE_ROLES]}::measure.source_role[])
+    returning p.id`;
+  return rows.length;
 }
 
 // ── read models ─────────────────────────────────────────────────────────────
@@ -177,12 +209,24 @@ export interface CompetitorPageRow {
   fetched_at: string | Date | null;
 }
 
+/**
+ * The analysed pages, most cited first, leaving out any whose domain is in
+ * NON_TARGET_SOURCE_ROLES by its role now (each domain classified once):
+ * an override or a catalogue change between analyses takes a forum out of
+ * the target at once, not at the next analysis.
+ */
 export async function listCompetitorPages(siteId: string, opts: { topicId?: string | null; limit?: number } = {}, sql: postgres.Sql = appDb()): Promise<CompetitorPageRow[]> {
   return sql<CompetitorPageRow[]>`
-    select id, topic_id, url, domain, title, content_type, word_count, structure_score, headings, citations_30d, last_cited_at, fetch_error, fetched_at
-    from measure.competitor_pages
-    where site_id = ${siteId} and (${opts.topicId ?? null}::uuid is null or topic_id = ${opts.topicId ?? null}::uuid)
-    order by citations_30d desc, last_cited_at desc nulls last limit ${opts.limit ?? 50}`;
+    with pages as (
+      select id, topic_id, url, domain, title, content_type, word_count, structure_score, headings, citations_30d, last_cited_at, fetch_error, fetched_at
+      from measure.competitor_pages
+      where site_id = ${siteId} and (${opts.topicId ?? null}::uuid is null or topic_id = ${opts.topicId ?? null}::uuid)
+    ), roles as materialized (
+      select d.domain, r.role from (select distinct domain from pages) d cross join lateral measure.classify_source(${siteId}, d.domain) r
+    )
+    select p.* from pages p join roles r on r.domain = p.domain
+    where r.role <> all (${[...NON_TARGET_SOURCE_ROLES]}::measure.source_role[])
+    order by p.citations_30d desc, p.last_cited_at desc nulls last limit ${opts.limit ?? 50}`;
 }
 
 export interface StructuralTarget {

@@ -16,6 +16,7 @@ const config: SiteRenderConfig = {
     footerHtml: "<footer>© Acme</footer>",
   },
   organization: { name: "Acme", url: "https://acme.com" },
+  indexingPaused: false,
 };
 
 const host: PublicHostResolution = { canonicalDomain: "acme.com", indexable: true };
@@ -24,6 +25,7 @@ const page: PublishedPage = {
   siteId: "site-1",
   path: "/resources/sso-vs-scim",
   contentItemId: "c1",
+  status: "live",
   html: "<p>Answer first.</p>",
   head: {
     title: "SSO vs SCIM",
@@ -82,6 +84,17 @@ describe("article document", () => {
     expect(html).toContain('name="robots" content="noindex,nofollow"');
   });
 
+  it("is indexable on a verified host while the page is live and the site is not paused", () => {
+    expect(renderArticleDocument(input)).not.toContain('name="robots"');
+  });
+
+  it("marks noindex while the site's indexing is paused, even on a verified host", () => {
+    const html = renderArticleDocument({ ...input, config: { ...config, indexingPaused: true } });
+    expect(html).toContain('<meta name="robots" content="noindex,nofollow">');
+    // Still the whole article: a pause takes it out of the index, not off the site.
+    expect(html).toContain("<p>Answer first.</p>");
+  });
+
   it("advertises the markdown variant", () => {
     expect(renderArticleDocument(input)).toContain(
       '<link rel="alternate" type="text/markdown" href="https://acme.com/resources/sso-vs-scim.md">',
@@ -90,13 +103,13 @@ describe("article document", () => {
 
   it("renders a named byline and a visible updated date (E-E-A-T)", () => {
     const html = renderArticleDocument(input);
-    expect(html).toContain("Dana Reed");
+    expect(html).toContain('By <a class="aeo-author" rel="author" href="https://acme.com/team/dana">Dana Reed</a>');
     expect(html).toContain("Updated <time datetime=\"2026-08-20T00:00:00.000Z\">2026-08-20</time>");
   });
 
   it("owns the h1 and puts the byline under it, not above", () => {
     const html = renderArticleDocument(input);
-    expect(html).toContain("<h1>SSO vs SCIM</h1><p class=\"aeo-meta\">");
+    expect(html).toContain("<h1>SSO vs SCIM</h1><div class=\"aeo-meta\">");
     // Exactly one h1: the body must not carry its own.
     expect(html.match(/<h1[ >]/g)).toHaveLength(1);
   });

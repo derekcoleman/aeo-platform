@@ -5,22 +5,29 @@ import { runSiteOnboarding } from "@/lib/onboarding/run";
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { z } from "zod";
 import type { Route } from "next";
 import { canEdit, canManage, requireStaff, requireUser } from "@/lib/auth/session";
+import { answerProbesConfigured, sitesForAnswerProbes } from "@/lib/answers/sample";
 import { setFeature } from "@/lib/connectors/store";
 import { appDb } from "@/lib/db/app";
 import {
   approvalDecided,
   contentPipelineRequested,
+  contentRemediateFaqRequested,
   contextSignalsScanRequested,
   inngest,
+  metricsRestatementRequested,
+  answersSampleRequested,
   opportunitiesScanRequested,
   siteHealthCheckRequested,
   sitePreflightRequested,
   siteOnboardingRequested,
 } from "@/lib/inngest";
 import { loadApproval, recordDecision } from "@/lib/pipeline/approvals";
-import { loadOpportunity, markOpportunity } from "@/lib/pipeline/opportunities";
+import { setBudgetCap } from "@/lib/ops/spend";
+import { BUDGET_CAP_MAX_USD } from "@/lib/ops/spend-limits";
+import { dismissOpportunity, loadOpportunity, markOpportunity, PERSON_DISMISS_REASONS, type DismissReason } from "@/lib/pipeline/opportunities";
 import { createPreflight } from "@/lib/proxy/store";
 import { createOrganization, createSite, createSiteSchema, deleteSite, loadSite, setSiteStatus, SiteInputError } from "./store";
 import { vaultSecrets } from "@/lib/secrets/vault";
@@ -152,13 +159,17 @@ export async function startPipelineAction(opportunityId: string, note?: string):
   return { ok: true };
 }
 
-export async function dismissOpportunityAction(opportunityId: string): Promise<ActionResult> {
+/** Dismiss from the queue with a reason a person picks (the pipeline's own reasons are not theirs to give). */
+export async function dismissOpportunityAction(opportunityId: string, reason: string = "other"): Promise<ActionResult> {
+  const picked = PERSON_DISMISS_REASONS.find((r) => r.value === reason);
+  if (!picked) return fail("Pick a reason.");
   const opp = await loadOpportunity(opportunityId);
   if (!opp) return fail("Opportunity not found.");
-  const { site, error } = await siteForAction(opp.site_id, "edit");
+  const { user, site, error } = await siteForAction(opp.site_id, "edit");
   if (!site) return fail(error!);
   if (error) return fail(error);
-  await markOpportunity(opportunityId, "dismissed", appDb(), "dismissed in app");
+  const { applied } = await dismissOpportunity(opportunityId, picked.value as DismissReason, `dismissed in app by ${user.name ?? user.email}: ${picked.label.toLowerCase()}`, appDb());
+  if (!applied) return fail(`Opportunity is already ${opp.status}.`);
   revalidatePath(`/app/sites/${opp.site_id}`);
   return { ok: true };
 }
@@ -194,6 +205,51 @@ export async function setFeatureAction(orgId: string, feature: string, enabled: 
   await requireStaff();
   await setFeature(orgId, feature, enabled);
   revalidatePath("/ops");
+  return { ok: true };
+}
+
+// A cleared field is an error, not a $0 cap that would stop every call.
+const budgetCapForm = z.object({ budgetId: z.guid(), capUsd: z.string().trim().regex(/^\d+(\.\d+)?$/).transform(Number).refine((n) => n <= BUDGET_CAP_MAX_USD) });
+
+/**
+ * Set one spend budget's cap (Ops → Spend). The org-wide monthly SERP cap is
+ * written to the org's own setting, within the limit its settings form
+ * allows; audited either way.
+ */
+export async function setBudgetCapAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
+  const staff = await requireStaff();
+  const parsed = budgetCapForm.safeParse({ budgetId: form.get("budgetId"), capUsd: form.get("capUsd") });
+  if (!parsed.success) return fail(`Enter a cap between 0 and ${BUDGET_CAP_MAX_USD} USD.`);
+  const changed = await setBudgetCap(parsed.data.budgetId, parsed.data.capUsd, staff.id);
+  if (!changed.ok) return fail(changed.error);
+  revalidatePath("/ops");
+  return { ok: true };
+}
+
+/** Republish live pages that print their FAQ twice (one site, or every site). The job writes the audit row with the paths. */
+export async function remediateFaqAction(siteId: string | null): Promise<ActionResult> {
+  const staff = await requireStaff();
+  const jobError = await queueJob(contentRemediateFaqRequested.create({ siteId, requestedBy: staff.id }), undefined, "FAQ remediation");
+  if (jobError) return fail(jobError);
+  return { ok: true };
+}
+
+/** Restate the headline numbers under the current methodology (one site, or every measured site). The job writes the audit rows. */
+export async function restateMetricsAction(siteId: string | null): Promise<ActionResult> {
+  const staff = await requireStaff();
+  const jobError = await queueJob(metricsRestatementRequested.create({ siteId, requestedBy: staff.id }), undefined, "metrics restatement");
+  if (jobError) return fail(jobError);
+  return { ok: true };
+}
+
+/** Sample answers now for every eligible site of the org (staff, from /ops), instead of waiting for Tuesday. */
+export async function sampleAnswersAction(orgId: string): Promise<ActionResult> {
+  const staff = await requireStaff();
+  if (!answerProbesConfigured()) return fail("No OpenRouter key is configured: answer probes go through OpenRouter only.");
+  const sites = await sitesForAnswerProbes(orgId);
+  if (sites.length === 0) return fail("Nothing to sample: answer probes are off for this organisation, or none of its active projects tracks a prompt.");
+  const jobError = await queueJob(sites.map((s) => answersSampleRequested.create({ siteId: s.site_id, orgId: s.org_id, requestedBy: staff.id })), undefined, "answer sampling");
+  if (jobError) return fail(jobError);
   return { ok: true };
 }
 

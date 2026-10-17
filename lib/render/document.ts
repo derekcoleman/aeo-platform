@@ -31,7 +31,9 @@ export interface DocumentInput {
 export function renderArticleDocument({ config, host, page, slug }: DocumentInput): string {
   const head = page.head;
   const canonical = contentUrl(host, config, slug);
-  const indexable = host.indexable && !head.noindex;
+  // A page taken down (status noindex) or a site whose indexing is paused
+  // stays readable but leaves the index.
+  const indexable = host.indexable && !head.noindex && !config.indexingPaused;
   const title = head.title ?? slug;
 
   const meta: string[] = [
@@ -50,9 +52,9 @@ export function renderArticleDocument({ config, host, page, slug }: DocumentInpu
     meta.push(`<meta name="description" content="${escapeHtml(head.description)}">`);
   }
   if (!indexable) {
-    // We could not verify which public host this arrived on. Serving it
-    // indexable would publish a duplicate of the customer's content under a
-    // host they may not control.
+    // Either we could not verify which public host this arrived on (serving
+    // it indexable would publish a duplicate of the customer's content under
+    // a host they may not control), or the page or site was taken down.
     meta.push('<meta name="robots" content="noindex,nofollow">');
   }
 
@@ -110,13 +112,19 @@ export function renderArticleDocument({ config, host, page, slug }: DocumentInpu
  * A real named author with a visible last-updated date. Both are E-E-A-T
  * signals, and both are part of the argument that this is first-party content
  * the customer stands behind rather than vendor output on their subfolder.
+ *
+ * The byline is a <div>, not a <p>: parsers that take "the first paragraph
+ * after the H1" as the page's answer should find the answer, not the byline.
+ * The author is marked (rel="author", .aeo-author) so it reads as one.
  */
 function renderByline(head: PublishedPage["head"]): string {
   const bits: string[] = [];
   if (head.author?.name) {
     const name = escapeHtml(head.author.name);
     bits.push(
-      head.author.url ? `By <a href="${escapeHtml(head.author.url)}">${name}</a>` : `By ${name}`,
+      head.author.url
+        ? `By <a class="aeo-author" rel="author" href="${escapeHtml(head.author.url)}">${name}</a>`
+        : `By <span class="aeo-author">${name}</span>`,
     );
   }
   const shown = head.dateModified ?? head.datePublished;
@@ -124,7 +132,7 @@ function renderByline(head: PublishedPage["head"]): string {
     const label = head.dateModified && head.dateModified !== head.datePublished ? "Updated" : "Published";
     bits.push(`${label} <time datetime="${escapeHtml(shown)}">${escapeHtml(shown.slice(0, 10))}</time>`);
   }
-  return bits.length ? `<p class="aeo-meta">${bits.join(" · ")}</p>` : "";
+  return bits.length ? `<div class="aeo-meta">${bits.join(" · ")}</div>` : "";
 }
 
 /** The `.md` variant advertised by `rel="alternate"` and by llms.txt. */

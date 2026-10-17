@@ -7,6 +7,7 @@ import { appDb } from "@/lib/db/app";
 import { contextIngestRequested, demandMineRequested, inngest } from "@/lib/inngest/client";
 import { inngestConfigured } from "@/lib/jobs/runner";
 import { modelFor } from "@/lib/pipeline/model";
+import { serpConfigured } from "@/lib/serp/env";
 import { applyBusinessProfile, extractBusinessProfile } from "./profile";
 
 /**
@@ -68,7 +69,7 @@ export async function runSiteOnboarding(input: { siteId: string; orgId: string }
     if (inngestConfigured(ctx.env)) {
       const events: Parameters<typeof inngest.send>[0][] = [];
       if (written > 0) events.push(contextIngestRequested.create({ orgId: site.org_id, connectionId: conn.id }));
-      const serp = !!(ctx.env.DATAFORSEO_LOGIN || ctx.env.SERPAPI_KEY);
+      const serp = serpConfigured(ctx.env);
       if (serp && site.keywords.length > 0) {
         const [country = "us", language = "en"] = (site.locale || "en-US").split("-").reverse().map((s) => s.toLowerCase());
         events.push(demandMineRequested.create({ siteId: site.id, orgId: site.org_id, seeds: site.keywords.slice(0, 50), locale: { country: country.slice(0, 2), language: language.slice(0, 2) }, depth: 1, trackTop: 50, paa: true }));

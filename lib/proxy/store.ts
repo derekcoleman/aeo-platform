@@ -25,6 +25,8 @@ export interface SiteOpsRow {
   health_failures: number;
   last_health_ok: boolean | null;
   health_alerted_at: string | Date | null;
+  /** The effective pause the renderer reads (content.site_render_config); a paused site serves noindex on purpose. */
+  indexing_paused: boolean;
 }
 
 
@@ -33,7 +35,9 @@ export function toHealthSite(row: SiteOpsRow): HealthSite {
 }
 
 export async function loadSiteOps(siteId: string, sql: postgres.Sql = appDb()): Promise<SiteOpsRow | null> {
-  const [row] = await sql<SiteOpsRow[]>`select id, org_id, name, canonical_domain, path_prefix, edge_hostname, proxy_mode, trailing_slash, status, health_nonce, verified_at, health_failures, last_health_ok, health_alerted_at from app.sites where id = ${siteId}`;
+  const [row] = await sql<SiteOpsRow[]>`select s.id, s.org_id, s.name, s.canonical_domain, s.path_prefix, s.edge_hostname, s.proxy_mode, s.trailing_slash, s.status, s.health_nonce, s.verified_at, s.health_failures, s.last_health_ok, s.health_alerted_at,
+      coalesce((select c.indexing_paused from content.site_render_config c where c.site_id = s.id), s.indexing_paused) as indexing_paused
+    from app.sites s where s.id = ${siteId}`;
   return row ?? null;
 }
 
@@ -42,9 +46,9 @@ export async function listSitesForHealth(sql: postgres.Sql = appDb()): Promise<{
   return sql<{ id: string; org_id: string }[]>`select id, org_id from app.sites where status in ('active', 'verifying') order by id`;
 }
 
-/** The most recently published public path, for the article half of the check. */
+/** The most recently published live path, for the article half of the check (a retired page answers 410, a noindex one is meant to be noindex). */
 export async function latestPublishedPath(siteId: string, sql: postgres.Sql = appDb()): Promise<string | null> {
-  const [row] = await sql<{ path: string }[]>`select path from content.published_pages where site_id = ${siteId} order by updated_at desc limit 1`;
+  const [row] = await sql<{ path: string }[]>`select path from content.published_pages where site_id = ${siteId} and status = 'live' order by updated_at desc limit 1`;
   return row?.path ?? null;
 }
 

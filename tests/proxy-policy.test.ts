@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { MAX_HOPS, decideProxyAction, type SiteRoute } from "@/lib/tenancy";
+import { INTERNAL_HEADER, MAX_HOPS, decideProxyAction, isReservedPath, renderRequestHeaders, type SiteRoute } from "@/lib/tenancy";
+import { NOINDEX_CACHE_CONTROL, textResponse } from "@/lib/render/routes";
 
 const site: SiteRoute = {
   id: "site-1",
@@ -158,5 +159,62 @@ describe("x-forwarded-host defaulting to the request host", () => {
     expect(input({ pathname: "/pricing", forwardedHost: site.edgeHostname }).kind).toBe(
       "passthrough",
     );
+  });
+});
+
+describe("render request headers", () => {
+  it("drops every x-aeo-internal-* header a client sent, whatever its case", () => {
+    const incoming = new Headers({
+      "X-AEO-Internal-Redirect": "https://evil.example/",
+      "x-aeo-internal-indexable": "1",
+      "X-Aeo-Internal-Canonical-Domain": "evil.example",
+      "x-aeo-internal-whatever-comes-next": "1",
+      "X-AEO-Worker-Version": "99",
+      cookie: "session=secret",
+      Authorization: "Bearer x",
+      "Proxy-Authorization": "Basic x",
+    });
+    const out = renderRequestHeaders(incoming);
+    const names = [...out.keys()];
+    expect(names.filter((n) => n.startsWith("x-aeo-internal-"))).toEqual([]);
+    for (const h of ["x-aeo-worker-version", "cookie", "authorization", "proxy-authorization"]) expect(out.has(h), h).toBe(false);
+    expect(out.get(INTERNAL_HEADER.redirect)).toBeNull();
+  });
+
+  it("keeps everything else, including the proxy's own hop count and signature", () => {
+    const out = renderRequestHeaders(new Headers({ "user-agent": "GPTBot/1.2", "x-forwarded-host": "acme.com", "x-aeo-hops": "1", "x-aeo-sig": "abc", accept: "text/html" }));
+    expect(Object.fromEntries(out)).toEqual({ "user-agent": "GPTBot/1.2", "x-forwarded-host": "acme.com", "x-aeo-hops": "1", "x-aeo-sig": "abc", accept: "text/html" });
+  });
+
+  it("does not mutate the request's own headers", () => {
+    const incoming = new Headers({ "x-aeo-internal-indexable": "1" });
+    renderRequestHeaders(incoming);
+    expect(incoming.get("x-aeo-internal-indexable")).toBe("1");
+  });
+});
+
+describe("reserved paths", () => {
+  it("recognises the internal route however it is spelled", () => {
+    for (const p of ["/render", "/render/x", "/%72ender/x", "//render/x", "/RENDER/x", "/render%2Fx"]) expect(isReservedPath(p), p).toBe(true);
+    for (const p of ["/renderer", "/resources/render", "/%zz", "/"]) expect(isReservedPath(p), p).toBe(false);
+  });
+
+  it("is passed through on an edge host however it is spelled", () => {
+    expect(input({ pathname: "/%72ender/site-1/resources/hello" }).kind).toBe("passthrough");
+  });
+});
+
+describe("render response caching", () => {
+  it("lets a shared cache keep an indexable response, varied on the forwarded host", () => {
+    const res = textResponse("<p>ok</p>", "text/html; charset=utf-8", { etag: '"e1"' }, { indexable: true });
+    expect(res.headers.get("cache-control")).toMatch(/^public, .*s-maxage=300/);
+    expect(res.headers.get("vary")).toBe("X-Forwarded-Host");
+    expect(res.headers.get("etag")).toBe('"e1"');
+  });
+
+  it("never lets a shared cache keep a noindex response, whatever the caller asked for", () => {
+    const res = textResponse("User-agent: *", "text/plain", { "cache-control": "public, max-age=300" }, { indexable: false });
+    expect(res.headers.get("cache-control")).toBe(NOINDEX_CACHE_CONTROL);
+    expect(res.headers.get("vary")).toBe("X-Forwarded-Host");
   });
 });

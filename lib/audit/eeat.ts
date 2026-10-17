@@ -106,7 +106,7 @@ Score each dimension 0-25. Treat the probe checklist as ground truth about what 
 {"experience": n, "expertise": n, "authoritativeness": n, "trustworthiness": n, "rationale": "one sentence"}`;
 
   try {
-    const { text } = await model.complete(prompt, { json: true, maxTokens: 400 });
+    const { text } = await model.complete(prompt, { json: true, maxTokens: 4096, effort: "low" });
     const graded = parseScoredJson(text, EeatModelSchema);
     const totalScore = Math.round(graded.experience + graded.expertise + graded.authoritativeness + graded.trustworthiness);
     return {

@@ -89,7 +89,16 @@ export const INTERNAL_ROUTE_PREFIX = "/render";
 export const RESERVED_PREFIXES = [INTERNAL_ROUTE_PREFIX] as const;
 
 export function isReservedPath(pathname: string): boolean {
-  return RESERVED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+  // Judge the path the router will match, not its spelling: `/%72ender/…`,
+  // `//render/…` and `/RENDER/…` must not slip past a literal comparison.
+  let path = pathname;
+  try {
+    path = decodeURIComponent(pathname);
+  } catch {
+    // Malformed escapes: compare the raw form.
+  }
+  path = path.replace(/\/{2,}/g, "/").toLowerCase();
+  return RESERVED_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 }
 
 /**

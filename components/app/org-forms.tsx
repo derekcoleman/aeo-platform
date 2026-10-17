@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { ActionResult } from "@/lib/app/actions";
 import { inviteMemberAction, updateOrgSettingsAction } from "@/lib/app/org-actions";
+import { ORG_SERP_BUDGET_MAX_USD, ORG_SERP_BUDGET_OWNER_MAX_USD } from "@/lib/ops/spend-limits";
 
 function Note({ state }: { state: ActionResult | null }) {
   if (!state) return null;
@@ -55,8 +56,8 @@ export function SettingsForm({ org, isStaff }: { org: { id: string; name: string
         <p className="text-muted-foreground text-xs">Slack, call and document ingests older than this are purged nightly. Verified facts and published content are kept.</p>
       </div>
       <div className="grid gap-1">
-        <Label htmlFor="org-budget">SERP budget per month (USD{isStaff ? "" : ", up to 500"})</Label>
-        <Input id="org-budget" name="serpBudget" type="number" min={0} max={isStaff ? 5000 : 500} step={1} defaultValue={org.serp_monthly_budget_usd} />
+        <Label htmlFor="org-budget">SERP budget per month (USD{isStaff ? "" : `, up to ${ORG_SERP_BUDGET_OWNER_MAX_USD}`})</Label>
+        <Input id="org-budget" name="serpBudget" type="number" min={0} max={isStaff ? ORG_SERP_BUDGET_MAX_USD : ORG_SERP_BUDGET_OWNER_MAX_USD} step={1} defaultValue={org.serp_monthly_budget_usd} />
         <p className="text-muted-foreground text-xs">Autocomplete, PAA and AI Overview snapshots stop for the month when this is reached.</p>
       </div>
       <div className="flex items-center gap-3 sm:col-span-2">

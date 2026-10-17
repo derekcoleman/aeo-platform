@@ -147,3 +147,51 @@ export function candidateExclusion(c: CandidateInput): string | null {
   if (c.inFlight) return "refresh in progress";
   return null;
 }
+
+/** What the queue and the Refresh page say about a protected winner: its work is figures and dates, never a rewrite. */
+export const PROTECTED_WINNER_NOTE = "protected: cited and holding, figures and dates only";
+
+/**
+ * A winner the refresh loop must not rewrite, however stale it looks: cited
+ * in Google's AI Overview by our own trackers on at least as many questions as
+ * the 30 days before, with Search Console clicks at or above the inventory's
+ * median, and neither clicks nor impressions declining. A page that is
+ * earning its citations is the wrong place to spend a rewrite, and a rewrite
+ * is the likeliest way to lose them; its opportunity is a statistics update
+ * (update_stats) instead. Needs both signals: without Search Console there is
+ * no way to tell a winner from a page nobody visits.
+ */
+export function isProtectedWinner(s: RefreshSignals, medianClicks: number): boolean {
+  const c = s.citations;
+  if (!c.nativeAvailable || c.native === 0 || c.native < c.nativePrev) return false;
+  if (!s.gsc.available || s.gsc.clicks <= 0 || s.gsc.clicks < medianClicks) return false;
+  const clickDrop = s.gsc.clicksPrev >= 10 ? -pct(s.gsc.clicks, s.gsc.clicksPrev) : 0;
+  const imprDrop = s.gsc.impressionsPrev >= 100 ? -pct(s.gsc.impressions, s.gsc.impressionsPrev) : 0;
+  return clickDrop < 20 && imprDrop < 20;
+}
+
+/**
+ * The kind of gap a refresh closes, for its prior (GAP_PRIORS): citations
+ * lost (from any tracker), else clicks or impressions down 20% or more on
+ * a base worth comparing, else staleness alone.
+ */
+export function refreshGapType(s: RefreshSignals): "refresh_lost_citation" | "refresh_decline" | "refresh_stale" {
+  const anyTracker = s.citations.nativeAvailable || s.citations.profoundAvailable;
+  const cited = s.citations.native + s.citations.profound;
+  const citedPrev = s.citations.nativePrev + s.citations.profoundPrev;
+  if (anyTracker && cited < citedPrev) return "refresh_lost_citation";
+  if (s.gsc.available) {
+    const clickDrop = s.gsc.clicksPrev >= 10 ? -pct(s.gsc.clicks, s.gsc.clicksPrev) : 0;
+    const imprDrop = s.gsc.impressionsPrev >= 100 ? -pct(s.gsc.impressions, s.gsc.impressionsPrev) : 0;
+    if (clickDrop >= 20 || imprDrop >= 20) return "refresh_decline";
+  }
+  return "refresh_stale";
+}
+
+/** Median of a list (the mean of the middle two for an even count); 0 for none. */
+export function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}

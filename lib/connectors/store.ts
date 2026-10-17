@@ -361,16 +361,197 @@ export async function upsertExternalMetrics(
   return written;
 }
 
+/**
+ * Surfaces whose rows name a page and whose `content_id` something reads:
+ * per-asset attribution sums `ga4_referral` and `gsc_page`. The refresh
+ * scan joins `gsc_page_window` on the URL key instead; those rows are
+ * site-wide (up to 10,000 a sync) and mostly name pages that are not ours,
+ * so resolving them would rescan rows that never resolve, every night.
+ */
+export const PAGE_METRIC_SURFACES = { ga4: ["ga4_referral"], gsc: ["gsc_page"] } as const;
+
+/** Without a `since`, resolution looks back this far: wider than any window that reads `content_id` (30 days). */
+export const CONTENT_ID_LOOKBACK_DAYS = 60;
+
+export interface ContentIdResolution {
+  metrics: number;
+  citations: number;
+}
+
+/**
+ * Tie connector metrics and owned citations to the content item behind the
+ * page they name, so per-asset attribution joins on `content_id` alone. Until
+ * this ran nothing set it: attribution matched `dimension->>'path'`, which no
+ * connector writes, and every asset read 0 sessions and 0 clicks.
+ *
+ * The page a row names is GA4's `landingPage` (a path) or Search Console's
+ * `page` (a full URL, whose host must be one the site owns). It resolves to
+ * the published page at that path, with or without a trailing slash, and
+ * otherwise to the CMS item at the same URL key that a refresh linked to a
+ * content item. Only rows still unresolved are touched. `since` bounds the
+ * metric scan by date (the window a sync just wrote); without it the scan
+ * covers the last CONTENT_ID_LOOKBACK_DAYS, so a row that never resolves is
+ * not rescanned for ever. Idempotent.
+ */
+export async function resolveMetricContentIds(siteId: string, sql: postgres.Sql = appDb(), opts: { since?: string | null } = {}): Promise<ContentIdResolution> {
+  const metrics = await sql<{ id: string }[]>`
+    with site as (
+      select id, lower(regexp_replace(canonical_domain, '^www\\.', '')) as host from app.sites where id = ${siteId}
+    ),
+    own as (
+      select host from site
+      union select lower(regexp_replace(hostname, '^www\\.', '')) from app.site_domains where site_id = ${siteId}
+    ),
+    cand as (
+      select m.id,
+             coalesce(nullif(rtrim(split_part(split_part(
+               case when m.provider = 'ga4' then m.dimension->>'landingPage'
+                    else regexp_replace(m.dimension->>'page', '^https?://[^/]+', '') end,
+               '?', 1), '#', 1), '/'), ''), '/') as path,
+             case when m.provider = 'gsc' then lower(regexp_replace(substring(m.dimension->>'page' from '^https?://([^/:?#]+)'), '^www\\.', '')) end as host,
+             case when m.provider = 'gsc' then content.url_key(m.dimension->>'page')
+                  else content.url_key((select host from site) || (m.dimension->>'landingPage')) end as key
+      from measure.external_metrics m
+      where m.site_id = ${siteId} and m.content_id is null
+        and ((m.provider = 'ga4' and m.surface = any (${[...PAGE_METRIC_SURFACES.ga4]}::text[]))
+          or (m.provider = 'gsc' and m.surface = any (${[...PAGE_METRIC_SURFACES.gsc]}::text[])))
+        and m.date >= coalesce(${opts.since ?? null}::date, current_date - ${CONTENT_ID_LOOKBACK_DAYS}::int)
+    ),
+    by_page as (
+      select c.id, p.content_item_id
+      from cand c
+      join content.published_pages p
+        on p.site_id = ${siteId} and p.content_item_id is not null
+       and coalesce(nullif(rtrim(p.path, '/'), ''), '/') = c.path
+      where c.host is null or c.host in (select host from own)
+    ),
+    by_cms as (
+      select distinct on (c.id) c.id, i.content_item_id
+      from cand c
+      join content.cms_items i on i.site_id = ${siteId} and i.url_key = c.key and i.content_item_id is not null
+      where not exists (select 1 from by_page b where b.id = c.id)
+      order by c.id, i.last_updated desc nulls last
+    ),
+    resolved as (select id, content_item_id from by_page union all select id, content_item_id from by_cms)
+    update measure.external_metrics m set content_id = r.content_item_id
+    from resolved r where m.id = r.id
+    returning m.id`;
+  // Owned citations: `is_owned` also covers subdomains, so the path match still requires a host the pages are served on.
+  const citations = await sql<{ id: string }[]>`
+    with own as (
+      select lower(regexp_replace(canonical_domain, '^www\.', '')) as host from app.sites where id = ${siteId}
+      union select lower(regexp_replace(hostname, '^www\.', '')) from app.site_domains where site_id = ${siteId}
+    ),
+    cand as (
+      select c.id,
+             coalesce(nullif(rtrim(split_part(split_part(regexp_replace(c.url, '^https?://[^/]+', ''), '?', 1), '#', 1), '/'), ''), '/') as path,
+             lower(regexp_replace(substring(c.url from '^https?://([^/:?#]+)'), '^www\.', '')) as host,
+             content.url_key(c.url) as key
+      from measure.serp_citations c
+      where c.site_id = ${siteId} and c.is_owned and c.content_id is null
+    ),
+    by_page as (
+      select c.id, p.content_item_id
+      from cand c
+      join content.published_pages p
+        on p.site_id = ${siteId} and p.content_item_id is not null
+       and coalesce(nullif(rtrim(p.path, '/'), ''), '/') = c.path
+      where c.host in (select host from own)
+    ),
+    by_cms as (
+      select distinct on (c.id) c.id, i.content_item_id
+      from cand c
+      join content.cms_items i on i.site_id = ${siteId} and i.url_key = c.key and i.content_item_id is not null
+      where not exists (select 1 from by_page b where b.id = c.id)
+      order by c.id, i.last_updated desc nulls last
+    ),
+    resolved as (select id, content_item_id from by_page union all select id, content_item_id from by_cms)
+    update measure.serp_citations c set content_id = r.content_item_id
+    from resolved r where c.id = r.id
+    returning c.id`;
+  return { metrics: metrics.length, citations: citations.length };
+}
+
+/** The nightly pass covers sites where a row could resolve at all: a live page or a linked CMS item. */
+export async function sitesWithResolvableContent(sql: postgres.Sql = appDb()): Promise<{ id: string; org_id: string }[]> {
+  return sql<{ id: string; org_id: string }[]>`
+    select s.id, s.org_id from app.sites s
+    where exists (select 1 from content.published_pages p where p.site_id = s.id and p.content_item_id is not null)
+       or exists (select 1 from content.cms_items i where i.site_id = s.id and i.content_item_id is not null)
+    order by s.id`;
+}
+
 // ── webhook ledger ──────────────────────────────────────────────────────────
 
-/** Returns false when this (provider, external_id) was already recorded — the caller must not re-emit. */
-export async function recordWebhookEvent(provider: string, externalId: string, payload: unknown, sql: postgres.Sql = appDb()): Promise<boolean> {
+/** How long a claim holds before another delivery (a provider retry, the re-drive) may take the row over. */
+export const WEBHOOK_LEASE_SECONDS = 120;
+
+/**
+ * Claim a delivery of a verified webhook. True when the caller now owns it
+ * and must hand it on: the event is new, or it was seen before, never
+ * processed, and its last claim was released (the hand-off failed) or has
+ * lapsed (the handler died). False for a duplicate of a processed event or of
+ * one another delivery is handling right now: answer 200 and do nothing.
+ */
+export async function claimWebhookEvent(provider: string, externalId: string, payload: unknown, sql: postgres.Sql = appDb(), leaseSeconds = WEBHOOK_LEASE_SECONDS): Promise<boolean> {
   const rows = await sql`
-    insert into ops.webhook_events (provider, external_id, payload)
-    values (${provider}, ${externalId}, ${sql.json(payload as never)})
-    on conflict (provider, external_id) do nothing
+    insert into ops.webhook_events as w (provider, external_id, payload, attempts, claimed_at)
+    values (${provider}, ${externalId}, ${sql.json(payload as never)}, 1, now())
+    on conflict (provider, external_id) do update
+      set attempts = w.attempts + 1, claimed_at = now()
+      where w.processed_at is null
+        and (w.claimed_at is null or w.claimed_at < now() - make_interval(secs => ${leaseSeconds}))
     returning id`;
   return rows.length > 0;
+}
+
+/** Release a claim whose hand-off failed, keeping the reason, so a retry or the re-drive can deliver it. */
+export async function markWebhookFailed(provider: string, externalId: string, error: unknown, sql: postgres.Sql = appDb()): Promise<void> {
+  await sql`
+    update ops.webhook_events set claimed_at = null, last_error = ${errorMessage(error)}
+    where provider = ${provider} and external_id = ${externalId} and processed_at is null`;
+}
+
+export interface StaleWebhookEvent {
+  provider: string;
+  external_id: string;
+  payload: unknown;
+  attempts: number;
+}
+
+export interface StaleWebhookOptions {
+  providers: string[];
+  /** Leave a delivery to its own handler and the provider's retries for this long. */
+  olderThanMinutes?: number;
+  /** Past this many deliveries, a human looks at last_error instead. */
+  maxAttempts?: number;
+  /** Older events are history, not something to act on now. */
+  maxAgeDays?: number;
+  limit?: number;
+  leaseSeconds?: number;
+}
+
+/**
+ * Claim unprocessed deliveries for a re-drive, oldest first: old enough that
+ * their handler and the provider have had their turn, young enough to still
+ * matter, under the attempt cap, and not held by a live claim.
+ */
+export async function claimStaleWebhookEvents(opts: StaleWebhookOptions, sql: postgres.Sql = appDb()): Promise<StaleWebhookEvent[]> {
+  const { providers, olderThanMinutes = 10, maxAttempts = 5, maxAgeDays = 3, limit = 100, leaseSeconds = WEBHOOK_LEASE_SECONDS } = opts;
+  return sql<StaleWebhookEvent[]>`
+    update ops.webhook_events w set attempts = w.attempts + 1, claimed_at = now()
+    where w.id in (
+      select id from ops.webhook_events
+      where processed_at is null
+        and provider = any(${sql.array(providers)}::text[])
+        and received_at < now() - make_interval(mins => ${olderThanMinutes})
+        and received_at > now() - make_interval(days => ${maxAgeDays})
+        and attempts < ${maxAttempts}
+        and (claimed_at is null or claimed_at < now() - make_interval(secs => ${leaseSeconds}))
+      order by received_at
+      limit ${limit}
+      for update skip locked)
+    returning w.provider, w.external_id, w.payload, w.attempts`;
 }
 
 export async function markWebhookProcessed(provider: string, externalId: string, sql: postgres.Sql = appDb()): Promise<void> {

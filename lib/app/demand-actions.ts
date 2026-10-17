@@ -6,6 +6,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { canEdit, requireUser } from "@/lib/auth/session";
 import { demandMineRequested, serpTrackRequested } from "@/lib/inngest";
+import { serpConfigured } from "@/lib/serp/env";
 import type { ActionResult } from "./actions";
 import { setQuestionTracking, trackTopQuestions, trackedQuestionIds } from "./demand";
 import { loadSite } from "./store";
@@ -19,8 +20,6 @@ async function guard(siteId: string) {
   return { user, site, error: canEdit(user, site.org_id) ? null : "You do not have permission for this project." };
 }
 
-const serpConfigured = () => !!(process.env.DATAFORSEO_LOGIN || process.env.SERPAPI_KEY);
-
 const mineForm = z.object({
   siteId: z.guid(),
   seeds: z.string().min(2).max(5000),
@@ -28,7 +27,8 @@ const mineForm = z.object({
   language: z.string().trim().min(2).max(5).default("en"),
   depth: z.coerce.number().int().min(1).max(3).default(2),
   trackTop: z.coerce.number().int().min(0).max(500).default(50),
-  paa: z.coerce.boolean().default(true),
+  // A checkbox or hidden field posts "true"/"false"/"on"; z.coerce.boolean would read "false" as true.
+  paa: z.enum(["true", "false", "on", "off", "1", "0"]).default("true").transform((v) => v === "true" || v === "on" || v === "1"),
 });
 
 export async function mineDemandAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
@@ -37,7 +37,7 @@ export async function mineDemandAction(_prev: ActionResult | null, form: FormDat
   const { siteId, seeds, country, language, depth, trackTop, paa } = parsed.data;
   const { site, error } = await guard(siteId);
   if (!site || error) return fail(error ?? "Site not found.");
-  if (!serpConfigured()) return fail("No SERP provider configured (DATAFORSEO_LOGIN / SERPAPI_KEY).");
+  if (!serpConfigured()) return fail("No SERP provider configured (DATAFORSEO_LOGIN + DATAFORSEO_PASSWORD, or SERPAPI_API_KEY).");
   const list = [...new Set(seeds.split(/[\n,]/).map((s) => s.trim()).filter((s) => s.length >= 2))].slice(0, 50);
   if (list.length === 0) return fail("Add at least one seed term.");
   const jobError = await queueJob(demandMineRequested.create({ siteId, orgId: site.org_id, seeds: list, locale: { country: country.toLowerCase(), language: language.toLowerCase() }, depth, trackTop, paa }));
@@ -64,7 +64,7 @@ export async function trackTopAction(siteId: string, n: number, tier: "daily" | 
 export async function snapshotNowAction(siteId: string): Promise<ActionResult> {
   const { site, error } = await guard(siteId);
   if (!site || error) return fail(error ?? "Site not found.");
-  if (!serpConfigured()) return fail("No SERP provider configured (DATAFORSEO_LOGIN / SERPAPI_KEY).");
+  if (!serpConfigured()) return fail("No SERP provider configured (DATAFORSEO_LOGIN + DATAFORSEO_PASSWORD, or SERPAPI_API_KEY).");
   const ids = await trackedQuestionIds(siteId, 200);
   if (ids.length === 0) return fail("Nothing is tracked yet.");
   const jobError = await queueJob(serpTrackRequested.create({ siteId, orgId: site.org_id, questionIds: ids }));

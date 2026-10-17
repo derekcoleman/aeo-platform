@@ -34,7 +34,14 @@ channels), **error** (the last sync failed; the reason is on the card),
 Console (pick the property) and GA4 (pick the property). Until a property is
 chosen the grant is *pending* and the sync is a no-op. The OAuth client comes
 from `GOOGLE_OAUTH_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI`; the card says
-so when they are missing.
+so when they are missing. After each sync, `resolveMetricContentIds`
+(`lib/connectors/store.ts`) ties the rows it wrote to the asset behind the
+page they name (GA4's landing page, Search Console's page URL on a host the
+project owns): the published page at that path, or a CMS post linked to a
+content item. Per-asset attribution reads `content_id` only, from the GA4
+referral and Search Console page rows; the site-wide refresh windows are
+matched by URL instead and are left alone. A nightly pass, one event per
+site, catches rows from the last 60 days whose asset appeared later.
 
 **Slack** is one install per organisation. The card lists the channels the
 app can see; nothing is read until channels are ticked. The same form sets
@@ -52,10 +59,14 @@ recreates it if it was disconnected.
 connection pulls the answers report for the chosen category and normalises
 it into the same shape the CSV upload uses: prompts become tracked questions
 (source `profound`), each prompt × platform × day becomes a snapshot with its
-citations (`provider = 'profound'`, `is_owned` computed against your domains),
-and the visibility score lands in `measure.external_metrics` (surface
-`profound_visibility`). Native metrics never read Profound rows; the UI labels
-Profound numbers as Profound's.
+citations (`provider = 'profound'`, `collection_method = 'third_party'`, the
+platform as `engine`, an AI Overview flag only on Google AI Overview rows,
+citations on the platform's surface: `ai_overview`, `ai_mode` or
+`llm_answer`; `is_owned` computed against your domains), and the visibility
+score lands in `measure.external_metrics` (surface `profound_visibility`).
+Native metrics read `measure.v_native_aio`, which never holds a Profound row
+(or one of our own answer probes); the UI labels Profound numbers as
+Profound's.
 
 **Refresh:** Profound citations of a CMS URL feed the refresh score
 (`docs/REFRESH.md`) alongside the native trackers, and are labelled as
@@ -133,6 +144,46 @@ citations and updated in place. See `docs/REFRESH.md`.
 after the requested delay. Set `WEBFLOW_API_BASE` only to point at a test
 double.
 
+## SERP vendors and answer probes (environment)
+
+These are not per-project connectors: the platform holds one set of keys, in
+the environment, for every organisation. Every call they make holds its cost
+on the organisation's budget first (`lib/ops/spend.ts`), and SERP and answer
+results are cached by day (or, for DataForSEO Labs, by month) and shared
+across tenants. Settings → Deployment shows whether the SERP vendors and a
+model key are configured.
+
+| Source | Variables | Feeds |
+|---|---|---|
+| DataForSEO | `DATAFORSEO_LOGIN` and `DATAFORSEO_PASSWORD` (both required) | Demand mining (autocomplete, People Also Ask), rank and AI Overview tracking |
+| DataForSEO Labs | The same login | The competitor organic gap (`ranked_keywords` per domain), monthly or on demand from Strategy → Competitors |
+| SerpApi | `SERPAPI_API_KEY` | AI Overview citations |
+| OpenRouter | `OPENROUTER_API_KEY` | AI answer probes (Strategy → Visibility → Engines) |
+
+**SerpApi's key name.** The key is `SERPAPI_API_KEY`. The old name,
+`SERPAPI_KEY`, is still read, with a deprecation warning logged once, and
+the setup checklist flags it with "Rename SERPAPI_KEY to SERPAPI_API_KEY".
+One reader, `lib/serp/env.ts`, serves every screen and job.
+Before it existed, the client and four screens read different names, so a
+deployment could look configured and still fail every call.
+
+**Which vendor answers AI Overview questions.** When both are configured,
+SerpApi answers them by default; `AEO_SERP_AIO_PROVIDER=dataforseo` switches
+that. A vendor that is not configured is ignored.
+
+**Locations.** DataForSEO locations come from the site's country as ISO 3166
+numeric (2000 + code). An unknown country falls back to the US, and the
+snapshot records `localeFallback`. Labs covers fewer markets: a domain it
+refuses is skipped, and non-Latin-script markets are skipped before any
+call is paid for.
+
+**Answer probes** ask each engine's model a site's tracked prompts through
+OpenRouter, with web search on. They are labelled as API-grounded probes, not
+the consumer apps, and never added to the AI Overview or Profound numbers
+(`docs/MEASUREMENT.md`). They are off until staff turn on *Answer probes* for
+the organisation in Ops → Organisations. `AEO_ANSWER_ENGINES` and
+`AEO_ANSWER_ENGINES_ENABLED` configure the engines.
+
 ## Sync status and errors
 
 Every run is a `context.context_sync_runs` row. The Visibility card reads the
@@ -151,9 +202,15 @@ windows by offset. No invocation outlives Vercel's 300-second limit however
 large the report, a killed invocation resumes at the page it was on, and the
 run row's `detail` carries rows, pages and `progress_at` after every page.
 Each page lands in one transaction with multi-row statements, after deleting
-the same (prompt, engine, day) tuples, so a replayed page replaces its rows;
-the first page of a run clears the whole range it will cover. The
-database-backed test in `tests/db/` drives this against the real schema.
+the same (prompt, engine, day) tuples, so a replayed page replaces its rows.
+The first page mints a run marker that the page token carries and every row
+the run writes is stamped with (`raw->>'sync_run'`, `metrics->>'sync_run'`);
+the last page then removes the rows in the range the run did not write (what
+Profound no longer reports) and rebuilds the daily metrics they fed. Nothing
+is deleted before Profound has answered, so a run that fails part way leaves
+the previous data in place. Engine labels keep Google's surfaces apart: AI
+Mode and Gemini are never filed as AI Overviews. The database-backed test in
+`tests/db/` drives this against the real schema.
 
 ## Custom source (API or MCP)
 

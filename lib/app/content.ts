@@ -19,9 +19,16 @@ export interface ContentListRow {
   word_count: number | null;
   published_path: string | null;
   published_at: string | Date | null;
+  /** The proxy page's status (live | noindex | retired); null before it is published or for a cms item. */
+  page_status: "live" | "noindex" | "retired" | null;
+  /** The page records the version it replaced, so a rollback has somewhere to go. */
+  can_rollback: boolean;
   pending_approval_id: string | null;
   pending_kind: "brief" | "draft" | null;
+  /** Gates the current version failed. A non-blocking gate (safety) is not a failure: it hands the draft to a person. */
   qa_failed: number;
+  /** Non-blocking findings on the current version, for a person to review (or already reviewed, once published). */
+  qa_review: number;
   updated_at: string | Date;
 }
 
@@ -30,8 +37,10 @@ export async function listContentItems(siteId: string, limit = 50, sql: postgres
     select ci.id, ci.slug, ci.title, ci.status, ci.current_version_id,
            v.version_no, v.word_count,
            p.path as published_path, p.updated_at as published_at,
+           p.status::text as page_status, coalesce(p.previous_version_id is not null and ci.origin = 'pipeline', false) as can_rollback,
            a.id as pending_approval_id, a.kind as pending_kind,
-           coalesce((select count(*)::int from content.qa_results q where q.content_version_id = ci.current_version_id and not q.passed), 0) as qa_failed,
+           coalesce((select count(*)::int from content.qa_results q where q.content_version_id = ci.current_version_id and not q.passed and q.detail->>'blocking' is distinct from 'false'), 0) as qa_failed,
+           coalesce((select count(*)::int from content.qa_results q where q.content_version_id = ci.current_version_id and not q.passed and q.detail->>'blocking' = 'false'), 0) as qa_review,
            greatest(ci.updated_at, coalesce(v.created_at, ci.updated_at)) as updated_at
     from content.content_items ci
     left join content.content_versions v on v.id = ci.current_version_id

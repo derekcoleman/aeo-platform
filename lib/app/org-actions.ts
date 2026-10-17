@@ -9,6 +9,7 @@ import { requireUser, roleIn } from "@/lib/auth/session";
 import { createCheckoutSession, createPortalSession, planSpec, stripeConfigured } from "@/lib/billing/stripe";
 import { appDb } from "@/lib/db/app";
 import { sendEmail, textToHtml } from "@/lib/notify/email";
+import { ORG_SERP_BUDGET_MAX_USD, ORG_SERP_BUDGET_OWNER_MAX_USD } from "@/lib/ops/spend-limits";
 import type { ActionResult } from "./actions";
 import { canAssignRole, listMembers, loadOrg, wouldRemoveLastOwner } from "./org";
 
@@ -105,7 +106,7 @@ const settingsForm = z.object({
   name: z.string().trim().min(2).max(120),
   retentionDays: z.coerce.number().int().min(30).max(3650),
   billingEmail: z.string().trim().email().max(200).or(z.literal("")),
-  serpBudget: z.coerce.number().min(0).max(5000),
+  serpBudget: z.coerce.number().min(0).max(ORG_SERP_BUDGET_MAX_USD),
 });
 
 export async function updateOrgSettingsAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
@@ -116,7 +117,7 @@ export async function updateOrgSettingsAction(_prev: ActionResult | null, form: 
   if (error) return fail(error);
   const before = await loadOrg(orgId);
   if (!before) return fail("Organisation not found.");
-  const budget = user.isStaff ? serpBudget : Math.min(serpBudget, 500);
+  const budget = user.isStaff ? serpBudget : Math.min(serpBudget, ORG_SERP_BUDGET_OWNER_MAX_USD);
   await appDb()`update app.organizations set name = ${name}, retention_days = ${retentionDays}, billing_email = ${billingEmail || null}, serp_monthly_budget_usd = ${budget} where id = ${orgId}`;
   await audit(orgId, user.id, "org.settings", "organization", orgId, { name, retentionDays, billingEmail: billingEmail || null, serpBudget: budget, before: { name: before.name, retentionDays: before.retention_days, serpBudget: before.serp_monthly_budget_usd } });
   refresh();

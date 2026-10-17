@@ -161,8 +161,43 @@ export function renderMarkdown(md: string): RenderedMarkdown {
   return { html, wordCount };
 }
 
+export const FAQ_HEADING = "## Frequently asked questions";
+const FAQ_HEADING_LINE_RE = /^##[ \t]+Frequently asked questions[ \t]*$/gim;
+
 /** FAQ entries → an H2 + question H3s + answers, appended so the shared `faq_block` rule sees it. */
 export function faqMarkdown(faq: { question: string; answer: string }[]): string {
   if (faq.length === 0) return "";
-  return ["## Frequently asked questions", ...faq.map((f) => `### ${f.question.trim()}\n\n${f.answer.trim()}`)].join("\n\n");
+  return [FAQ_HEADING, ...faq.map((f) => `### ${f.question.trim()}\n\n${f.answer.trim()}`)].join("\n\n");
+}
+
+/** How many FAQ sections a body carries. More than one is a page that prints its FAQ twice. */
+export function faqSectionCount(md: string): number {
+  return md.match(FAQ_HEADING_LINE_RE)?.length ?? 0;
+}
+
+/**
+ * Cut a live article's FAQ section out of its body: the body without it, and
+ * the questions under it (`### question`, then the answer) as entries. A live
+ * article handed to the draft as "previous" must carry its FAQ in `faq`,
+ * where composeVersion renders it, not in bodyMd, or a draft that keeps the
+ * body's structure and also answers the FAQ prints it twice. The section ends
+ * at the next H2. A section with no `###` questions is left in the body.
+ */
+export function splitFaqSection(md: string): { bodyMd: string; faq: { question: string; answer: string }[] } {
+  const m = new RegExp(FAQ_HEADING_LINE_RE.source, "im").exec(md);
+  if (!m) return { bodyMd: md, faq: [] };
+  const after = md.slice(m.index + m[0].length);
+  const next = /^##[ \t]/m.exec(after);
+  const section = next ? after.slice(0, next.index) : after;
+  const faq = section
+    .split(/^###[ \t]+/m)
+    .slice(1)
+    .map((block) => {
+      const nl = block.indexOf("\n");
+      return { question: (nl === -1 ? block : block.slice(0, nl)).trim(), answer: nl === -1 ? "" : block.slice(nl).trim() };
+    })
+    .filter((f) => f.question && f.answer);
+  if (faq.length === 0) return { bodyMd: md, faq: [] };
+  const rest = next ? after.slice(next.index) : "";
+  return { bodyMd: [md.slice(0, m.index).trimEnd(), rest.trim()].filter(Boolean).join("\n\n"), faq };
 }

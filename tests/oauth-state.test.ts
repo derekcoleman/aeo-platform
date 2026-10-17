@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { OAUTH_STATE_TTL_MS, createOAuthState, verifyOAuthState } from "@/lib/connectors/oauth-state";
-import { authorizeUrlFor } from "@/lib/connectors/oauth-start";
+import { SiteNotInOrgError, assertSiteInOrg, authorizeUrlFor } from "@/lib/connectors/oauth-start";
+import { fakeSql } from "./helpers/fake-sql";
 
 const SECRET = "a-sufficiently-long-state-secret";
 const NOW = new Date("2026-09-01T12:00:00Z");
@@ -56,5 +57,30 @@ describe("authorizeUrlFor", () => {
 
   it("fails loudly when the provider is not configured", () => {
     expect(() => authorizeUrlFor("slack", { orgId: input.orgId, siteId: null }, { NODE_ENV: "test", OAUTH_STATE_SECRET: SECRET }, NOW)).toThrow(/SLACK_CLIENT_ID/);
+  });
+});
+
+describe("assertSiteInOrg", () => {
+  const ACME = "11111111-1111-1111-1111-111111111111";
+  const ACME_SITE = "aaaaaaaa-0000-0000-0000-000000000001";
+  const GLOBEX_SITE = "bbbbbbbb-0000-0000-0000-000000000002";
+  const sites = () => fakeSql([[/from app\.sites/, (q) => (q.values[0] === ACME_SITE && q.values[1] === ACME ? [{ id: ACME_SITE }] : [])]]);
+
+  it("passes a site of the caller's org, matching on both ids", async () => {
+    const sql = sites();
+    await expect(assertSiteInOrg(ACME_SITE, ACME, sql)).resolves.toBeUndefined();
+    expect(sql.queries[0]!.text).toBe("select id from app.sites where id = $1 and org_id = $2");
+  });
+
+  it("refuses another org's site and a site that does not exist", async () => {
+    await expect(assertSiteInOrg(GLOBEX_SITE, ACME, sites())).rejects.toBeInstanceOf(SiteNotInOrgError);
+    await expect(assertSiteInOrg("cccccccc-0000-0000-0000-000000000009", ACME, sites())).rejects.toBeInstanceOf(SiteNotInOrgError);
+  });
+
+  it("refuses a malformed id without asking the database", async () => {
+    const sql = sites();
+    await expect(assertSiteInOrg("aaaa' or 1=1 --", ACME, sql)).rejects.toBeInstanceOf(SiteNotInOrgError);
+    await expect(assertSiteInOrg(ACME_SITE, "", sql)).rejects.toBeInstanceOf(SiteNotInOrgError);
+    expect(sql.queries).toHaveLength(0);
   });
 });

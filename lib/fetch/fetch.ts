@@ -26,6 +26,12 @@ export interface FetchOptions {
   /** Test hook: bypass DNS resolution (fixtures run on loopback). */
   allowPrivate?: boolean;
   fetchImpl?: typeof fetch;
+  /**
+   * Aborts the whole fetch: every hop and the body read. `timeoutMs` only
+   * bounds each hop's wait for headers, so a server that answers and then
+   * stalls its body needs this to be cut off.
+   */
+  signal?: AbortSignal;
 }
 
 export interface FetchResult {
@@ -72,25 +78,34 @@ async function assertResolvesPublic(url: URL, allowPrivate: boolean): Promise<vo
   }
 }
 
-async function readCapped(res: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+async function readCapped(res: Response, maxBytes: number, signal?: AbortSignal): Promise<{ text: string; truncated: boolean }> {
   if (!res.body) return { text: "", truncated: false };
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   let truncated = false;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      total += value.byteLength;
-      if (total >= maxBytes) {
-        truncated = true;
-        await reader.cancel().catch(() => undefined);
-        break;
+  // Cancelling settles a read that is waiting on a stalled body; the abort is rethrown below.
+  const onAbort = () => void reader.cancel(signal?.reason).catch(() => undefined);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.byteLength;
+        if (total >= maxBytes) {
+          truncated = true;
+          await reader.cancel().catch(() => undefined);
+          break;
+        }
       }
     }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
+  signal?.throwIfAborted();
   const merged = new Uint8Array(Math.min(total, maxBytes));
   let offset = 0;
   for (const c of chunks) {
@@ -114,6 +129,7 @@ export async function safeFetch(input: string, opts: FetchOptions = {}): Promise
     userAgent = DEFAULT_USER_AGENT,
     allowPrivate = process.env.AEO_FETCH_ALLOW_PRIVATE === "1",
     fetchImpl = fetch,
+    signal: deadline,
   } = opts;
 
   const started = Date.now();
@@ -123,6 +139,7 @@ export async function safeFetch(input: string, opts: FetchOptions = {}): Promise
     async () => {
       let current = new URL(input);
       for (let hop = 0; ; hop++) {
+        deadline?.throwIfAborted();
         await assertResolvesPublic(current, allowPrivate);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -132,7 +149,7 @@ export async function safeFetch(input: string, opts: FetchOptions = {}): Promise
             method,
             ...(body !== undefined && method !== "GET" ? { body } : {}),
             redirect: "manual",
-            signal: controller.signal,
+            signal: deadline ? AbortSignal.any([controller.signal, deadline]) : controller.signal,
             headers: {
               "user-agent": userAgent,
               accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
@@ -160,7 +177,7 @@ export async function safeFetch(input: string, opts: FetchOptions = {}): Promise
           throw new RetryableError(`upstream ${res.status}`, parseRetryAfter(res.headers.get("retry-after")));
         }
 
-        const { text, truncated } = await readCapped(res, maxBytes);
+        const { text, truncated } = await readCapped(res, maxBytes, deadline);
         return {
           url: input,
           finalUrl: current.href,
@@ -179,7 +196,7 @@ export async function safeFetch(input: string, opts: FetchOptions = {}): Promise
     {
       maxRetries,
       baseDelayMs: 1500,
-      shouldRetry: (err) => !(err instanceof FetchBlockedError) && (err instanceof RetryableError || isNetworkError(err)),
+      shouldRetry: (err) => !deadline?.aborted && !(err instanceof FetchBlockedError) && (err instanceof RetryableError || isNetworkError(err)),
     },
   );
 }

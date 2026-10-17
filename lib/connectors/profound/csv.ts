@@ -17,7 +17,7 @@ export interface ProfoundCitation {
 
 export interface ProfoundRecord {
   prompt: string;
-  /** Engine slug as Profound labels it, lower-cased: "chatgpt", "perplexity", "google_aio", … */
+  /** Engine slug as Profound labels it, lower-cased: "chatgpt", "perplexity", "google_aio", "ai_mode", "gemini", … */
   engine: string;
   /** ISO date (YYYY-MM-DD) the answer was sampled. */
   date: string;
@@ -123,13 +123,20 @@ export function parseDate(v: string | undefined): string | null {
   return Number.isNaN(t) ? null : new Date(t).toISOString().slice(0, 10);
 }
 
+/**
+ * Google's three surfaces are checked most specific first: "Google AI Mode"
+ * and "Google Gemini" both say "google", and read as AI Overviews they put
+ * another engine's answers into the AIO numbers. "AI Mode" must stand as
+ * words of its own ("google_ai_mode" counts), so "OpenAI model" is not it.
+ */
 export function normalizeEngine(v: string | undefined): string {
   const s = (v ?? "").trim().toLowerCase();
   if (!s) return "unknown";
-  if (/ai overview|aio|google/.test(s)) return "google_aio";
+  if (/(?:^|[^a-z0-9])ai[\s_-]*mode(?![a-z0-9])/.test(s)) return "ai_mode";
+  if (/gemini/.test(s)) return "gemini";
+  if (/ai[\s_-]*overview|\baio\b|google/.test(s)) return "google_aio";
   if (/chatgpt|openai|gpt/.test(s)) return "chatgpt";
   if (/perplexity/.test(s)) return "perplexity";
-  if (/gemini/.test(s)) return "gemini";
   if (/copilot|bing/.test(s)) return "copilot";
   if (/claude/.test(s)) return "claude";
   return s.replace(/[^a-z0-9]+/g, "_");

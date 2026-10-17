@@ -1,6 +1,8 @@
 import { withRetry, RetryableError, parseRetryAfter } from "@/lib/fetch/retry";
+import { serpApiKey, vendorCostUsd } from "./env";
 import {
   domainOf,
+  retryUnlessTimedOut,
   SerpProviderError,
   type AiOverview,
   type AioReference,
@@ -27,7 +29,11 @@ export interface SerpApiConfig {
   fetchImpl?: typeof fetch;
   /** Per-search cost. Default reflects the ~$150 / 15k plan. */
   searchCostUsd?: number;
+  /** Deadline per search; SerpApi resolves AI Overviews inline, which can be slow. */
+  timeoutMs?: number;
 }
+
+export const SERPAPI_TIMEOUT_MS = 60_000;
 
 // ── payload shapes (the subset we read) ─────────────────────────────────────
 interface SaOrganic { position?: number; link?: string; title?: string; snippet?: string }
@@ -79,9 +85,10 @@ export function parseSerpApiSerp(data: SaSearch): Pick<SerpResult, "organic" | "
 }
 
 export function serpApiProvider(cfg: SerpApiConfig = {}): SerpProvider {
-  const apiKey = cfg.apiKey ?? process.env.SERPAPI_API_KEY;
+  const apiKey = cfg.apiKey ?? serpApiKey();
   const fetchImpl = cfg.fetchImpl ?? fetch;
-  const searchCost = cfg.searchCostUsd ?? Number(process.env.SERPAPI_SEARCH_COST_USD ?? 0.01);
+  const searchCost = cfg.searchCostUsd ?? vendorCostUsd("SERPAPI_SEARCH_COST_USD", 0.01);
+  const timeoutMs = cfg.timeoutMs ?? SERPAPI_TIMEOUT_MS;
 
   async function get(params: Record<string, string>): Promise<SaSearch> {
     if (!apiKey) throw new SerpProviderError("serpapi", "SERPAPI_API_KEY not set");
@@ -89,7 +96,7 @@ export function serpApiProvider(cfg: SerpApiConfig = {}): SerpProvider {
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     url.searchParams.set("api_key", apiKey);
     return withRetry(async () => {
-      const res = await fetchImpl(url.toString());
+      const res = await fetchImpl(url.toString(), { signal: AbortSignal.timeout(timeoutMs) });
       if (res.status === 429 || res.status >= 500) {
         throw new RetryableError(`serpapi ${res.status}`, parseRetryAfter(res.headers.get("retry-after")));
       }
@@ -97,7 +104,7 @@ export function serpApiProvider(cfg: SerpApiConfig = {}): SerpProvider {
       const data = (await res.json()) as SaSearch;
       if (data.error && !data.organic_results) throw new SerpProviderError("serpapi", data.error);
       return data;
-    }, { maxRetries: 2 });
+    }, { maxRetries: 2, shouldRetry: retryUnlessTimedOut });
   }
 
   function common(q: SerpQuery): Record<string, string> {

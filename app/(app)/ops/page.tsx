@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Route } from "next";
 import { ActionButton } from "@/components/app/action-button";
+import { BudgetCapForm } from "@/components/app/budget-forms";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { HealthBadge, SiteStatusBadge, when } from "@/components/app/status";
 import { Badge } from "@/components/ui/badge";
@@ -9,8 +10,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { OPS_SECTIONS, opsHref, resolveTab, settingsHref } from "@/lib/app/nav";
-import { runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
+import { remediateFaqAction, restateMetricsAction, runHealthCheckAction, runPreflightAction, sampleAnswersAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
+import { ANSWER_PROBES_FEATURE } from "@/lib/answers/sample";
+import { setAutonomyControlAction } from "@/lib/app/takedown-actions";
+import { controlFor, listAutonomyControls, type AutonomyControl, type ControlTarget } from "@/lib/ops/controls";
+import { budgetCapMaxUsd, listBudgets, RESOURCE_LABEL, type BudgetRow } from "@/lib/ops/spend";
 import { opsFailedSyncs, opsLlmSpend, opsLlmSpendForSite, opsOrganizations, opsSites, type SiteSpendRow } from "@/lib/app/queries";
+import { METHODOLOGY_VERSION } from "@/lib/app/methodology";
 import { auditLog } from "@/lib/app/org";
 import { loadSite } from "@/lib/app/store";
 import { requireStaff } from "@/lib/auth/session";
@@ -31,14 +37,17 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const scope = site ? { siteId: site.id, orgId: site.org_id } : {};
   const sections = OPS_SECTIONS;
   const tab = resolveTab(sections, requestedTab, "sites");
-  const [orgs, sites, failed, spend, siteSpend, audit] = await Promise.all([
+  const [orgs, sites, failed, spend, siteSpend, audit, controls, budgets] = await Promise.all([
     opsOrganizations(scope),
     opsSites(scope),
     opsFailedSyncs(7, scope),
     site ? Promise.resolve([]) : opsLlmSpend(),
     site ? opsLlmSpendForSite(site.id) : Promise.resolve([] as SiteSpendRow[]),
     auditLog(site?.org_id ?? null, 200, undefined, site?.id ?? null),
+    listAutonomyControls(),
+    listBudgets({ orgId: site?.org_id ?? null }),
   ]);
+  const platform = controlFor(controls, { scope: "global", id: null });
   const failingSites = sites.filter((s) => s.last_health_ok === false).length;
   return (
     <AppShell user={user} active="ops" site={site} page="console" section={tab}>
@@ -47,17 +56,33 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         {site ? null : <Badge variant="secondary">{sites.length} sites</Badge>}
         {failingSites ? <Badge variant="destructive">{site ? "proxy failing" : `${failingSites} failing`}</Badge> : <Badge variant="success">{site ? "proxy healthy" : "all healthy"}</Badge>}
         {failed.length ? <Badge variant="warning">{failed.length} failed syncs / 7d</Badge> : null}
+        <ActionButton size="sm" variant="outline" action={remediateFaqAction.bind(null, site?.id ?? null)} done="queued" title="Republish pages whose FAQ section was printed twice and push their Webflow copies again. No model call; the audit log lists the paths.">
+          Fix duplicate FAQs
+        </ActionButton>
+        <ActionButton size="sm" variant="outline" action={restateMetricsAction.bind(null, site?.id ?? null)} done="queued" title={`Recompute the headline numbers the old way and the ${METHODOLOGY_VERSION} way, so Strategy, Demand and Attribution can show what moved and why. No vendor calls.`}>
+          Restate metrics
+        </ActionButton>
       </PageHeader>
       <UrlTabs defaultValue="sites" values={sections.map((s) => s.value)}>
         <TabsList>
           <TabsTrigger value="sites">{site ? "Site" : "Sites"}</TabsTrigger>
           <TabsTrigger value="orgs">{site ? "Organisation" : "Organisations"}</TabsTrigger>
           <TabsTrigger value="health">Connector health</TabsTrigger>
-          <TabsTrigger value="spend">LLM spend</TabsTrigger>
+          <TabsTrigger value="spend">Spend</TabsTrigger>
           <TabsTrigger value="audit">Audit log</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="sites" className="pt-4">
+        <TabsContent value="sites" className="space-y-4 pt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Kill switches</CardTitle>
+              <CardDescription>Publishing holds every publish step (runs wait an hour and ask again, for up to three days). Indexing serves every page noindex and empties the sitemap, feed and llms files on the next request. Per organisation and per project below; owners can also pause their own project&apos;s indexing.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium">Whole platform</span>
+              <ControlButtons target={{ scope: "global", id: null }} control={platform} />
+            </CardContent>
+          </Card>
           <Card>
             <CardContent>
               <Table>
@@ -68,7 +93,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                       <TableCell><Link className="font-medium underline-offset-2 hover:underline" href={`/app/sites/${s.id}` as Route}>{s.name}</Link><p className="text-muted-foreground font-mono text-xs">{s.canonical_domain}{s.path_prefix} · <Link className="underline-offset-2 hover:underline" href={settingsHref(s.id, null, "theme") as Route}>theme</Link></p></TableCell>
                       <TableCell>{s.org_name}</TableCell>
                       <TableCell className="text-xs">{s.proxy_mode}</TableCell>
-                      <TableCell><SiteStatusBadge status={s.status} /></TableCell>
+                      <TableCell><SiteStatusBadge status={s.status} />{s.indexing_paused ? <p><Badge variant="warning" title="Paused by the project's owner or an admin">indexing paused</Badge></p> : null}</TableCell>
                       <TableCell><HealthBadge ok={s.last_health_ok} failures={s.health_failures} /><p className="text-muted-foreground text-xs">{when(s.last_health_at)}</p></TableCell>
                       <TableCell>{s.published}</TableCell>
                       <TableCell>{s.open_opportunities}</TableCell>
@@ -79,6 +104,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                           <ActionButton size="sm" variant="outline" action={scanOpportunitiesAction.bind(null, s.id)} done="queued">Scan</ActionButton>
                           {s.status === "active" ? <ActionButton size="sm" variant="ghost" action={setSiteStatusAction.bind(null, s.id, "paused")} done="paused">Pause</ActionButton> : null}
                           {s.status === "paused" ? <ActionButton size="sm" variant="ghost" action={setSiteStatusAction.bind(null, s.id, "active")} done="active">Resume</ActionButton> : null}
+                          <ControlButtons target={{ scope: "site", id: s.id }} control={controlFor(controls, { scope: "site", id: s.id })} />
                         </span>
                       </TableCell>
                     </TableRow>
@@ -93,7 +119,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           <Card>
             <CardContent>
               <Table>
-                <TableHeader><TableRow><TableHead>Organisation</TableHead><TableHead>Plan</TableHead><TableHead>Members</TableHead><TableHead>Sites</TableHead><TableHead>Profound</TableHead><TableHead>Created</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead>Organisation</TableHead><TableHead>Plan</TableHead><TableHead>Members</TableHead><TableHead>Sites</TableHead><TableHead>Profound</TableHead><TableHead title="Weekly API-grounded probes of each AI engine through OpenRouter, within the org's answer probe budget">Answer probes</TableHead><TableHead>Kill switches</TableHead><TableHead>Created</TableHead></TableRow></TableHeader>
                 <TableBody>
                   {orgs.map((o) => (
                     <TableRow key={o.id}>
@@ -106,6 +132,15 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                           {o.profound ? "Enabled — disable" : "Enable"}
                         </ActionButton>
                       </TableCell>
+                      <TableCell className="whitespace-normal">
+                        <span className="inline-flex flex-wrap gap-1">
+                          <ActionButton size="sm" variant={o.answer_probes ? "secondary" : "outline"} action={setFeatureAction.bind(null, o.id, ANSWER_PROBES_FEATURE, !o.answer_probes)} done={o.answer_probes ? "disabled" : "enabled"}>
+                            {o.answer_probes ? "Enabled — disable" : "Enable"}
+                          </ActionButton>
+                          {o.answer_probes ? <ActionButton size="sm" variant="ghost" action={sampleAnswersAction.bind(null, o.id)} done="queued" title="Probe every eligible project's prompt panel now instead of on Tuesday.">Sample now</ActionButton> : null}
+                        </span>
+                      </TableCell>
+                      <TableCell className="whitespace-normal"><span className="inline-flex flex-wrap gap-1"><ControlButtons target={{ scope: "org", id: o.id }} control={controlFor(controls, { scope: "org", id: o.id })} /></span></TableCell>
                       <TableCell>{when(o.created_at)}</TableCell>
                     </TableRow>
                   ))}
@@ -129,7 +164,18 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           </Card>
         </TabsContent>
 
-        <TabsContent value="spend" className="pt-4">
+        <TabsContent value="spend" className="space-y-4 pt-4">
+          <Card>
+            <CardHeader><CardTitle>{site ? "Budgets of this project's organisation" : "Budgets"}</CardTitle><CardDescription>What the spend governor enforces (ops.budgets). Every model call, SERP call and answer probe holds its estimated cost on each budget covering it before it runs; none starts once spent reaches the cap. An organisation&apos;s monthly budgets appear the first time it spends. The org-wide SERP cap is the organisation&apos;s own setting, so editing it here edits that. Periods are UTC.</CardDescription></CardHeader>
+            <CardContent>
+              {budgets.length === 0 ? <p className="text-muted-foreground text-sm">No budgets yet: nothing has been spent through the governor.</p> : (
+                <Table>
+                  <TableHeader><TableRow><TableHead>Org</TableHead><TableHead>Scope</TableHead><TableHead>Resource</TableHead><TableHead>Period</TableHead><TableHead>Cap</TableHead><TableHead>Spent</TableHead><TableHead>Held</TableHead><TableHead>Used</TableHead></TableRow></TableHeader>
+                  <TableBody>{budgets.map((b) => <BudgetTableRow key={b.id} budget={b} />)}</TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader><CardTitle>{site ? "Model spend by pipeline task, last 30 days" : "Model spend by organisation, last 30 days"}</CardTitle><CardDescription>From ops.llm_calls. Billing truth is the provider invoice; this is the {site ? "per-project" : "per-tenant"} view.</CardDescription></CardHeader>
             <CardContent>
@@ -176,5 +222,41 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         </TabsContent>
       </UrlTabs>
     </AppShell>
+  );
+}
+
+/** Pause or resume publishing and indexing for one scope; a switch that is on shows as a warning. */
+function ControlButtons({ target, control }: { target: ControlTarget; control: AutonomyControl | null }) {
+  const publishing = control?.publishing_paused ?? false;
+  const indexing = control?.indexing_paused ?? false;
+  return (
+    <>
+      <ActionButton size="sm" variant={publishing ? "destructive" : "ghost"} action={setAutonomyControlAction.bind(null, target.scope, target.id, "publishing", !publishing)} done={publishing ? "resumed" : "held"} title={publishing ? "Publishing is held here. Click to resume." : "Hold every publish step here."}>
+        {publishing ? "Resume publishing" : "Hold publishing"}
+      </ActionButton>
+      <ActionButton size="sm" variant={indexing ? "destructive" : "ghost"} action={setAutonomyControlAction.bind(null, target.scope, target.id, "indexing", !indexing)} done={indexing ? "resumed" : "paused"} title={indexing ? "Pages here serve noindex. Click to resume indexing." : "Serve every page here noindex and empty the listings."}>
+        {indexing ? "Resume indexing" : "Pause indexing"}
+      </ActionButton>
+    </>
+  );
+}
+
+/** One budget: this period's spend and holds against its cap, the cap editable in place. */
+function BudgetTableRow({ budget: b }: { budget: BudgetRow }) {
+  const used = b.cap_usd > 0 ? Math.round((b.spent_usd / b.cap_usd) * 100) : null;
+  return (
+    <TableRow>
+      <TableCell>{b.org_name}</TableCell>
+      <TableCell className="text-xs">{b.site_name ?? "Organisation"}</TableCell>
+      <TableCell>{RESOURCE_LABEL[b.resource]}</TableCell>
+      <TableCell className="text-xs">{b.period === "day" ? `day ${b.period_start}` : `month from ${b.period_start}`}</TableCell>
+      <TableCell><BudgetCapForm budgetId={b.id} capUsd={b.cap_usd} maxUsd={budgetCapMaxUsd(b)} /></TableCell>
+      <TableCell className="font-mono">${b.spent_usd.toFixed(2)}</TableCell>
+      <TableCell className="font-mono">{b.reserved_usd > 0 ? `$${b.reserved_usd.toFixed(2)}` : "—"}</TableCell>
+      <TableCell>
+        {used === null ? <Badge variant="destructive">cap $0</Badge> : <Badge variant={used >= 100 ? "destructive" : used >= 80 ? "warning" : "outline"}>{used}%</Badge>}
+        {b.alerted_pct ? <p className="text-muted-foreground text-xs">told at {b.alerted_pct}%</p> : null}
+      </TableCell>
+    </TableRow>
   );
 }

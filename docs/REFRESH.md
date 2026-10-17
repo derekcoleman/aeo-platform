@@ -12,7 +12,7 @@ approval — before updating the post **in place**, same item, same URL.
 |---|---|---|
 | Which collection each item lives in, when it was last modified and last published, its body | Webflow Data API v2, every collection the site token can see | `content.cms_items` |
 | Clicks, impressions, position per page, current 28 days vs the previous 28 | Search Console, site-wide (not filtered to the proxy prefix) | `measure.external_metrics`, surface `gsc_page_window` |
-| How often the URL was cited in AI answers, last 30 days vs the 30 before | Our SERP trackers (`dataforseo`, `serpapi`) and, labelled separately, Profound | `measure.serp_citations` joined on `content.url_key(url)` |
+| How often the URL was cited in AI answers, last 30 days vs the 30 before | Our SERP trackers (`dataforseo`, `serpapi`; Google AI Overview citations only, never an organic ranking) and, labelled separately, Profound (any engine) | `measure.serp_citations` joined on `content.url_key(url)` |
 
 The three meet on one key: `content.url_key()` in SQL and `urlKey()` in
 `lib/refresh/inventory.ts` both reduce a URL to `host/path` without scheme,
@@ -57,19 +57,54 @@ Never a candidate: drafts, archived items, items deleted in the CMS, items
 without a body, anything modified in the last 45 days (engines have not
 caught up), and anything with a refresh already queued or running.
 
+A protected winner (cited in the AI Overview by our own trackers on at
+least as many questions as the 30 days before, with Search Console clicks
+at or above the inventory's median and neither clicks nor impressions
+declining) is never rewritten: a rewrite is the likeliest way to lose what
+such a page earns. It stays a candidate, but its opportunity is a
+statistics update (`action_type = 'update_stats'`): the brief and the draft
+keep the title, every heading, the order of sections and the wording, and
+change only figures, dates and references that are out of date, each with
+a source. The Refresh page marks it "figures only". *Refresh now* on a
+winner is a person's call and runs a full refresh.
+
 ## The queue
 
 The nightly scan (09:30 UTC, after the connectors and the SERP trackers;
-also right after every Webflow inventory sync) scores every item and opens a
-`refresh` opportunity for the top 20 over the threshold (45). The dedupe key
+also right after every Webflow inventory sync) scores every item, and of the
+items over the threshold (45) opens a `refresh` opportunity for the top 20
+by expected value. The refresh score decides who is a candidate and stays on
+the row as the diagnostic; the queue ranks on the same scorer as every other
+opportunity (`scoreEV0` in `lib/pipeline/opportunities.ts`): demand from the
+page's own Search Console impressions (neutral without Search Console), the
+gap the signals show (citations lost 0.6, traffic down 0.5, staleness alone
+0.3), the priority of the topic its title names, divided by the effort (a
+refresh 1, a statistics update 0.5). *Refresh now* scores as a person's
+request (prior 1). The dedupe key
 is `cms:<item>:<last modified date>`: a refresh that lands, or an edit the
 customer makes in Webflow, changes the key, so the item can be queued again
 later; a dismissed entry stays dismissed until the post changes. *Refresh
-now* on the page opens the opportunity whatever its score.
+now* on the page opens the opportunity whatever its score, except while
+other work on the post is queued or running: the page shows that work (a
+question the coverage guard sent to the post included) and offers no second
+rewrite until it has finished.
 
 ## The pipeline
 
-A refresh opportunity carries `evidence.cmsItemId`. When the pipeline reaches
+A refresh opportunity carries `evidence.cmsItemId`. So does a new-page
+opportunity the coverage guard turned into a refresh (`lib/pipeline/coverage.ts`:
+a CMS post already ranks for its question, holds its featured snippet or has
+its title), so the post is improved rather than joined by a second URL. The
+guard follows the same lifecycle as the scan: a post changed in the last 45
+days, or with other work on it queued or running (from any producer; the
+scan's own "in flight" test looks at the post, not at who queued the work),
+is not rewritten again and the new-page work is dismissed (`auto_coverage`;
+the gap scan brings it back after 45 days and the guard looks again),
+and a protected winner gets a statistics update. Such a run always stops at
+the draft gate, saying which post it will overwrite, and a later scan of the
+question never turns it back into a new page. A statistics update's draft
+must keep the live title, headings, their order and roughly its length
+(QA's `scope` gate); one that does not goes back to the draft. When the pipeline reaches
 the content-item step it imports the post once as a **cms-origin** content
 item (`content_items.origin = 'cms'`; the slug is internal and the post keeps
 its own). The brief prompt gets the current article as Markdown, why it was

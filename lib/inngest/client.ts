@@ -93,6 +93,36 @@ export const serpTrackCompleted = eventType("serp/track.completed", {
     aioTriggered: z.number(),
     ownedCitations: z.number(),
     costUsd: z.number(),
+    /** Questions skipped because their call failed; the error is on the question. */
+    failed: z.number().int().optional(),
+    /** The org's SERP budget ran out before every question was measured. */
+    budgetStopped: z.boolean().optional(),
+  }),
+});
+
+// ── answer sampling ─────────────────────────────────────────────────────────
+
+/** Probe one site's prompt panel on every enabled answer engine (lib/answers). Sent weekly per sampled site, or by staff from /ops. */
+export const answersSampleRequested = eventType("answers/sample.requested", {
+  schema: z.object({
+    siteId: z.guid(),
+    orgId: z.guid(),
+    requestedBy: z.guid().nullable().optional(),
+  }),
+});
+
+export const answersSampleCompleted = eventType("answers/sample.completed", {
+  schema: z.object({
+    siteId: z.guid(),
+    orgId: z.guid(),
+    /** Answers recorded, of which `cached` came from the day's answer cache. */
+    probes: z.number().int(),
+    cached: z.number().int(),
+    /** Samples skipped because their probe failed. */
+    failed: z.number().int(),
+    costUsd: z.number(),
+    /** The org's answer_probe budget ran out before the panel was done. */
+    budgetStopped: z.boolean(),
   }),
 });
 
@@ -190,6 +220,11 @@ export const approvalRequested = eventType("approval/requested", {
   }),
 });
 
+/** Republish live pages whose FAQ section was printed twice (staff, from /ops). No `siteId` = every site. */
+export const contentRemediateFaqRequested = eventType("content/remediate.faq.requested", {
+  schema: z.object({ siteId: z.guid().nullable().optional(), requestedBy: z.guid().nullable().optional() }),
+});
+
 /** Re-derive the opportunity queue for a site from citation gaps. */
 export const opportunitiesScanRequested = eventType("content/opportunities.scan.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
@@ -256,6 +291,16 @@ export const strategyCompetitorsAnalyzeRequested = eventType("strategy/competito
   schema: z.object({ siteId: z.guid(), orgId: z.guid(), topicId: z.guid().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }),
 });
 
+/**
+ * Ask DataForSEO Labs which keywords a site's named competitors rank for in
+ * Google's organic top 10 that it does not (lib/strategy/competitor-gap.ts).
+ * Monthly for every tracked site with a named competitor, or from
+ * Strategy → Competitors.
+ */
+export const strategyCompetitorGapRequested = eventType("strategy/competitor-gap.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid(), requestedBy: z.guid().nullable().optional() }),
+});
+
 /** Score the CMS inventory against traffic and citations and open refresh opportunities for the top candidates. */
 export const refreshScanRequested = eventType("content/refresh.scan.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
@@ -266,9 +311,38 @@ export const publishingPushRequested = eventType("publishing/push.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid(), contentItemId: z.guid(), targetId: z.guid().nullable().optional(), force: z.boolean().optional() }),
 });
 
+// ── measurement ─────────────────────────────────────────────────────────────
+
+/** Tie one site's connector metrics and owned citations to their content items (fanned out nightly). */
+export const metricsContentIdsRequested = eventType("metrics/content-ids.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid() }),
+});
+
+/** Restate a site's headline numbers under the current methodology (staff, from /ops). No `siteId` = fan out to every measured site. */
+export const metricsRestatementRequested = eventType("metrics/restatement.requested", {
+  schema: z.object({ siteId: z.guid().nullable().optional(), requestedBy: z.guid().nullable().optional() }),
+});
+
 // ── ops ─────────────────────────────────────────────────────────────────────
 
 /** The setup checklist's round-trip test; see lib/inngest/ops.ts. */
 export const opsPingRequested = eventType("ops/ping.requested", {
   schema: z.object({ nonce: z.string().min(8), sentAt: z.string() }),
+});
+
+/**
+ * A budget reached its cap for the period (lib/ops/spend.ts), sent once per
+ * budget per period. Nothing consumes it yet; it is the hook a circuit
+ * breaker listens on.
+ */
+export const opsBudgetExceeded = eventType("ops/budget.exceeded", {
+  schema: z.object({
+    orgId: z.guid(),
+    siteId: z.guid().nullable(),
+    resource: z.enum(["llm", "serp", "answer_probe"]),
+    period: z.enum(["day", "month"]),
+    periodStart: z.string(),
+    capUsd: z.number(),
+    spentUsd: z.number(),
+  }),
 });

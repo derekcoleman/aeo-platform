@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { opportunitiesFromCitationGaps } from "@/lib/pipeline/opportunities";
-import { addManualPrompt, assignQuestionsToTopics, createTopic, matchTopic, topicInputSchema, topicSlug } from "@/lib/strategy/topics";
+import { OutOfSiteError, addManualPrompt, assertSiteScopedIds, assignQuestionsToTopics, createTopic, matchTopic, topicInputSchema, topicSlug } from "@/lib/strategy/topics";
 import { fakeSql } from "./helpers/fake-sql";
 
 const SITE = "aaaaaaaa-0000-0000-0000-000000000001";
@@ -72,7 +72,7 @@ describe("addManualPrompt", () => {
 });
 
 describe("topic-aware gap scoring", () => {
-  const gap = (id: string, topic: string | null) => ({ question_id: id, topic_id: topic, text: id, demand_score: 50, snapshot_id: "s", fetched_at: "", provider: "serpapi", competitor_domains: ["okta.com"] });
+  const gap = (id: string, topic: string | null) => ({ question_id: id, topic_id: topic, text: id, demand_score: 50, snapshot_id: "s", fetched_at: "", provider: "serpapi", competitor_domains: ["okta.com"], named_competitor_domains: ["okta.com"], named_competitors: 1 });
   it("boosts by priority, skips paused topics, and carries the topic's format", () => {
     const weights = new Map([
       ["t-hi", { id: "t-hi", priority: 5, formats: ["comparison"], status: "active" as const }],
@@ -84,6 +84,43 @@ describe("topic-aware gap scoring", () => {
     expect(rows[0]!.score).toBeGreaterThan(rows[1]!.score);
     expect(rows[0]!.format).toBe("comparison");
     expect(rows[0]!.topicId).toBe("t-hi");
-    expect(rows[2]!.score).toBeGreaterThan(rows[1]!.score);
+    // A question on no topic is worth at most the median active topic (here the lower one), never more than a topic the customer chose.
+    expect(rows[2]!.score).toBeLessThanOrEqual(rows[1]!.score);
+  });
+});
+
+describe("assertSiteScopedIds", () => {
+  const SITE = "aaaaaaaa-0000-0000-0000-000000000001";
+  const TOPIC = "eeeeeeee-0000-0000-0000-000000000001";
+  const QUESTION = "dddddddd-0000-0000-0000-000000000001";
+  const FOREIGN = "eeeeeeee-0000-0000-0000-000000000002";
+  /** Answers as Postgres would: an id is "ok" only when it is null or this site's. */
+  const scoped = () =>
+    fakeSql([[/as topic_ok/, (q) => [{ topic_ok: q.values[0] === null || (q.values[1] === TOPIC && q.values[2] === SITE), question_ok: q.values[3] === null || (q.values[4] === QUESTION && q.values[5] === SITE) }]]]);
+
+  it("passes ids that belong to the site, and no ids without a query", async () => {
+    await expect(assertSiteScopedIds(SITE, { topicId: TOPIC, questionId: QUESTION }, scoped())).resolves.toBeUndefined();
+    const none = scoped();
+    await expect(assertSiteScopedIds(SITE, { topicId: "", questionId: null }, none)).resolves.toBeUndefined();
+    expect(none.queries).toHaveLength(0);
+  });
+
+  it("refuses a topic or question of another site", async () => {
+    await expect(assertSiteScopedIds(SITE, { topicId: FOREIGN }, scoped())).rejects.toThrow(new OutOfSiteError("Topic not found."));
+    await expect(assertSiteScopedIds(SITE, { questionId: FOREIGN }, scoped())).rejects.toThrow(new OutOfSiteError("Question not found."));
+  });
+
+  it("checks both ids against the site in one query", async () => {
+    const sql = scoped();
+    await assertSiteScopedIds(SITE, { topicId: TOPIC, questionId: QUESTION }, sql);
+    expect(sql.queries).toHaveLength(1);
+    expect(sql.queries[0]!.text).toContain("from measure.topics where id = $2::uuid and site_id = $3::uuid");
+    expect(sql.queries[0]!.text).toContain("from measure.questions where id = $5::uuid and site_id = $6::uuid");
+  });
+
+  it("refuses a malformed id without a query", async () => {
+    const sql = scoped();
+    await expect(assertSiteScopedIds(SITE, { topicId: "not-a-uuid" }, sql)).rejects.toBeInstanceOf(OutOfSiteError);
+    expect(sql.queries).toHaveLength(0);
   });
 });

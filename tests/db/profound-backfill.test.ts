@@ -93,7 +93,7 @@ describe.skipIf(!DB_URL)("profound paged backfill against Postgres", () => {
   });
 
   it("walks a 40-day backfill in 30-day windows of 2,000-row pages, idempotently", async () => {
-    // Rows left by earlier killed attempts, doubled: they must vanish with the range.
+    // Rows left by earlier killed attempts, doubled: they must vanish once a run covering the range completes.
     const [q] = await sql<{ id: string }[]>`insert into measure.questions (site_id, text, normalized, source, seed_term, depth, locale, device, demand_score, seen_count)
       values (${SITE}, 'stale prompt', 'stale prompt', 'profound', 'x', 1, 'us-en', 'desktop', 1, 1) returning id`;
     await sql`insert into measure.serp_snapshots (site_id, question_id, provider, fetched_at, locale, device, raw)
@@ -103,10 +103,11 @@ describe.skipIf(!DB_URL)("profound paged backfill against Postgres", () => {
     const conn = (await getConnection(CONN, sql))!;
     const c = await ctx();
     const first = await profoundConnector.syncPage!({ connection: conn as never, kind: "backfill", cursor: null, payload: undefined, page: null }, c);
-    expect(first.next).toEqual({ rangeStart: "2026-08-08", rangeEnd: TODAY, start: "2026-08-08", end: "2026-09-06", offset: 2000 });
+    expect(first.next).toEqual({ rangeStart: "2026-08-08", rangeEnd: TODAY, start: "2026-08-08", end: "2026-09-06", offset: 2000, run: expect.any(String) });
     expect(first.detail).toMatchObject({ rows: 2000, snapshots: 2000, citations: 6000, questionsInserted: PROMPTS });
-    // Two samples per prompt × engine × day collapse into one daily metrics row.
-    expect(await counts()).toEqual({ snapshots: 2000, citations: 6000, owned: 2000, questions: PROMPTS + 1, metrics: 1000 });
+    // Two samples per prompt × engine × day collapse into one daily metrics row. The stale
+    // rows are still there: nothing in the range goes before the run has reached its end.
+    expect(await counts()).toEqual({ snapshots: 2002, citations: 6000, owned: 2000, questions: PROMPTS + 1, metrics: 1000 });
 
     calls = [];
     const r = await profoundConnector.sync({ connection: conn as never, kind: "backfill", cursor: null, payload: undefined }, c);
@@ -127,7 +128,7 @@ describe.skipIf(!DB_URL)("profound paged backfill against Postgres", () => {
     expect(await counts()).toEqual(after);
 
     // Replaying one page in the middle (a step whose result was lost) replaces its own tuples only.
-    const mid = { rangeStart: "2026-08-08", rangeEnd: TODAY, start: "2026-08-08", end: "2026-09-06", offset: 4000 };
+    const mid = { rangeStart: "2026-08-08", rangeEnd: TODAY, start: "2026-08-08", end: "2026-09-06", offset: 4000, run: (first.next as { run: string }).run };
     const mr = await profoundConnector.syncPage!({ connection: conn as never, kind: "backfill", cursor: null, payload: undefined, page: mid }, c);
     expect(mr.detail).toMatchObject({ rows: 2000 });
     expect(await counts()).toEqual(after);
@@ -138,5 +139,34 @@ describe.skipIf(!DB_URL)("profound paged backfill against Postgres", () => {
     expect([...new Set(calls.map((x) => `${x.start}..${x.end}`))]).toEqual(["2026-09-15..2026-09-17"]);
     expect(inc.detail).toMatchObject({ rows: PROMPTS * ENGINES.length * SAMPLES.length * 3 });
     expect(await counts()).toEqual(after);
+  }, 300_000);
+
+  it("a run that fails part way keeps the rows it had not replaced yet; the next complete run sweeps what Profound stopped reporting", async () => {
+    const before = await counts();
+    expect(before.snapshots).toBeGreaterThan(0);
+    const conn = (await getConnection(CONN, sql))!;
+    const c = await ctx();
+    // Profound answers the first page of the run, then fails on every later one.
+    const flaky = (async (url: URL | string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { pagination: { offset: number } };
+      if (body.pagination.offset > 0) return new Response("upstream error", { status: 400 });
+      return fakeFetch(url, init);
+    }) as unknown as typeof fetch;
+    await expect(profoundConnector.sync({ connection: conn as never, kind: "backfill", cursor: null, payload: undefined }, { ...c, fetchImpl: flaky })).rejects.toThrow();
+    expect(await counts()).toEqual(before);
+
+    // A sample Profound no longer reports, on a day the next run covers: swept, and its day's metrics rebuilt.
+    const [q] = await sql<{ id: string }[]>`select id from measure.questions where site_id = ${SITE} and normalized = 'how do i edit video 0'`;
+    await sql`insert into measure.serp_snapshots (site_id, question_id, provider, fetched_at, locale, device, raw)
+      values (${SITE}, ${q!.id}, 'profound', '2026-09-16T00:00:00Z', 'us-en', 'desktop', '{"engine":"chatgpt","visibility":0,"sync_run":"an-older-run"}')`;
+    await sql`update measure.external_metrics set metrics = metrics || '{"samples": 3}'
+      where site_id = ${SITE} and provider = 'profound' and date = '2026-09-16' and dimension->>'engine' = 'chatgpt' and question_id = ${q!.id}`;
+    expect((await counts()).snapshots).toBe(before.snapshots + 1);
+    await profoundConnector.sync({ connection: conn as never, kind: "incremental", cursor: { through: "2026-09-15" }, payload: undefined }, c);
+    expect(await counts()).toEqual(before);
+    const [m] = await sql<{ metrics: Record<string, number> }[]>`
+      select metrics from measure.external_metrics
+      where site_id = ${SITE} and provider = 'profound' and date = '2026-09-16' and dimension->>'engine' = 'chatgpt' and question_id = ${q!.id}`;
+    expect(m!.metrics).toMatchObject({ samples: SAMPLES.length, visibility: 50 });
   }, 300_000);
 });

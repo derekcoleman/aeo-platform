@@ -1,7 +1,7 @@
 import type postgres from "postgres";
 import { cosine, defaultEmbedder, EMBEDDING_DIMENSIONS, vectorLiteral, type Embedder } from "@/lib/ai/embed";
 import { appDb } from "@/lib/db/app";
-import { scoreOpportunity, upsertOpportunities, type OpportunityInput } from "@/lib/pipeline/opportunities";
+import { demandOf, loadQuestionDemand, loadTopicalContext, loadTopicWeights, opportunityKey, resolveIntent, scoreEV0, topicalFit, topiclessValue, upsertOpportunities, type OpportunityInput } from "@/lib/pipeline/opportunities";
 import { listEntities } from "./entities";
 import type { SignalKind } from "./types";
 
@@ -75,12 +75,12 @@ export async function detectTermSpikes(orgId: string, siteId: string | null, sql
   return out.sort((a, b) => b.score - a.score).slice(0, 20);
 }
 
-/** Buyer questions seen repeatedly with no published or in-flight answer on the site. */
+/** Buyer questions seen repeatedly with no published or in-flight answer on the site. An excluded question is never one. */
 export async function detectUnansweredQuestions(orgId: string, siteId: string, sql: postgres.Sql = appDb(), limit = 25): Promise<DetectedSignal[]> {
   const rows = await sql<{ id: string; text: string; seen_count: number; demand_score: number; source: string }[]>`
     select q.id, q.text, q.seen_count, q.demand_score::float as demand_score, q.source::text as source
     from measure.questions q
-    where q.org_id = ${orgId} and q.site_id = ${siteId} and q.seen_count >= ${UNANSWERED_MIN_SEEN}
+    where q.org_id = ${orgId} and q.site_id = ${siteId} and q.seen_count >= ${UNANSWERED_MIN_SEEN} and not q.excluded
       and not exists (
         select 1 from content.opportunities o
         where o.site_id = q.site_id and o.question_id = q.id and o.status in ('queued', 'in_progress', 'published')
@@ -192,28 +192,52 @@ export async function upsertSignals(
   return summary;
 }
 
-/** Unanswered questions → opportunities (source 'signal'); other kinds wait for the digest. */
+/**
+ * Unanswered questions → opportunities (source 'signal'); other kinds wait
+ * for the digest. A signal raised before its question was excluded stays
+ * where it is rather than reaching the queue. Scored like every other
+ * producer (scoreEV0), with the unanswered-question prior and the
+ * question's own demand, topic and topical fit.
+ */
 export async function bridgeSignalsToOpportunities(orgId: string, siteId: string, sql: postgres.Sql = appDb()): Promise<{ bridged: number }> {
   const rows = await sql<{ id: string; title: string; score: number; evidence: Record<string, unknown> }[]>`
-    select id, title, score::float as score, evidence from context.signals
-    where org_id = ${orgId} and site_id = ${siteId} and kind = 'unanswered_question' and status = 'new'
-    order by score desc limit 50`;
+    select s.id, s.title, s.score::float as score, s.evidence from context.signals s
+    left join measure.questions q on q.site_id = s.site_id and q.id::text = s.evidence->>'questionId'
+    where s.org_id = ${orgId} and s.site_id = ${siteId} and s.kind = 'unanswered_question' and s.status = 'new'
+      and q.excluded is not true
+    order by s.score desc limit 50`;
+  const questionIds = rows.map((s) => s.evidence.questionId).filter((id): id is string => typeof id === "string");
+  if (questionIds.length === 0) return { bridged: 0 };
+  const [demand, topics] = await Promise.all([loadQuestionDemand(siteId, questionIds, sql), loadTopicWeights(siteId, sql)]);
+  const fit = await loadTopicalContext(siteId, sql, topics);
+  const topicless = topiclessValue(topics);
   const inputs: OpportunityInput[] = [];
   for (const s of rows) {
     const questionId = typeof s.evidence.questionId === "string" ? s.evidence.questionId : null;
     if (!questionId) continue;
-    const demand = typeof s.evidence.demandScore === "number" ? s.evidence.demandScore : 0;
-    const scored = scoreOpportunity({ demand, citationGap: 40, freshness: Math.min(100, s.score) });
+    const q = demand.get(questionId);
+    const topicId = q?.topic_id ?? null;
+    const scored = scoreEV0({
+      demand: demandOf(q, typeof s.evidence.demandScore === "number" ? s.evidence.demandScore : null),
+      intent: resolveIntent(s.title, q?.search_intent),
+      gapType: "unanswered_signal",
+      topic: topicId ? topics.get(topicId) : null,
+      topicless,
+      brandFit: topicalFit(s.title, topicId, fit),
+      actionType: "new_page",
+    });
     inputs.push({
       source: "signal",
       title: s.title,
       targetQuery: s.title,
       questionId,
       signalId: s.id,
+      topicId,
+      actionType: "new_page",
       score: scored.score,
-      scoreBreakdown: scored.breakdown,
+      scoreBreakdown: scored.breakdown as unknown as Record<string, unknown>,
       evidence: { signalId: s.id, ...s.evidence },
-      dedupeKey: `question:${questionId}`,
+      dedupeKey: opportunityKey({ id: questionId }),
     });
   }
   if (inputs.length === 0) return { bridged: 0 };

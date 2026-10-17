@@ -43,6 +43,8 @@ export interface ApprovalRow {
   slack_channel: string | null;
   slack_ts: string | null;
   expires_at: Date | null;
+  note: string | null;
+  decided_by: { userId?: string | null; name?: string | null } | null;
 }
 
 export async function createApproval(
@@ -59,7 +61,7 @@ export async function createApproval(
 
 export async function loadApproval(id: string, sql: postgres.Sql = appDb()): Promise<ApprovalRow | null> {
   const [row] = await sql<ApprovalRow[]>`
-    select id, org_id, site_id, kind, brief_id, content_version_id, status, slack_channel, slack_ts, expires_at
+    select id, org_id, site_id, kind, brief_id, content_version_id, status, slack_channel, slack_ts, expires_at, note, decided_by
     from content.approvals where id = ${id}`;
   return row ?? null;
 }
@@ -69,17 +71,33 @@ export interface DecisionInput {
   by: { userId?: string | null; name?: string | null };
   source: "slack" | "app" | "ops";
   note?: string | null;
+  /**
+   * Apply only when the approval belongs to this org. A Slack click names an
+   * approval id from a message; the org comes from the workspace that sent
+   * it, so a workspace can only decide its own org's approvals.
+   */
+  expectOrgId?: string | null;
 }
 
 /** First decision wins; a second click on a stale Slack message is a no-op that reports `applied: false`. */
 export async function recordDecision(approvalId: string, input: DecisionInput, sql: postgres.Sql = appDb(), now: Date = new Date()): Promise<{ applied: boolean }> {
+  const orgId = input.expectOrgId ?? null;
   const rows = await sql<{ id: string }[]>`
     update content.approvals set
       status = ${input.decision}, decided_at = ${now}, decided_by = ${sql.json(input.by as never)},
       source = ${input.source}, note = ${input.note ?? null}
-    where id = ${approvalId} and status = 'pending'
+    where id = ${approvalId} and status = 'pending' and (${orgId}::uuid is null or org_id = ${orgId})
     returning id`;
   return { applied: rows.length > 0 };
+}
+
+/**
+ * Whether the row already holds this decision by this person. The app records
+ * its decision before sending approval/decided, so for that event
+ * recordDecision applies nothing, yet the Slack message still needs rewriting.
+ */
+export function holdsDecision(approval: Pick<ApprovalRow, "status" | "decided_by">, decision: ApprovalDecision, by: { userId?: string | null }): boolean {
+  return approval.status === decision && (approval.decided_by?.userId ?? null) === (by.userId ?? null);
 }
 
 export async function expireApproval(approvalId: string, sql: postgres.Sql = appDb(), now: Date = new Date()): Promise<{ applied: boolean }> {

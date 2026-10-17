@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvalsSlackTarget, createApproval, expireApproval, loadApproval, recordDecision, requiredGates } from "@/lib/pipeline/approvals";
+import { approvalsSlackTarget, createApproval, expireApproval, holdsDecision, loadApproval, recordDecision, requiredGates } from "@/lib/pipeline/approvals";
 import { fakeSql } from "./helpers/fake-sql";
 import { ORG_ID, SITE_ID } from "./fixtures/pipeline";
 
@@ -30,16 +30,35 @@ describe("createApproval", () => {
 describe("recordDecision", () => {
   it("applies the first decision on a pending row", async () => {
     const sql = fakeSql([[/update content\.approvals set status/, () => [{ id: "ap-1" }]]]);
-    const out = await recordDecision("ap-1", { decision: "approve", by: { userId: "U1", name: "Dana" }, source: "slack" }, sql, when);
+    const out = await recordDecision("ap-1", { decision: "approve", by: { userId: "U1", name: "Dana" }, source: "app" }, sql, when);
     expect(out).toEqual({ applied: true });
     const q = sql.queries[0]!;
-    expect(q.text).toContain("where id = $6 and status = 'pending'");
-    expect(q.values).toEqual(["approve", when, { __json: { userId: "U1", name: "Dana" } }, "slack", null, "ap-1"]);
+    expect(q.text).toContain("where id = $6 and status = 'pending' and ($7::uuid is null or org_id = $8)");
+    expect(q.values).toEqual(["approve", when, { __json: { userId: "U1", name: "Dana" } }, "app", null, "ap-1", null, null]);
+  });
+
+  it("scopes a Slack decision to the org of the workspace that sent it", async () => {
+    const sql = fakeSql();
+    const out = await recordDecision("ap-1", { decision: "approve", by: { userId: "U1" }, source: "slack", expectOrgId: ORG_ID }, sql, when);
+    // Another org's approval id matches no row, so nothing is applied.
+    expect(out).toEqual({ applied: false });
+    expect(sql.queries[0]!.text).toContain("and ($7::uuid is null or org_id = $8)");
+    expect(sql.queries[0]!.values.slice(-2)).toEqual([ORG_ID, ORG_ID]);
   });
 
   it("reports applied:false for a second click on a decided row", async () => {
     const out = await recordDecision("ap-1", { decision: "changes", by: {}, source: "app", note: "tighten the intro" }, fakeSql(), when);
     expect(out).toEqual({ applied: false });
+  });
+});
+
+describe("holdsDecision", () => {
+  it("recognises the app's own, already-recorded decision so its Slack message is still rewritten", () => {
+    const row = { status: "approve" as const, decided_by: { userId: "u1", name: "Dana" } };
+    expect(holdsDecision(row, "approve", { userId: "u1" })).toBe(true);
+    expect(holdsDecision(row, "changes", { userId: "u1" })).toBe(false);
+    expect(holdsDecision(row, "approve", { userId: "U-other" })).toBe(false);
+    expect(holdsDecision({ status: "pending", decided_by: null }, "approve", {})).toBe(false);
   });
 });
 
@@ -55,6 +74,12 @@ describe("expireApproval", () => {
 describe("loadApproval", () => {
   it("returns null for an unknown id", async () => {
     expect(await loadApproval("nope", fakeSql())).toBeNull();
+  });
+
+  it("reads the stored decision's note and decider, which the gate resumes from", async () => {
+    const sql = fakeSql();
+    await loadApproval("ap-1", sql);
+    expect(sql.queries[0]!.text).toContain("expires_at, note, decided_by from content.approvals");
   });
 });
 
@@ -84,11 +109,9 @@ describe("approvalsSlackTarget", () => {
     const target = await approvalsSlackTarget(ORG_ID, sql);
     expect(target?.channel).toBe("C-APPROVALS");
     expect(target?.conn.id).toBe("c2");
-    const outer = sql.queries.find((q) => q.text.includes("from context.context_connections"))!;
-    expect(outer.text).toContain("select * from context.context_connections");
-    const fragments = sql.queries.filter((q) => !q.text.includes("from context.context_connections")).map((q) => q.text);
-    expect(fragments).toContain("and org_id = $1");
-    expect(fragments).toContain("and provider = $1");
-    expect(fragments).toContain("and enabled and status in ('active', 'error')");
+    expect(sql.queries).toHaveLength(1);
+    const q = sql.queries[0]!;
+    expect(q.text).toContain("select * from context.context_connections where true and org_id = $1 and provider = $2 and enabled and status in ('active', 'error') order by created_at");
+    expect(q.values).toEqual([ORG_ID, "slack"]);
   });
 });

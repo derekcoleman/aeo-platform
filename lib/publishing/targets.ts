@@ -105,12 +105,15 @@ export interface ArticleSource {
   author_name: string | null;
   version_id: string | null;
   origin: "pipeline" | "cms";
+  /** The proxy page's status (migration 0020); null for an item with no page here. */
+  page_status?: "live" | "noindex" | "retired" | null;
 }
 
 export async function loadArticleForPush(contentItemId: string, sql: postgres.Sql = appDb()): Promise<ArticleSource | null> {
-  const [row] = await sql<{ id: string; site_id: string; slug: string; title: string; description: string | null; body_html: string; frontmatter: { faq?: { question: string; answer: string }[] } | null; published_at: Date | null; canonical_url: string | null; author_name: string | null; version_id: string | null; origin: "pipeline" | "cms" }[]>`
+  const [row] = await sql<{ id: string; site_id: string; slug: string; title: string; description: string | null; body_html: string; frontmatter: { faq?: { question: string; answer: string }[] } | null; published_at: Date | null; canonical_url: string | null; author_name: string | null; version_id: string | null; origin: "pipeline" | "cms"; page_status: ArticleSource["page_status"] }[]>`
     select ci.id, ci.site_id, ci.slug, coalesce(v.title, ci.title, ci.slug) as title, v.description, v.body_html, v.frontmatter, ci.published_at, ci.canonical_url,
-           a.name as author_name, v.id as version_id, coalesce(ci.origin, 'pipeline') as origin
+           a.name as author_name, v.id as version_id, coalesce(ci.origin, 'pipeline') as origin,
+           (select p.status::text from content.published_pages p where p.content_item_id = ci.id and p.site_id = ci.site_id order by p.updated_at desc limit 1) as page_status
     from content.content_items ci
     left join content.content_versions v on v.id = ci.current_version_id
     left join content.authors a on a.id = ci.author_id
@@ -119,9 +122,18 @@ export async function loadArticleForPush(contentItemId: string, sql: postgres.Sq
   return { ...row, origin: row.origin === "cms" ? "cms" : "pipeline", faq: row.frontmatter?.faq ?? [] };
 }
 
-/** The body Webflow gets: the sanitised article HTML plus the FAQ as headings, so the post is complete without our renderer. */
+/** The FAQ section's heading as composeVersion renders it into a version's body. */
+const FAQ_SECTION_RE = /<h2(?:\s[^>]*)?>\s*Frequently asked questions\s*<\/h2>/i;
+
+/**
+ * The body Webflow gets: the sanitised article HTML with the FAQ as
+ * headings, so the post is complete without our renderer. A stored
+ * version's body already ends in its FAQ section (the draft step composed
+ * it in, and that is the HTML QA scored), so it goes as it is; the FAQ is
+ * appended only to a body that lacks one.
+ */
 export function webflowBodyHtml(a: Pick<ArticleSource, "body_html" | "faq">): string {
-  if (!a.faq.length) return a.body_html;
+  if (!a.faq.length || FAQ_SECTION_RE.test(a.body_html)) return a.body_html;
   const faq = a.faq.map((f) => `<h3>${escapeHtml(f.question)}</h3><p>${escapeHtml(f.answer)}</p>`).join("");
   return `${a.body_html}<h2>Frequently asked questions</h2>${faq}`;
 }
@@ -147,6 +159,8 @@ export async function pushItemToTarget(contentItemId: string, target: PublishTar
   if (!article) return { ok: false, error: "content item has no current version" };
   // An imported CMS post is refreshed in place by lib/refresh/publish; creating it again here would duplicate it and re-slug it.
   if (article.origin === "cms") return { ok: false, skipped: "cms-origin item is refreshed in place, never pushed as a new post" };
+  // A page taken out of the index on the customer's domain is not copied anywhere else either.
+  if (article.page_status && article.page_status !== "live") return { ok: false, skipped: `the page is ${article.page_status}; restore it to push it again` };
   const conn = target.connection_id ? await getConnection(target.connection_id, sql) : null;
   if (!conn || conn.status !== "active") return await recordFailure(sql, target, article, "webflow connection is missing or inactive");
 
@@ -200,9 +214,14 @@ function guessItemUrl(cfg: WebflowTargetConfig, slug: string): string | null {
   return `https://${domain.replace(/^https?:\/\//, "").replace(/\/$/, "")}/${collectionSlug}/${slug}`;
 }
 
+/** An enabled Webflow target; with `onlyAuto`, one that takes every publish without a manual push. */
+export function isPushTarget(t: Pick<PublishTargetRow, "enabled" | "kind" | "config">, opts: { onlyAuto?: boolean } = {}): boolean {
+  return t.enabled && t.kind === "webflow" && (!opts.onlyAuto || t.config.autoPush !== false);
+}
+
 /** Every enabled auto-push target for the item's site. */
 export async function pushItemEverywhere(contentItemId: string, siteId: string, ctx: ConnectorContext, opts: { force?: boolean; onlyAuto?: boolean } = {}): Promise<{ targetId: string; result: PushResult }[]> {
-  const targets = (await listPublishTargets(siteId, ctx.sql)).filter((t) => t.enabled && t.kind === "webflow" && (!opts.onlyAuto || t.config.autoPush !== false));
+  const targets = (await listPublishTargets(siteId, ctx.sql)).filter((t) => isPushTarget(t, opts));
   const out: { targetId: string; result: PushResult }[] = [];
   for (const t of targets) out.push({ targetId: t.id, result: await pushItemToTarget(contentItemId, t, ctx, opts) });
   return out;

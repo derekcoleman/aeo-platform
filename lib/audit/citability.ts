@@ -55,7 +55,7 @@ export async function scorePageCitability(model: TextModel, page: CitabilityPage
     return { url: page.url, title: page.title, topPassages: [], averageScore: 0, error: "insufficient content" };
   }
   try {
-    const { text } = await model.complete(citabilityPrompt(page, maxChars), { json: true, maxTokens: 1500 });
+    const { text } = await model.complete(citabilityPrompt(page, maxChars), { json: true, maxTokens: 4096, effort: "low" });
     const parsed = parseScoredJson(text, PageSchema);
     const topPassages: PassageCitabilityScore[] = parsed.passages.slice(0, 3).map((p) => ({
       ...p,

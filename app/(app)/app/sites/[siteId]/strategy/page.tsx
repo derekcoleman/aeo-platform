@@ -3,12 +3,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { ActionButton } from "@/components/app/action-button";
+import { AnswerEngines, AnswerEnginesLoading } from "@/components/app/answer-engines";
 import { LiveRefresh } from "@/components/app/live-refresh";
-import { CompetitorDomains, CompetitorDomainsLoading } from "@/components/app/competitor-domains";
+import { CompetitorDomainsLoading, NamedCompetitors, SourcesShapingAnswers } from "@/components/app/competitor-domains";
+import { CompetitorGapLoading, CompetitorKeywordGap } from "@/components/app/competitor-gap";
+import { MethodologyNote } from "@/components/app/methodology-note";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { SyncStatus } from "@/components/app/sync-status";
 import { when } from "@/components/app/status";
-import { ContentRequestForm, EditTopic, KeywordsForm, ProfoundConnectForm, PromptForm, TopicForm } from "@/components/app/strategy-forms";
+import { CompetitorForm, ContentRequestForm, EditTopic, KeywordsForm, ProfoundConnectForm, PromptForm, TopicForm } from "@/components/app/strategy-forms";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,9 +19,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { resolveTab, settingsHref, sitePage } from "@/lib/app/nav";
+import { currentRestatements, METHODOLOGY_PAGE_METRICS } from "@/lib/app/methodology";
 import { loadSite } from "@/lib/app/store";
 import { listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
-import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
+import { analyzeCompetitorGapAction, analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
 import { canEdit, canManage, requireUser, roleIn } from "@/lib/auth/session";
 import { latestSyncRun } from "@/lib/connectors/store";
 import { describeSyncState } from "@/lib/connectors/sync-status";
@@ -38,7 +42,7 @@ export default async function StrategyPage({ params, searchParams }: { params: P
   if (!site || !roleIn(user, site.org_id)) notFound();
   const editor = canEdit(user, site.org_id);
   const manager = canManage(user, site.org_id);
-  const [topics, stats, prompts, pages, engines, byTopic, profound] = await Promise.all([
+  const [topics, stats, prompts, pages, engines, byTopic, profound, restated] = await Promise.all([
     listTopics(siteId, undefined, true),
     topicStats(siteId),
     listPrompts(siteId, { topicId: topicFilter ?? null, limit: 200 }),
@@ -46,6 +50,7 @@ export default async function StrategyPage({ params, searchParams }: { params: P
     profoundByEngine(siteId),
     profoundByTopic(siteId),
     profoundConnection(siteId, site.org_id),
+    currentRestatements(siteId, METHODOLOGY_PAGE_METRICS.strategy),
   ]);
   const latestRun = profound ? await latestSyncRun(profound.id) : null;
   const sync = profound && profound.mode === "api" ? describeSyncState({ now: new Date(), requestedAt: profound.sync_requested_at, requestedKind: profound.sync_requested_kind, latestRun }) : null;
@@ -62,6 +67,8 @@ export default async function StrategyPage({ params, searchParams }: { params: P
         <Badge variant="secondary">{prompts.filter((p) => p.is_tracked && !p.excluded).length} tracked prompts</Badge>
         {profound ? <Badge variant={profound.status === "active" ? "success" : "destructive"}>Profound {profound.mode}</Badge> : <Badge variant="outline">Profound not connected</Badge>}
       </PageHeader>
+
+      <MethodologyNote rows={restated} />
 
       {topicFilter ? <p className="text-muted-foreground mb-3 text-sm">Filtered to topic <span className="font-medium">{topicName(topicFilter) ?? topicFilter}</span> · <Link className="underline-offset-2 hover:underline" href={`/app/sites/${siteId}/strategy` as Route}>show all</Link></p> : null}
 
@@ -176,15 +183,21 @@ export default async function StrategyPage({ params, searchParams }: { params: P
         <TabsContent value="competitors" className="grid gap-4 pt-4">
           <div className="grid gap-4 lg:grid-cols-2">
             <Card>
-              <CardHeader><CardTitle>Who gets cited instead of you</CardTitle><CardDescription>AI Overview citations, last 30 days, native and Profound sources labelled.</CardDescription></CardHeader>
-              <CardContent>
+              <CardHeader><CardTitle>Competitors</CardTitle><CardDescription>The rivals you name, and how often each was cited in Google AI Overviews instead of you, from our own trackers, last 30 days{profound ? "; Profound's engines in their own column" : ""}. A competitor&apos;s subdomains count as it. Only these count as competitors in the queue&apos;s scores.</CardDescription></CardHeader>
+              <CardContent className="grid gap-4">
                 <Suspense fallback={<CompetitorDomainsLoading />}>
-                  <CompetitorDomains siteId={siteId} topicId={topicFilter ?? null} />
+                  <NamedCompetitors siteId={siteId} topicId={topicFilter ?? null} profound={!!profound} editor={editor} />
                 </Suspense>
+                {editor ? (
+                  <details>
+                    <summary className="text-muted-foreground cursor-pointer text-sm">Add a competitor</summary>
+                    <div className="mt-3"><CompetitorForm siteId={siteId} /></div>
+                  </details>
+                ) : null}
               </CardContent>
             </Card>
             <Card>
-              <CardHeader><CardTitle>What their content looks like</CardTitle><CardDescription>Cited pages fetched and scored with the same rules the audit and the linter use. This is the structural target every brief is told to beat.</CardDescription></CardHeader>
+              <CardHeader><CardTitle>What their content looks like</CardTitle><CardDescription>Cited pages fetched and scored with the same rules the audit and the linter use; forums, review sites, wikis, social, video, directories and marketplaces are left out. This is the structural target every brief is told to beat.</CardDescription></CardHeader>
               <CardContent className="grid gap-2 text-sm">
                 {editor ? <div><ActionButton size="sm" variant="outline" action={analyzeCompetitorsAction.bind(null, siteId, topicFilter ?? null)} done="Analysis queued">Analyse cited pages now</ActionButton></div> : null}
                 {target.pages === 0 ? <p className="text-muted-foreground">No pages analysed yet.</p> : (
@@ -197,6 +210,26 @@ export default async function StrategyPage({ params, searchParams }: { params: P
               </CardContent>
             </Card>
           </div>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2">Keywords they rank for that you don&apos;t <Badge variant="outline">Organic rankings · DataForSEO Labs</Badge></CardTitle>
+              <CardDescription>Keywords where a named competitor ranks in Google&apos;s organic top 10 and you do not{topicFilter ? ", this topic only" : ""}, found on the 2nd of each month for up to five competitor domains. Keywords that name a competitor are left out unless they compare. Where you already rank 11–20 the page that ranks is the one to improve, and the queue sends the work there. The best of the rest are on the queue already. Organic rankings, not AI answers: never added to the AI Overview numbers on this page.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
+              {editor ? <div><ActionButton size="sm" variant="outline" action={analyzeCompetitorGapAction.bind(null, siteId)} done="Queued">Find keyword gaps now</ActionButton></div> : null}
+              <Suspense fallback={<CompetitorGapLoading />}>
+                <CompetitorKeywordGap siteId={siteId} locale={site.locale} topicId={topicFilter ?? null} topics={activeTopics} editor={editor} />
+              </Suspense>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle>Sources shaping answers</CardTitle><CardDescription>Sites cited in AI Overviews that are neither yours nor a competitor, last 30 days{profound ? "; Profound's engines listed separately below" : ""}: forums, review platforms, publishers, reference sites, analysts. They are where to be mentioned, not who to beat. Change a site&apos;s role for this project if it is wrong, or mark it a competitor.</CardDescription></CardHeader>
+            <CardContent className="grid gap-4">
+              <Suspense fallback={<CompetitorDomainsLoading />}>
+                <SourcesShapingAnswers siteId={siteId} topicId={topicFilter ?? null} profound={!!profound} editor={editor} />
+              </Suspense>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader><CardTitle>Cited pages</CardTitle></CardHeader>
             <CardContent>
@@ -223,6 +256,17 @@ export default async function StrategyPage({ params, searchParams }: { params: P
         </TabsContent>
 
         <TabsContent value="visibility" className="grid gap-4 pt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2">Engines <Badge variant="outline">API-grounded probes via OpenRouter</Badge></CardTitle>
+              <CardDescription>How each AI engine&apos;s model answers your tracked prompts when we ask it through its API with web search on{topicFilter ? ", this topic only" : ""}. Our own probes, not the consumer apps, and never added to the Google AI Overview numbers or to Profound&apos;s below.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Suspense fallback={<AnswerEnginesLoading />}>
+                <AnswerEngines siteId={siteId} orgId={site.org_id} topicId={topicFilter ?? null} />
+              </Suspense>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle>Profound {profound ? <Badge variant={profound.status === "active" ? "success" : "destructive"}>{profound.status} · {profound.mode}</Badge> : null}</CardTitle>

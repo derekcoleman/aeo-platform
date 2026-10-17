@@ -3,6 +3,7 @@ import { promises as dns } from "node:dns";
 import postgres from "postgres";
 import { appDatabaseUrl, rendererDatabaseUrl, supabasePublishableKey, supabaseServiceRoleKey, supabaseUrl } from "@/lib/db/env";
 import { readHeartbeats, type HeartbeatRow } from "@/lib/jobs/heartbeat";
+import { configuredSerpVendors } from "@/lib/serp/env";
 
 /**
  * The deployment checklist behind Settings → Deployment: every requirement for a working
@@ -55,8 +56,21 @@ export function envChecks(env: Env = process.env): SetupCheck[] {
     envCheck(env, "integrations", "env.oauth_state", "OAuth state secret", ["OAUTH_STATE_SECRET"], { fix: "Set OAUTH_STATE_SECRET (≥16 random chars) before connecting Slack or Google." }),
     envCheck(env, "integrations", "env.slack", "Slack app", ["SLACK_CLIENT_ID"], { fix: "Create the Slack app and set SLACK_CLIENT_ID / SLACK_CLIENT_SECRET / SLACK_SIGNING_SECRET.", optional: true }),
     envCheck(env, "integrations", "env.google", "Google OAuth client", ["GOOGLE_OAUTH_CLIENT_ID"], { fix: "Create a Google OAuth client with the Search Console and Analytics read-only scopes.", optional: true }),
-    envCheck(env, "integrations", "env.serp", "SERP provider", ["DATAFORSEO_LOGIN", "SERPAPI_KEY"], { fix: "Set DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD and/or SERPAPI_KEY to enable demand mining and AI Overview tracking.", optional: true }),
+    serpCheck(env),
   ];
+}
+
+/** Configured means callable: DataForSEO needs its password too, and SerpApi's key is SERPAPI_API_KEY (SERPAPI_KEY still works, flagged). */
+function serpCheck(env: Env): SetupCheck {
+  const base = { key: "env.serp", group: "integrations" as const, label: "SERP provider" };
+  const vendors = configuredSerpVendors(env);
+  if (vendors.length === 0) {
+    return { ...base, state: "warn", detail: "DATAFORSEO_LOGIN + DATAFORSEO_PASSWORD / SERPAPI_API_KEY not set", fix: "Set DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD and/or SERPAPI_API_KEY to enable demand mining and AI Overview tracking." };
+  }
+  if (!env.SERPAPI_API_KEY && env.SERPAPI_KEY) {
+    return { ...base, state: "warn", detail: `${vendors.join(" + ")} configured; the SerpApi key is under the deprecated name SERPAPI_KEY`, fix: "Rename SERPAPI_KEY to SERPAPI_API_KEY." };
+  }
+  return { ...base, state: "ok", detail: `${vendors.join(" + ")} configured` };
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

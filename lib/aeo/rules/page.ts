@@ -176,6 +176,8 @@ export const faqBlock: PageRule = {
     const schema = extractSchemas($, page.url).nodes.find((n) => (n.node["@type"] === "FAQPage"));
     const mainEntity = schema ? (schema.node.mainEntity as unknown[] | undefined) : undefined;
     const qCount = Array.isArray(mainEntity) ? mainEntity.length : faqHeading ? $(faqHeading).nextAll("h3, dt, details, h4").filter((_, el) => /\?/.test($(el).text())).length : 0;
+    // A brief with no evidence buyers ask these separately wants no FAQ: not scored, and never recommended.
+    if (page.faqExpected === false) return finding(this, 0, true, { faqHeading: !!faqHeading, faqSchema: !!schema, questions: qCount, faqExpected: false }, undefined, true);
     const passed = qCount >= 3;
     return finding(this, passed ? this.maxScore : qCount > 0 ? this.maxScore / 2 : 0, passed, { faqHeading: !!faqHeading, faqSchema: !!schema, questions: qCount },
       passed ? undefined : "Add an FAQ section of 3–6 real buyer questions with 40–60 word answers, marked up as FAQPage.");

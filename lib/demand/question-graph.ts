@@ -40,10 +40,17 @@ export interface QuestionCluster {
   centroid?: number[];
 }
 
+export interface QuestionGraphStats {
+  queriesIssued: number;
+  cachedQueries: number;
+  costUsd: number;
+  rawCandidates: number;
+}
+
 export interface QuestionGraph {
   questions: ScoredQuestion[];
   clusters: QuestionCluster[];
-  stats: { queriesIssued: number; cachedQueries: number; costUsd: number; rawCandidates: number; embeddingModel: string | null };
+  stats: QuestionGraphStats & { embeddingModel: string | null };
 }
 
 export const QUESTION_MODIFIERS = {
@@ -100,15 +107,41 @@ export interface BuildOptions {
   questionsOnly?: boolean;
 }
 
+/** What one discovery pass found, before scoring: the nodes and the queries it issued. */
+export interface QuestionDiscovery {
+  nodes: QuestionNode[];
+  /** Normalised queries issued, so a later pass of the same run can skip them. */
+  issued: string[];
+  stats: QuestionGraphStats;
+}
+
+export type DiscoverOptions = Omit<BuildOptions, "embedder" | "dedupeThreshold" | "clusterThreshold"> & {
+  /**
+   * What earlier passes of the same run already did. A query one of them
+   * issued is not issued again (it would count its suggestions twice), and a
+   * question one of them found is not expanded again, so passes over slices
+   * of a seed list add up to one walk over the whole list.
+   */
+  prior?: { issued: Iterable<string>; seen: Iterable<string> };
+};
+
 export async function buildQuestionGraph(client: SerpClient, tenant: SerpTenant, opts: BuildOptions): Promise<QuestionGraph> {
+  const found = await discoverQuestions(client, tenant, opts);
+  return finalizeQuestionGraph(found.nodes, found.stats, opts);
+}
+
+/** Expand seeds through autocomplete (and PAA) to `depth`; exact-dedupe and count sightings. No scoring. */
+export async function discoverQuestions(client: SerpClient, tenant: SerpTenant, opts: DiscoverOptions): Promise<QuestionDiscovery> {
   const depth = opts.depth ?? 2;
   const maxQueries = opts.maxQueries ?? 300;
   const device = opts.device ?? "desktop";
   const questionsOnly = opts.questionsOnly ?? true;
+  const priorIssued = new Set(opts.prior?.issued ?? []);
+  const priorSeen = new Set(opts.prior?.seen ?? []);
 
   const nodes = new Map<string, QuestionNode>();
   const issued = new Set<string>();
-  const stats = { queriesIssued: 0, cachedQueries: 0, costUsd: 0, rawCandidates: 0, embeddingModel: opts.embedder?.id ?? null };
+  const stats: QuestionGraphStats = { queriesIssued: 0, cachedQueries: 0, costUsd: 0, rawCandidates: 0 };
 
   const add = (text: string, source: QuestionSource, seedTerm: string, parent: string | null, d: number, paaAnswer?: QuestionNode["paaAnswer"]) => {
     stats.rawCandidates += 1;
@@ -127,6 +160,8 @@ export async function buildQuestionGraph(client: SerpClient, tenant: SerpTenant,
     nodes.set(normalized, node);
     return node;
   };
+  // Expand a question the first time this run sees it, not again on a later sighting.
+  const isNew = (n: QuestionNode | null): n is QuestionNode => !!n && n.seenCount === 1 && !priorSeen.has(n.normalized);
 
   // Frontier: queries to expand at the current depth. Seeds themselves are
   // expanded by modifier; discovered questions are queried as-is.
@@ -139,7 +174,7 @@ export async function buildQuestionGraph(client: SerpClient, tenant: SerpTenant,
     const next: typeof frontier = [];
     for (const f of frontier) {
       const key = normalizeQuestion(f.query);
-      if (!key || issued.has(key)) continue;
+      if (!key || issued.has(key) || priorIssued.has(key)) continue;
       if (issued.size >= maxQueries) break;
       issued.add(key);
       const q = { query: f.query, locale: opts.locale, device };
@@ -150,7 +185,7 @@ export async function buildQuestionGraph(client: SerpClient, tenant: SerpTenant,
       stats.costUsd += ac.cached ? 0 : ac.costUsd;
       for (const s of ac.suggestions) {
         const n = add(s, "autocomplete", f.seedTerm, f.parent ?? f.query, d);
-        if (n && n.seenCount === 1) next.push({ query: n.text, seedTerm: f.seedTerm, parent: n.text });
+        if (isNew(n)) next.push({ query: n.text, seedTerm: f.seedTerm, parent: n.text });
       }
 
       if (opts.paa) {
@@ -160,14 +195,47 @@ export async function buildQuestionGraph(client: SerpClient, tenant: SerpTenant,
         stats.costUsd += serp.cached ? 0 : serp.costUsd;
         for (const p of serp.paa) {
           const n = add(p.question, "paa", f.seedTerm, f.parent ?? f.query, d, { snippet: p.answerSnippet, sourceUrl: p.sourceUrl });
-          if (n && n.seenCount === 1) next.push({ query: n.text, seedTerm: f.seedTerm, parent: n.text });
+          if (isNew(n)) next.push({ query: n.text, seedTerm: f.seedTerm, parent: n.text });
         }
       }
     }
     frontier = next;
   }
 
-  let questions: ScoredQuestion[] = [...nodes.values()].map((n) => ({ ...n, demandScore: demandScore(n) }));
+  return { nodes: [...nodes.values()], issued: [...issued], stats };
+}
+
+/**
+ * Combine the nodes of several discovery passes over one run, as if one pass
+ * had found them all: sightings add up, a PAA sighting makes the question
+ * PAA, the shallowest depth wins, and the first pass's phrasing, seed and
+ * parent are kept.
+ */
+export function mergeQuestionNodes(passes: QuestionNode[][]): QuestionNode[] {
+  const out = new Map<string, QuestionNode>();
+  for (const pass of passes) {
+    for (const n of pass) {
+      const existing = out.get(n.normalized);
+      if (!existing) {
+        out.set(n.normalized, { ...n });
+        continue;
+      }
+      existing.seenCount += n.seenCount;
+      if (n.source === "paa") existing.source = "paa";
+      if (n.paaAnswer && !existing.paaAnswer) existing.paaAnswer = n.paaAnswer;
+      if (n.depth < existing.depth) existing.depth = n.depth;
+    }
+  }
+  return [...out.values()];
+}
+
+/** Score the discovered nodes, then embed, dedupe near-duplicates and cluster them when an embedder is given. */
+export async function finalizeQuestionGraph(
+  nodes: QuestionNode[],
+  stats: QuestionGraphStats,
+  opts: Pick<BuildOptions, "embedder" | "dedupeThreshold" | "clusterThreshold"> = {},
+): Promise<QuestionGraph> {
+  let questions: ScoredQuestion[] = nodes.map((n) => ({ ...n, demandScore: demandScore(n) }));
   let clusters: QuestionCluster[] = [];
 
   if (opts.embedder && questions.length > 0) {
@@ -178,7 +246,7 @@ export async function buildQuestionGraph(client: SerpClient, tenant: SerpTenant,
   }
 
   questions.sort((a, b) => b.demandScore - a.demandScore || a.depth - b.depth || a.text.localeCompare(b.text));
-  return { questions, clusters, stats };
+  return { questions, clusters, stats: { ...stats, embeddingModel: opts.embedder?.id ?? null } };
 }
 
 /**

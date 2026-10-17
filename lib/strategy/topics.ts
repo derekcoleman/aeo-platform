@@ -2,6 +2,7 @@ import type postgres from "postgres";
 import { z } from "zod";
 import { appDb } from "@/lib/db/app";
 import { normalizeQuestion } from "@/lib/demand/question-graph";
+import { GAP_FRESHNESS_DAYS } from "@/lib/demand/store";
 
 /**
  * Topics: the customer's control surface over what gets tracked and written.
@@ -139,6 +140,39 @@ export async function assignQuestionsToTopics(siteId: string, opts: { reassign?:
   return { assigned: ids.length, considered: questions.length };
 }
 
+// ── scope checks ────────────────────────────────────────────────────────────
+
+/** A topic or question id that does not belong to the site it was submitted for. */
+export class OutOfSiteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OutOfSiteError";
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Throws OutOfSiteError unless every id given belongs to `siteId`. Form and
+ * action arguments name a site the caller was authorised for and, separately,
+ * topic and question ids; without this, an editor of one project could attach
+ * another org's topic or question to theirs (and the pipeline would then read
+ * it into a brief). Empty ids are "none" and pass.
+ */
+export async function assertSiteScopedIds(siteId: string, ids: { topicId?: string | null; questionId?: string | null }, sql: postgres.Sql = appDb()): Promise<void> {
+  const topicId = ids.topicId || null;
+  const questionId = ids.questionId || null;
+  if (!topicId && !questionId) return;
+  if (topicId && !UUID.test(topicId)) throw new OutOfSiteError("Topic not found.");
+  if (questionId && !UUID.test(questionId)) throw new OutOfSiteError("Question not found.");
+  const [row] = await sql<{ topic_ok: boolean; question_ok: boolean }[]>`
+    select
+      (${topicId}::uuid is null or exists (select 1 from measure.topics where id = ${topicId}::uuid and site_id = ${siteId}::uuid)) as topic_ok,
+      (${questionId}::uuid is null or exists (select 1 from measure.questions where id = ${questionId}::uuid and site_id = ${siteId}::uuid)) as question_ok`;
+  if (!row?.topic_ok) throw new OutOfSiteError("Topic not found.");
+  if (!row.question_ok) throw new OutOfSiteError("Question not found.");
+}
+
 // ── prompt control ──────────────────────────────────────────────────────────
 
 export type Tier = "daily" | "weekly" | "monthly" | "none";
@@ -187,8 +221,8 @@ export interface TopicStats {
 export async function topicStats(siteId: string, sql: postgres.Sql = appDb()): Promise<Map<string, TopicStats>> {
   const rows = await sql<TopicStats[]>`
     with latest as (
-      select distinct on (s.question_id) s.question_id, s.id, s.aio_triggered
-      from measure.serp_snapshots s where s.site_id = ${siteId} and s.provider in ('dataforseo', 'serpapi')
+      select distinct on (s.question_id) s.question_id, s.id, s.aio_triggered, s.fetched_at
+      from measure.v_native_aio s where s.site_id = ${siteId}
       order by s.question_id, s.fetched_at desc
     ), q as (
       select q.topic_id,
@@ -196,7 +230,9 @@ export async function topicStats(siteId: string, sql: postgres.Sql = appDb()): P
              count(*) filter (where q.is_tracked and not q.excluded)::int as tracked,
              count(*) filter (where l.aio_triggered)::int as aio_triggered,
              count(*) filter (where l.aio_triggered and exists (select 1 from measure.serp_citations c where c.serp_snapshot_id = l.id and c.surface = 'ai_overview' and c.is_owned))::int as aio_cited,
-             count(*) filter (where l.aio_triggered and not exists (select 1 from measure.serp_citations c where c.serp_snapshot_id = l.id and c.surface = 'ai_overview' and c.is_owned)
+             -- the same gap citationGaps queues: fresh, not excluded, cited without us
+             count(*) filter (where l.aio_triggered and not q.excluded and l.fetched_at >= now() - make_interval(days => ${GAP_FRESHNESS_DAYS})
+                                and not exists (select 1 from measure.serp_citations c where c.serp_snapshot_id = l.id and c.surface = 'ai_overview' and c.is_owned)
                                 and exists (select 1 from measure.serp_citations c where c.serp_snapshot_id = l.id and c.surface = 'ai_overview'))::int as gaps
       from measure.questions q left join latest l on l.question_id = q.id
       where q.site_id = ${siteId} and q.topic_id is not null

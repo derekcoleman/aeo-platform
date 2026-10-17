@@ -12,15 +12,19 @@ import { markSyncRequested } from "@/lib/connectors/store";
 import { PROFOUND_FEATURE } from "@/lib/connectors/profound";
 import { PROFOUND_DEFAULT_BASE, ProfoundApi, ProfoundApiError, ProfoundDiscoveryError, type DiscoveryAttempt } from "@/lib/connectors/profound/api";
 import { appDb } from "@/lib/db/app";
-import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
+import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorGapRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
+import { OVERRIDE_SOURCE_ROLES, removeCompetitor, saveCompetitor, seedCompetitorsFromDomains, setSourceOverride, SourceRoleInputError } from "@/lib/measure/source-roles";
 import { createManualOpportunity } from "@/lib/pipeline/opportunities";
-import { addManualPrompt, assignQuestionsToTopics, createTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
+import { dataForSeoConfigured } from "@/lib/serp/env";
+import { gapMarketSupported, marketOf } from "@/lib/strategy/competitor-gap";
+import { OutOfSiteError, addManualPrompt, assertSiteScopedIds, assignQuestionsToTopics, createTopic, loadTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";
 
 /**
  * Server actions for the Strategy page: topics, prompt control, manual
- * content requests, competitor analysis and the Profound API connection.
+ * content requests, named competitors and source roles, competitor
+ * analysis, the competitor organic gap and the Profound API connection.
  */
 
 const fail = (error: string): ActionResult => ({ ok: false, error });
@@ -31,6 +35,17 @@ async function guard(siteId: string, level: "edit" | "manage") {
   if (!site) return { user, site: null, error: "Site not found." };
   const allowed = level === "manage" ? canManage(user, site.org_id) : canEdit(user, site.org_id);
   return { user, site, error: allowed ? null : "You do not have permission for this project." };
+}
+
+/** The reason to refuse when a submitted topic or question id is not this site's; null when every id is. */
+async function outOfSite(siteId: string, ids: { topicId?: string | null; questionId?: string | null }): Promise<string | null> {
+  try {
+    await assertSiteScopedIds(siteId, ids);
+    return null;
+  } catch (e) {
+    if (e instanceof OutOfSiteError) return e.message;
+    throw e;
+  }
 }
 
 const refresh = (siteId: string) => {
@@ -47,11 +62,16 @@ export async function saveTopicAction(_prev: ActionResult | null, form: FormData
   if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid topic.");
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const before = topicId ? await loadTopic(siteId, topicId) : null;
   const row = topicId ? await updateTopic(siteId, topicId, parsed.data) : await createTopic(siteId, parsed.data);
   if (!row) return fail("Topic not found.");
   await assignQuestionsToTopics(siteId).catch(() => undefined);
+  // A domain newly watched becomes an unconfirmed competitor, as 0022 did for the topics then;
+  // one already watched is left alone, so removing its competitor sticks.
+  const added = row.competitor_domains.filter((d) => !before?.competitor_domains.includes(d));
+  const seeded = await seedCompetitorsFromDomains({ id: site.org_id }, added).catch(() => null);
   refresh(siteId);
-  return { ok: true, id: row.id };
+  return { ok: true, id: row.id, note: seeded?.added.length ? `New competitors to confirm on the Competitors tab: ${seeded.added.join(", ")}.` : undefined };
 }
 
 export async function setTopicStatusAction(siteId: string, topicId: string, status: "active" | "paused" | "archived"): Promise<ActionResult> {
@@ -75,6 +95,8 @@ export async function addPromptAction(_prev: ActionResult | null, form: FormData
   const { siteId, topicId, text, tier } = parsed.data;
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const scope = await outOfSite(siteId, { topicId });
+  if (scope) return fail(scope);
   const lines = text.split(/\n/).map((l) => l.trim()).filter((l) => l.length >= 3).slice(0, 50);
   let added = 0;
   for (const line of lines) {
@@ -88,6 +110,8 @@ export async function addPromptAction(_prev: ActionResult | null, form: FormData
 export async function setQuestionFlagAction(siteId: string, questionId: string, flags: { excluded?: boolean; pinned?: boolean; topicId?: string | null }): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const scope = await outOfSite(siteId, { topicId: flags.topicId });
+  if (scope) return fail(scope);
   if (!(await setQuestionFlags(siteId, questionId, flags))) return fail("Question not found.");
   refresh(siteId);
   return { ok: true };
@@ -118,6 +142,8 @@ export async function createContentAction(_prev: ActionResult | null, form: Form
   const { siteId, topicId, questionId, title, format, note, startNow } = parsed.data;
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const scope = await outOfSite(siteId, { topicId, questionId });
+  if (scope) return fail(scope);
   const { id } = await createManualOpportunity(siteId, { title, topicId: topicId || null, questionId: questionId || null, format: (format || null) as never, note: note || null });
   if (startNow) {
     if (!llmConfigured()) return { ok: true, id, error: `Queued, but the pipeline cannot draft yet. ${LLM_NOT_CONFIGURED}` };
@@ -128,10 +154,108 @@ export async function createContentAction(_prev: ActionResult | null, form: Form
   return { ok: true, id };
 }
 
+// ── named competitors and source roles ─────────────────────────────────────
+
+const listOf = (v: string) => v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+
+const competitorForm = z.object({
+  siteId: z.guid(),
+  entityId: z.guid().optional().or(z.literal("")).default(""),
+  name: z.string().trim().min(1, "Give the competitor a name.").max(120),
+  domains: z.string().max(2000).default(""),
+  aliases: z.string().max(2000).default(""),
+});
+
+/**
+ * Name a competitor, or confirm or edit one: the org's competitor entity
+ * with its domains and aliases. An entity id from the form must be this
+ * site's org's (saveCompetitor checks); this site's own role for a domain
+ * it names is cleared, and every citation on the org's sites from the
+ * domains that moved is restated.
+ */
+export async function saveCompetitorAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
+  const parsed = competitorForm.safeParse(Object.fromEntries(form));
+  if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid competitor.");
+  const { siteId, entityId, name, domains, aliases } = parsed.data;
+  const { user, site, error } = await guard(siteId, "edit");
+  if (!site || error) return fail(error ?? "Site not found.");
+  try {
+    const r = await saveCompetitor({ id: site.org_id }, { entityId: entityId || null, name, domains: listOf(domains), aliases: listOf(aliases), siteId: site.id }, user.id);
+    refresh(siteId);
+    const notes = [
+      r.clearedOverrides.length ? `The role you set for ${r.clearedOverrides.join(", ")} on this site is cleared.` : "",
+      r.reclassified ? `${r.reclassified} citation${r.reclassified === 1 ? "" : "s"} restated.` : "",
+    ].filter(Boolean);
+    return { ok: true, id: r.entityId, note: notes.length ? notes.join(" ") : undefined };
+  } catch (e) {
+    if (e instanceof SourceRoleInputError) return fail(e.message);
+    throw e;
+  }
+}
+
+/** "Not a competitor": see removeCompetitor. */
+export async function removeCompetitorAction(siteId: string, entityId: string): Promise<ActionResult> {
+  const { user, site, error } = await guard(siteId, "edit");
+  if (!site || error) return fail(error ?? "Site not found.");
+  try {
+    const r = await removeCompetitor({ id: site.org_id }, entityId, user.id);
+    refresh(siteId);
+    return { ok: true, note: r.reclassified ? `${r.reclassified} citation${r.reclassified === 1 ? "" : "s"} restated.` : undefined };
+  } catch (e) {
+    if (e instanceof SourceRoleInputError) return fail(e.message);
+    throw e;
+  }
+}
+
+const sourceRoleForm = z.object({
+  siteId: z.guid(),
+  domain: z.string().trim().min(3).max(253),
+  // Empty clears the site's override and the catalogue decides again.
+  role: z.enum(OVERRIDE_SOURCE_ROLES).or(z.literal("")),
+});
+
+/** This site's own role for a cited domain (and its subdomains), or back to the catalogue's. */
+export async function setSourceRoleAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
+  const parsed = sourceRoleForm.safeParse(Object.fromEntries(form));
+  if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid role.");
+  const { siteId, domain, role } = parsed.data;
+  const { user, site, error } = await guard(siteId, "edit");
+  if (!site || error) return fail(error ?? "Site not found.");
+  try {
+    const r = await setSourceOverride(site, domain, role || null, user.id);
+    refresh(siteId);
+    return { ok: true, note: r.reclassified ? `${r.reclassified} citation${r.reclassified === 1 ? "" : "s"} restated.` : undefined };
+  } catch (e) {
+    if (e instanceof SourceRoleInputError) return fail(e.message);
+    throw e;
+  }
+}
+
 export async function analyzeCompetitorsAction(siteId: string, topicId?: string | null): Promise<ActionResult> {
   const { site, error } = await guard(siteId, "edit");
   if (!site || error) return fail(error ?? "Site not found.");
+  const scope = await outOfSite(siteId, { topicId });
+  if (scope) return fail(scope);
   const jobError = await queueJob(strategyCompetitorsAnalyzeRequested.create({ siteId, orgId: site.org_id, topicId: topicId ?? null }));
+  if (jobError) return fail(jobError);
+  return { ok: true };
+}
+
+/**
+ * Run the competitor organic gap now (it also runs on the 2nd of each
+ * month). It needs the DataForSEO login, a market the gap can read and a
+ * named competitor with a domain. The month's rankings are cached, so a
+ * second run in the same month re-reads them at no cost and only a
+ * competitor added since is paid for.
+ */
+export async function analyzeCompetitorGapAction(siteId: string): Promise<ActionResult> {
+  const { user, site, error } = await guard(siteId, "edit");
+  if (!site || error) return fail(error ?? "Site not found.");
+  if (!dataForSeoConfigured()) return fail("Keyword rankings come from DataForSEO Labs: set DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD first.");
+  if (!gapMarketSupported(marketOf(site.locale))) return fail(`The keyword gap reads keywords in the Latin alphabet only, and this site's market is ${site.locale}.`);
+  const [named] = await appDb()`select 1 from context.entities where org_id = ${site.org_id} and type = 'competitor' and cardinality(domains) > 0 limit 1`;
+  if (!named) return fail("Name a competitor with its domain first.");
+  const jobError = await queueJob(strategyCompetitorGapRequested.create({ siteId, orgId: site.org_id, requestedBy: user.id }));
   if (jobError) return fail(jobError);
   return { ok: true };
 }

@@ -41,3 +41,17 @@ insert into content.published_pages (site_id, path, html, markdown, etag, head) 
  '<p>Globex.</p>', '# Hello', 'etag-globex-1',
  '{"title":"Hello"}'::jsonb)
 on conflict (site_id, path) do nothing;
+
+-- Taken-down pages (migration 0020), for scripts/verify-proxy.sh: one still
+-- served but noindex, one answering 410. Neither may appear in a listing.
+insert into content.published_pages (site_id, path, html, markdown, etag, head, status, status_changed_at, status_reason) values
+('aaaaaaaa-0000-0000-0000-000000000001', '/resources/noindex-example',
+ '<p>Kept for readers who have the link, out of the index.</p>',
+ 'Kept for readers who have the link, out of the index.', 'etag-noindex-1',
+ '{"title":"Noindex example","description":"A page taken out of the index."}'::jsonb,
+ 'noindex', '2026-09-01T00:00:00Z', 'Superseded by the SSO vs SCIM guide.'),
+('aaaaaaaa-0000-0000-0000-000000000001', '/resources/retired-example',
+ '<p>Retired.</p>', 'Retired.', 'etag-retired-1',
+ '{"title":"Retired example","description":"A page taken down."}'::jsonb,
+ 'retired', '2026-09-01T00:00:00Z', 'Product discontinued.')
+on conflict (site_id, path) do nothing;

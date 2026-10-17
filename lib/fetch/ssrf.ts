@@ -70,17 +70,108 @@ export function isBlockedIpv4(ip: string): boolean {
   });
 }
 
-export function isBlockedIpv6(ip: string): boolean {
-  const h = ip.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "::1" || h === "::") return true;
-  // Unique local (fc00::/7), link local (fe80::/10), multicast (ff00::/8).
-  if (/^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h) || h.startsWith("ff")) {
-    return true;
+/**
+ * An IPv6 literal as its 16 bytes, or null when it is not one. Accepts the
+ * URL form (`[...]`), `::` compression and a trailing dotted quad
+ * (`::ffff:127.0.0.1`). No zone ids: a URL host cannot carry one, and a
+ * resolved address that does is refused by the caller failing closed.
+ */
+export function parseIpv6(input: string): Uint8Array | null {
+  let h = input.trim().toLowerCase();
+  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
+  if (!h.includes(":") || /[^0-9a-f:.]/.test(h)) return null;
+  if (h.includes(".")) {
+    const at = h.lastIndexOf(":");
+    const quad = h.slice(at + 1);
+    const n = /^\d{1,3}(\.\d{1,3}){3}$/.test(quad) ? ipv4ToInt(quad) : -1;
+    if (n < 0) return null;
+    h = `${h.slice(0, at + 1)}${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`;
   }
-  // IPv4-mapped: ::ffff:a.b.c.d — apply the v4 rules.
-  const mapped = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return isBlockedIpv4(mapped[1]!);
-  return false;
+  const halves = h.split("::");
+  if (halves.length > 2) return null;
+  const groupsOf = (s: string) => (s === "" ? [] : s.split(":"));
+  const head = groupsOf(halves[0]!);
+  const tail = halves.length === 2 ? groupsOf(halves[1]!) : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  const groups = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i++) {
+    const g = groups[i]!;
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    const v = parseInt(g, 16);
+    bytes[i * 2] = v >> 8;
+    bytes[i * 2 + 1] = v & 0xff;
+  }
+  return bytes;
+}
+
+interface Cidr6 {
+  prefix: Uint8Array;
+  bits: number;
+  /** Byte offset of an IPv4 address embedded in this range; it gets the v4 rules instead of a block. */
+  v4At?: number;
+}
+
+function cidr6(prefix: string, bits: number, v4At?: number): Cidr6 {
+  return { prefix: parseIpv6(prefix)!, bits, v4At };
+}
+
+function inCidr6(addr: Uint8Array, { prefix, bits }: Cidr6): boolean {
+  for (let i = 0; i < 16 && bits > i * 8; i++) {
+    const take = Math.min(8, bits - i * 8);
+    const mask = (0xff << (8 - take)) & 0xff;
+    if ((addr[i]! & mask) !== (prefix[i]! & mask)) return false;
+  }
+  return true;
+}
+
+/**
+ * Ranges that carry an IPv4 address inside an IPv6 one. A request to any of
+ * them reaches that IPv4 address (dual-stack socket, NAT64 gateway, 6to4
+ * relay), so the address is judged by the v4 rules, not waved through as
+ * "some IPv6 host". `::ffff:7f00:1` — which is what the URL parser makes of
+ * `[::ffff:127.0.0.1]` — is the canonical bypass this closes.
+ */
+const EMBEDDED_V4: Cidr6[] = [
+  cidr6("::ffff:0:0", 96, 12), // IPv4-mapped
+  cidr6("::ffff:0:0:0", 96, 12), // IPv4-translated (SIIT)
+  cidr6("64:ff9b::", 96, 12), // NAT64 well-known prefix
+  cidr6("2002::", 16, 2), // 6to4
+  cidr6("::", 96, 12), // IPv4-compatible (deprecated); also :: and ::1 via 0.0.0.0/8 and 127/8
+];
+
+/**
+ * Special-purpose space that is never a public web server. The ranges outside
+ * 2000::/3 are also caught by the global-unicast rule below; they are listed
+ * so the intent survives a change to that rule.
+ */
+const BLOCKED_V6: Cidr6[] = [
+  cidr6("64:ff9b:1::", 48), // local-use NAT64
+  cidr6("100::", 64), // discard-only
+  cidr6("2001::", 23), // IETF protocol assignments: Teredo (2001::/32), benchmarking, ORCHID
+  cidr6("2001:db8::", 32), // documentation
+  cidr6("3fff::", 20), // documentation
+  cidr6("5f00::", 16), // SRv6 SIDs
+  cidr6("fc00::", 7), // unique local
+  cidr6("fe80::", 10), // link local
+  cidr6("fec0::", 10), // site local (deprecated)
+  cidr6("ff00::", 8), // multicast
+];
+
+/** Global unicast. Anything outside it is reserved or special-purpose. */
+const GLOBAL_UNICAST = cidr6("2000::", 3);
+
+/** Fails closed: an address we cannot parse is blocked, never assumed public. */
+export function isBlockedIpv6(ip: string): boolean {
+  const addr = parseIpv6(ip);
+  if (!addr) return true;
+  for (const range of EMBEDDED_V4) {
+    if (!inCidr6(addr, range)) continue;
+    const at = range.v4At!;
+    return isBlockedIpv4(`${addr[at]}.${addr[at + 1]}.${addr[at + 2]}.${addr[at + 3]}`);
+  }
+  return BLOCKED_V6.some((range) => inCidr6(addr, range)) || !inCidr6(addr, GLOBAL_UNICAST);
 }
 
 export function isBlockedHostname(hostname: string): boolean {
@@ -88,7 +179,7 @@ export function isBlockedHostname(hostname: string): boolean {
   if (BLOCKED_HOSTNAMES.has(h)) return true;
   if (h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".localhost")) return true;
   if (!h.includes(".") && !h.includes(":")) return true; // bare intranet names
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return isBlockedIpv4(h);
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return ipv4ToInt(h) < 0 || isBlockedIpv4(h);
   if (h.includes(":")) return isBlockedIpv6(h);
   return false;
 }

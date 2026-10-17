@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { candidateExclusion, demandFromImpressions, REFRESH_MIN_AGE_DAYS, REFRESH_THRESHOLD, REFRESH_WEIGHTS, scoreRefresh, type RefreshSignals } from "@/lib/refresh/score";
+import { EV0_VERSION, GAP_PRIORS, type EV0Breakdown } from "@/lib/pipeline/opportunities";
+import { candidateExclusion, demandFromImpressions, isProtectedWinner, median, REFRESH_MIN_AGE_DAYS, REFRESH_THRESHOLD, REFRESH_WEIGHTS, refreshGapType, scoreRefresh, type RefreshSignals } from "@/lib/refresh/score";
 import { ageDays, refreshDedupeKey, refreshOpportunityFor, scoreInventory, signalsFor, type InventorySignalRow } from "@/lib/refresh/scan";
 
 const NOW = new Date("2026-09-15T12:00:00Z");
@@ -90,6 +91,43 @@ describe("candidateExclusion", () => {
   });
 });
 
+describe("protected winners", () => {
+  const winner = signals({ gsc: { clicks: 60, clicksPrev: 55, impressions: 2000, impressionsPrev: 1900 }, citations: { native: 3, nativePrev: 3 } });
+
+  it("protects a page cited natively and holding, with clicks at or above the median and no decline", () => {
+    expect(isProtectedWinner(winner, 60)).toBe(true);
+    expect(isProtectedWinner(winner, 40)).toBe(true);
+  });
+
+  it("does not protect a page that lost citations, sits below the median, is declining, or that only Profound cites", () => {
+    expect(isProtectedWinner({ ...winner, citations: { ...winner.citations, native: 2 } }, 40)).toBe(false);
+    expect(isProtectedWinner(winner, 61)).toBe(false);
+    expect(isProtectedWinner({ ...winner, gsc: { ...winner.gsc, clicks: 30, clicksPrev: 60 } }, 10)).toBe(false);
+    expect(isProtectedWinner({ ...winner, gsc: { ...winner.gsc, impressions: 1000, impressionsPrev: 2000 } }, 40)).toBe(false);
+    expect(isProtectedWinner({ ...winner, citations: { ...winner.citations, native: 0, nativePrev: 0, profound: 5, profoundPrev: 4 } }, 40)).toBe(false);
+    // No Search Console: a winner cannot be told from a page nobody visits.
+    expect(isProtectedWinner({ ...winner, gsc: { ...winner.gsc, available: false } }, 0)).toBe(false);
+  });
+
+  it("names the gap a refresh closes: citations lost, then a decline, then staleness", () => {
+    expect(refreshGapType(signals({ citations: { native: 0, nativePrev: 2 } }))).toBe("refresh_lost_citation");
+    // Profound's losses count too; a tracker with nothing to say does not.
+    expect(refreshGapType(signals({ citations: { nativeAvailable: false, profoundAvailable: true, profound: 1, profoundPrev: 3 } }))).toBe("refresh_lost_citation");
+    expect(refreshGapType(signals({ citations: { nativeAvailable: false, native: 0, nativePrev: 2 } }))).toBe("refresh_stale");
+    expect(refreshGapType(signals({ gsc: { clicks: 30, clicksPrev: 60 } }))).toBe("refresh_decline");
+    expect(refreshGapType(signals({ gsc: { impressions: 700, impressionsPrev: 1000 } }))).toBe("refresh_decline");
+    // A drop on a base too small to read is not a decline.
+    expect(refreshGapType(signals({ gsc: { clicks: 2, clicksPrev: 8, impressions: 50, impressionsPrev: 90 } }))).toBe("refresh_stale");
+    expect(refreshGapType(signals())).toBe("refresh_stale");
+  });
+
+  it("median handles odd, even and empty lists", () => {
+    expect(median([5, 1, 3])).toBe(3);
+    expect(median([4, 1, 3, 2])).toBe(2.5);
+    expect(median([])).toBe(0);
+  });
+});
+
 function row(over: Partial<InventorySignalRow> = {}): InventorySignalRow {
   return {
     id: "11111111-1111-4111-8111-111111111111",
@@ -148,6 +186,50 @@ describe("scoreInventory", () => {
     expect(candidates.map((c) => c.row.id)).not.toContain("fresh");
     expect(candidates.map((c) => c.row.id)).not.toContain("cited-holding");
     for (let i = 1; i < candidates.length; i++) expect(candidates[i - 1]!.scored.score).toBeGreaterThanOrEqual(candidates[i]!.scored.score);
+  });
+
+  it("queues a stale winner for its figures and dates only, judged against the inventory's median clicks", () => {
+    const rows = [
+      // Old and thin enough to score as a candidate, but cited and holding with traffic.
+      row({ id: "winner", word_count: 300, clicks: 90, clicks_prev: 85, impressions: 3000, impressions_prev: 3000, cited_native: 2, cited_native_prev: 2 }),
+      row({ id: "loser", clicks: 10, clicks_prev: 40 }),
+      row({ id: "quiet", clicks: 5, clicks_prev: 5, impressions: 200, impressions_prev: 200 }),
+    ];
+    const { items, candidates, medianClicks } = scoreInventory(rows, avail, NOW);
+    expect(medianClicks).toBe(10);
+    const winner = items.find((i) => i.row.id === "winner")!;
+    expect(winner).toMatchObject({ exclusion: null, protectedWinner: true });
+    expect(candidates.map((c) => c.row.id)).toEqual(expect.arrayContaining(["winner", "loser"]));
+    // Never a rewrite: a statistics update, at half a refresh's effort.
+    const stats = refreshOpportunityFor(winner);
+    expect(stats.actionType).toBe("update_stats");
+    expect(stats.evidence).toMatchObject({ protectedWinner: true });
+    expect(stats.evidence.reasons).toContain("Cited and holding with traffic: update figures and dates only");
+    expect((stats.scoreBreakdown as unknown as EV0Breakdown).components.effort).toEqual({ action: "update_stats", value: 0.5 });
+    expect(refreshOpportunityFor(candidates.find((c) => c.row.id === "loser")!).actionType).toBe("refresh");
+    // A person who asks for a refresh of a winner gets one.
+    expect(refreshOpportunityFor(winner, { manual: true })).toMatchObject({ actionType: "refresh" });
+    expect((refreshOpportunityFor(winner, { manual: true }).scoreBreakdown as unknown as EV0Breakdown).components.gap).toEqual({ type: "manual", prior: 1 });
+  });
+
+  it("scores a refresh on expected value: the page's own impressions, the gap it closes, its title's topic", () => {
+    const { candidates } = scoreInventory([row({ clicks: 40, clicks_prev: 80, impressions: 3000, impressions_prev: 3200, cited_native: 0, cited_native_prev: 2 })], avail, NOW);
+    const topics = new Map([["t-scim", { id: "t-scim", priority: 5, formats: [], status: "active" as const, name: "SCIM", seed_terms: ["scim"] }]]);
+    const opp = refreshOpportunityFor(candidates[0]!, { topics });
+    const b = opp.scoreBreakdown as unknown as EV0Breakdown;
+    expect(b).toMatchObject({ formula: "ev0", version: EV0_VERSION, predictedLift: null });
+    expect(b.components.demand).toMatchObject({ source: "gsc_page_impressions", coldStart: false, input: 3000 });
+    expect(b.components.gap).toEqual({ type: "refresh_lost_citation", prior: GAP_PRIORS.refresh_lost_citation });
+    expect(b.components.businessValue).toEqual({ value: 1, source: "topic", priority: 5 });
+    expect(b.components.brandFit.value).toBe(1);
+    expect(b.components.intent.value).toBe("comparison");
+    expect(opp.score).toBe(b.ev);
+    // Search Console connected and nobody sees the page: no demand, not a cold start.
+    const unseen = refreshOpportunityFor(scoreInventory([row({ clicks: 0, clicks_prev: 0, impressions: 0, impressions_prev: 0 })], avail, NOW).items[0]!);
+    expect((unseen.scoreBreakdown as unknown as EV0Breakdown).components.demand).toMatchObject({ value: 0, coldStart: false });
+    // Without Search Console the demand is unknown: neutral, flagged as a cold start.
+    const blind = refreshOpportunityFor(scoreInventory([row()], { ...avail, gsc: false }, NOW).items[0]!);
+    expect((blind.scoreBreakdown as unknown as EV0Breakdown).components.demand).toMatchObject({ value: 50, source: "default", coldStart: true });
   });
 
   it("builds a refresh opportunity whose dedupe key changes when the post changes", () => {

@@ -5,6 +5,7 @@ import type { ConnectorContext } from "@/lib/connectors/types";
 import { webflowClientFor, type FieldMap } from "@/lib/connectors/webflow";
 import { appDb } from "@/lib/db/app";
 import { slugify } from "@/lib/pipeline/draft";
+import { ANY_MARKER_RE, splitFaqSection } from "@/lib/pipeline/markdown";
 import { createContentItem, reserveSlug } from "@/lib/pipeline/versions";
 import { webflowBodyHtml } from "@/lib/publishing/targets";
 
@@ -55,12 +56,18 @@ export async function loadCmsItemForContent(contentItemId: string, sql: postgres
   return row ?? null;
 }
 
-/** What the brief and the draft see of the existing post. Markdown so the model reads structure, not tags. */
+/**
+ * What the brief and the draft see of the existing post. Markdown so the
+ * model reads structure, not tags. The FAQ is cut out of the body into `faq`,
+ * the shape a draft returns it in, so a refresh that keeps the body cannot
+ * carry the old FAQ section and answer the FAQ again.
+ */
 export interface ExistingContent {
   title: string;
   url: string | null;
   description: string | null;
   bodyMd: string;
+  faq: { question: string; answer: string }[];
   wordCount: number;
   lastUpdated: string | null;
   reasons: string[];
@@ -69,11 +76,13 @@ export interface ExistingContent {
 export const EXISTING_BODY_MAX_CHARS = 16_000;
 
 export function existingContentFromCms(item: CmsItemRow): ExistingContent {
+  const { bodyMd, faq } = splitFaqSection(htmlToMarkdown(item.body_html ?? ""));
   return {
     title: item.title ?? item.slug ?? "Untitled",
     url: item.url,
     description: item.summary,
-    bodyMd: htmlToMarkdown(item.body_html ?? "", EXISTING_BODY_MAX_CHARS),
+    bodyMd: bodyMd.slice(0, EXISTING_BODY_MAX_CHARS),
+    faq,
     wordCount: item.word_count,
     lastUpdated: item.last_updated ? new Date(item.last_updated).toISOString().slice(0, 10) : null,
     reasons: item.refresh_reasons ?? [],
@@ -93,17 +102,21 @@ export async function loadExistingContent(
   const cms = cmsItemId ? await loadCmsItem(cmsItemId, sql) : opp.content_item_id ? await loadCmsItemForContent(opp.content_item_id, sql) : null;
   if (cms) return existingContentFromCms(cms);
   if (!opp.content_item_id) return null;
-  const [v] = await sql<{ title: string; description: string | null; body_md: string; word_count: number; canonical_url: string | null; published_at: Date | null }[]>`
-    select v.title, v.description, v.body_md, v.word_count, ci.canonical_url, ci.published_at
+  const [v] = await sql<{ title: string; description: string | null; body_md: string; frontmatter: { faq?: { question: string; answer: string }[] } | null; word_count: number; canonical_url: string | null; published_at: Date | null }[]>`
+    select v.title, v.description, v.body_md, v.frontmatter, v.word_count, ci.canonical_url, ci.published_at
     from content.content_items ci join content.content_versions v on v.id = ci.current_version_id
     where ci.id = ${opp.content_item_id}`;
   if (!v) return null;
   const reasons = Array.isArray(opp.evidence.reasons) ? (opp.evidence.reasons as unknown[]).filter((r): r is string => typeof r === "string") : [];
+  // The stored body ends in the FAQ section composeVersion appended; the stored entries are its source.
+  const { bodyMd, faq } = splitFaqSection(v.body_md.replace(ANY_MARKER_RE, ""));
+  const stored = v.frontmatter?.faq ?? [];
   return {
     title: v.title,
     url: v.canonical_url,
     description: v.description,
-    bodyMd: v.body_md.replace(/\{\{\s*(?:src|fact):[a-z0-9][a-z0-9-]{1,63}\s*\}\}/g, "").slice(0, EXISTING_BODY_MAX_CHARS),
+    bodyMd: bodyMd.slice(0, EXISTING_BODY_MAX_CHARS),
+    faq: stored.length ? stored : faq,
     wordCount: v.word_count,
     lastUpdated: v.published_at ? new Date(v.published_at).toISOString().slice(0, 10) : null,
     reasons,
@@ -174,7 +187,8 @@ export async function publishRefreshToCms(input: { contentItemId: string; versio
     await tx`
       update content.content_items set
         status = 'published', title = ${version.title}, current_version_id = ${input.versionId},
-        canonical_url = ${item.url}, published_at = ${now}, first_published_at = coalesce(first_published_at, ${now}), updated_at = ${now}
+        canonical_url = ${item.url}, published_at = ${now}, first_published_at = coalesce(first_published_at, ${now}),
+        pipeline_published_at = ${now}, updated_at = ${now}
       where id = ${input.contentItemId}`;
     await tx`
       update content.cms_items set

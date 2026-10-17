@@ -48,6 +48,31 @@ export function resetBotRangesCache(): void {
   rangesCache = null;
 }
 
+const WORKER_VERSION_WRITE_MS = 60_000;
+const workerVersionSeen = new Map<string, { version: string; at: number }>();
+
+/**
+ * Record the Worker version a site's telemetry reports, for the Install tab's
+ * upgrade notice. Written at most once a minute per site: this instance's
+ * memo skips the query, and the where clause skips the write when another
+ * instance has just made it. A changed version is written at once.
+ */
+export async function noteWorkerVersion(siteId: string, version: string, sql: postgres.Sql = appDb(), now = Date.now()): Promise<boolean> {
+  const last = workerVersionSeen.get(siteId);
+  if (last && last.version === version && now - last.at < WORKER_VERSION_WRITE_MS) return false;
+  workerVersionSeen.set(siteId, { version, at: now });
+  const rows = await sql`
+    update app.sites set worker_version = ${version}, worker_seen_at = now()
+    where id = ${siteId}
+      and (worker_version is distinct from ${version} or worker_seen_at is null or worker_seen_at < now() - interval '1 minute')
+    returning id`;
+  return rows.length > 0;
+}
+
+export function resetWorkerVersionMemo(): void {
+  workerVersionSeen.clear();
+}
+
 /** Hash salt for source addresses. Falls back to the proxy secret so a fresh deployment still hashes consistently. */
 export function ipHashSalt(env: NodeJS.ProcessEnv = process.env): string {
   return env.AEO_IP_HASH_SALT || env.AEO_PROXY_HMAC_SECRET || "aeo";

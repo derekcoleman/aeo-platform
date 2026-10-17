@@ -34,6 +34,8 @@ export type CrawlEventInput = z.infer<typeof crawlEventSchema>;
 
 export const crawlIngestSchema = z.object({
   siteId: z.guid(),
+  /** Sent by a Cloudflare Worker from version 2 on; absent from v1 and from our own origin reports. */
+  workerVersion: z.string().regex(/^[0-9A-Za-z._-]{1,16}$/).optional(),
   events: z.array(crawlEventSchema).min(1).max(500),
 });
 
@@ -130,20 +132,29 @@ export async function insertSiteAlert(siteId: string, alert: { kind: string; pat
   await sql`insert into ops.site_alerts (site_id, kind, path, detail) values (${siteId}, ${alert.kind.slice(0, 64)}, ${alert.path ?? null}, ${sql.json(detail as never)})`;
 }
 
-/** Re-aggregates the last `days` days; idempotent, so the hourly job can overlap itself. */
+/**
+ * Re-aggregates today and the `days` whole UTC days before it; idempotent, so
+ * the hourly job can overlap itself. The window starts at a UTC midnight: a
+ * window of "the last 48 hours" saw only the tail of its first day and
+ * overwrote that day's full count with the partial one every hour. A day's
+ * count also never goes down, so raw events purged after the rollup (or a
+ * late, smaller recount) cannot shrink a day that was already complete.
+ */
 export async function rollupCrawlDaily(days = 2, sql: postgres.Sql = appDb()): Promise<number> {
   const rows = await sql<{ n: number }[]>`
     with agg as (
       select org_id, site_id, (ts at time zone 'UTC')::date as day, bot_family, purpose, source, path,
              count(*)::int as hits, count(*) filter (where verified)::int as verified_hits
       from analytics.crawl_events
-      where ts >= now() - make_interval(days => ${days})
+      where ts >= (date_trunc('day', now() at time zone 'UTC') - make_interval(days => ${days})) at time zone 'UTC'
       group by org_id, site_id, (ts at time zone 'UTC')::date, bot_family, purpose, source, path
     ), up as (
       insert into analytics.crawl_daily (org_id, site_id, day, bot_family, purpose, source, path, hits, verified_hits)
       select org_id, site_id, day, bot_family, purpose, source, path, hits, verified_hits from agg
       on conflict (site_id, day, bot_family, source, path) do update
-        set hits = excluded.hits, verified_hits = excluded.verified_hits, purpose = excluded.purpose, updated_at = now()
+        set hits = greatest(analytics.crawl_daily.hits, excluded.hits),
+            verified_hits = greatest(analytics.crawl_daily.verified_hits, excluded.verified_hits),
+            purpose = excluded.purpose, updated_at = now()
       returning 1
     )
     select count(*)::int as n from up`;

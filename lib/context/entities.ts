@@ -44,6 +44,8 @@ export interface EntityMention {
   entity: EntityRow;
   alias: string;
   count: number;
+  /** Offset in `text` of the entity's earliest counted mention, by any of its aliases. */
+  firstIndex: number;
 }
 
 /**
@@ -60,17 +62,21 @@ export function findEntityMentions(index: AliasIndex, text: string): EntityMenti
   for (const [alias, entity] of aliases) {
     const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(alias).replace(/ /g, "\\s+")}(?![\\p{L}\\p{N}])`, "giu");
     let count = 0;
+    let first = Number.POSITIVE_INFINITY;
     for (const m of text.matchAll(re)) {
       const start = m.index;
       const end = start + m[0].length;
       if (taken.some(([s, e]) => start < e && end > s)) continue;
       taken.push([start, end]);
       count++;
+      first = Math.min(first, start);
     }
     if (count === 0) continue;
     const cur = out.get(entity.id);
-    if (cur) cur.count += count;
-    else out.set(entity.id, { entity, alias, count });
+    if (cur) {
+      cur.count += count;
+      cur.firstIndex = Math.min(cur.firstIndex, first);
+    } else out.set(entity.id, { entity, alias, count, firstIndex: first });
   }
   return [...out.values()].sort((a, b) => b.count - a.count);
 }
@@ -92,7 +98,13 @@ export interface EntityInput {
   description?: string | null;
 }
 
-/** Insert by (org, lower(name)); on conflict merge aliases and fill blanks, never demote a type someone set. */
+/**
+ * Insert by (org, lower(name)); on conflict merge aliases and fill blanks,
+ * never demote a type someone set, and never make an entity someone removed
+ * as a competitor (removeCompetitor) one again: a re-crawl's profile or an
+ * extracted fact still naming it is not a person changing their mind, and
+ * the Strategy page is where they do.
+ */
 export async function upsertEntity(orgId: string, input: EntityInput, sql: postgres.Sql = appDb()): Promise<EntityRow> {
   const name = input.name.trim();
   const aliases = [...new Set((input.aliases ?? []).map((a) => a.trim()).filter((a) => a && normalizeAlias(a) !== normalizeAlias(name)))];
@@ -101,7 +113,9 @@ export async function upsertEntity(orgId: string, input: EntityInput, sql: postg
     values (${orgId}, ${input.type}, ${name}, ${sql.array(aliases)}, ${input.wikidataId ?? null}, ${input.description ?? null})
     on conflict (org_id, lower(name)) do update
       set aliases = (select array_agg(distinct a) from unnest(context.entities.aliases || excluded.aliases) as a),
-          type = case when context.entities.type = 'other' then excluded.type else context.entities.type end,
+          type = case when context.entities.type = 'other'
+                       and not (excluded.type = 'competitor' and context.entities.metadata ? 'removed_as_competitor_at')
+                      then excluded.type else context.entities.type end,
           wikidata_id = coalesce(context.entities.wikidata_id, excluded.wikidata_id),
           description = coalesce(context.entities.description, excluded.description),
           updated_at = now()

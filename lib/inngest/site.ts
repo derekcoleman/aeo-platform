@@ -48,7 +48,10 @@ export const siteHealthCheckFunction = inngest.createFunction(
     const outcome = await step.run("check", async () => {
       const sql = appDb();
       const articlePath = await latestPublishedPath(siteId, sql);
-      const result = await runHealthCheck(toHealthSite(site), { articlePath, expectIndexable: site.status === "active" });
+      // A site whose indexing is paused serves noindex on purpose; that is not a broken install, but
+      // the forwarded host must still verify, or the breakage would surface only once the pause lifts.
+      const active = site.status === "active";
+      const result = await runHealthCheck(toHealthSite(site), { articlePath, expectIndexable: active, expectArticleIndexable: active && !site.indexing_paused });
       const transition = await recordHealthCheck(site, kind, result, sql);
       return { result, transition };
     });

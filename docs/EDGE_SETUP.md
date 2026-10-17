@@ -48,16 +48,66 @@ per-site cache and telemetry.
 From the site's Install tab, per mode:
 
 - **Cloudflare Worker (Mode A):** `aeo-proxy.worker.js` with the site id,
-  edge hostname, the site's HMAC secret and our telemetry endpoint filled in.
-  The Worker signs every proxied request (`x-aeo-sig` over host + path +
-  minute) and every telemetry post (over the JSON body). We verify both.
+  edge hostname, canonical domain, the site's HMAC secret and our telemetry
+  endpoint filled in. The Worker signs every proxied request (`x-aeo-sig`
+  over host + path + minute) and every telemetry post (over the JSON body).
+  We verify both. Only owners and admins see the secret in the Install tab;
+  other roles get a placeholder in its place.
 - **Vercel rewrite / nginx / Netlify (Modes B and C):** a rewrite block. No
   signature and no edge telemetry; crawl coverage is reported as *partial*.
 - **Subdomain (Mode D):** a CNAME. Strictly worse for AEO; tracked as a cohort.
 
+## Worker versions and upgrading
+
+The Install tab always generates the current Worker
+(`CURRENT_WORKER_VERSION` in `lib/proxy/install.ts`, now `"2"`). Version 2
+differs from version 1 in four ways:
+
+- It deletes every `x-aeo-*` header a visitor sent before adding its own hop
+  count, signature and version, so nobody can speak for the Worker or for our
+  origin.
+- It caches at the customer's edge for one hostname only (`CONFIG.cacheHost`,
+  generated as the canonical domain). Cloudflare keys that cache on the URL
+  the Worker fetches from us, which every host routed to the Worker shares,
+  so caching on a second host could serve that host's page, canonical link
+  included, on the first.
+- It never caches a redirect (3xx) or an error (5xx). Version 1 cached a 3xx
+  for 60 seconds on every host, overriding our cache headers.
+- It reports its version: as the `x-aeo-worker-version` header on every
+  request to our origin, and as `workerVersion` in every crawl report.
+
+**How we know which version runs.** The crawl ingest route stamps
+`app.sites.worker_version` and `worker_seen_at` from authenticated reports,
+at most once a minute per site. A version 1 Worker reports nothing.
+
+**The upgrade notice.** A project in Mode A that is installed and whose
+Worker has reported no version, or an older one, gets a notice in the Install
+tab asking for a redeploy (`workerUpgradeNotice`). The notice clears with the
+first crawl report from a version 2 Worker.
+
+**To upgrade a customer's Worker:**
+
+1. Open the project's Install tab and copy the generated Worker. You need to
+   be an owner or admin to get it with the signing secret filled in.
+2. In the customer's Cloudflare dashboard, open the existing Worker, replace
+   its script with the new one, and deploy. The route
+   (`acme.com/resources/*`) stays as it is.
+3. If the Worker is routed on a host other than the canonical domain (for
+   example `www.acme.com`), set `cacheHost` in `CONFIG` to that host. Never
+   list two hosts.
+4. Verify:
+   - `curl -sI https://acme.com/resources/<slug> -H 'X-AEO-Internal-Redirect: https://evil.example/'`
+     returns 200 with no `Location` header.
+   - The Install tab notice disappears after the next AI crawler hit.
+
+Until a customer redeploys, our origin still strips forged internal headers,
+so the redirect forgery is closed for version 1 too. Only version 2 stops
+that customer's edge from caching our redirects for a minute.
+
 ## Telemetry endpoints
 
 - `POST /api/ingest/crawl` — batched crawler hits from the Worker. Body-signed.
+  Each batch carries the Worker's version.
 - `POST /api/ingest/alert` — Worker-observed failures (site mismatch, loop,
   origin error, mirror served). Body-signed.
 
