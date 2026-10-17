@@ -13,6 +13,7 @@ import { activateManifest, draftManifestFromFacts, insertManifest, manifestDocSc
 import { entityTypeSchema } from "@/lib/context/types";
 import { appDb } from "@/lib/db/app";
 import { contextFactsExtractRequested, contextIngestRequested, contextSignalsScanRequested } from "@/lib/inngest";
+import { BudgetExceededError } from "@/lib/ops/spend";
 import { modelFor } from "@/lib/pipeline/model";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";
@@ -118,7 +119,13 @@ export async function draftManifestAction(siteId: string): Promise<ActionResult>
   if (!llmConfigured()) return fail(LLM_NOT_CONFIGURED);
   const entities = await listEntities(site.org_id, appDb(), ["brand"]);
   const brand = entities[0]?.name ?? site.name;
-  const row = await draftManifestFromFacts(modelFor("context.manifest.draft"), { orgId: site.org_id, siteId, brand: { name: brand, domain: site.canonical_domain } });
+  let row: Awaited<ReturnType<typeof draftManifestFromFacts>>;
+  try {
+    row = await draftManifestFromFacts(modelFor("context.manifest.draft"), { orgId: site.org_id, siteId, brand: { name: brand, domain: site.canonical_domain } });
+  } catch (e) {
+    if (e instanceof BudgetExceededError) return fail(`The organisation's model budget is spent for the month, so no draft was written. Ask platform staff to raise it. (${e.message})`);
+    throw e;
+  }
   if (!row) return fail("Fewer than three verified facts. Verify some facts first; a manifesto invented from nothing is worse than none.");
   refresh(siteId);
   return { ok: true, id: row.id };

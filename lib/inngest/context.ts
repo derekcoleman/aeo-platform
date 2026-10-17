@@ -8,6 +8,7 @@ import { redact } from "@/lib/context/redact";
 import { scanSignals } from "@/lib/context/signals";
 import { listUnchunkedDocuments, listUnextractedDocuments, markFactsExtracted, redactDocument, replaceChunks, type EmbeddedChunk } from "@/lib/context/store";
 import { appDb } from "@/lib/db/app";
+import { BudgetExceededError } from "@/lib/ops/spend";
 import { modelFor } from "@/lib/pipeline/model";
 import { concurrencyCap, connectorSyncCompleted, contextFactsExtractCompleted, contextFactsExtractRequested, contextIngestCompleted, contextIngestRequested, contextSignalsScanRequested, inngest } from "./client";
 
@@ -106,33 +107,37 @@ export const contextExtractFactsFunction = inngest.createFunction(
     let documents = 0;
     let candidates = 0;
     let remaining = 0;
+    let budget: string | null = null;
     const batches = Math.ceil(maxDocuments / EXTRACT_BATCH);
     for (let batch = 1; batch <= batches; batch++) {
       const r = await step.run(`extract:${batch}`, async () => {
         const sql = appDb();
         const docs = await listUnextractedDocuments(orgId, EXTRACT_BATCH, siteId, sql);
-        if (docs.length === 0) return { n: 0, c: 0, more: false };
+        if (docs.length === 0) return { n: 0, c: 0, more: false, budget: null };
         let c = 0;
         try {
           const { facts, run } = await extractFacts(modelFor("context.facts.extract"), docs, { name: brand.entity.name, domain: brand.domain }, { orgId, siteId }, sql);
           const summary = await upsertCandidateFacts(orgId, siteId, facts, docs, { model: run.model, promptVersion: run.promptVersion }, sql, brand.entity);
           c = summary.inserted + summary.merged;
         } catch (err) {
+          // The org's model budget is spent for the month: stop, and leave these documents for a later run.
+          if (err instanceof BudgetExceededError) return { n: 0, c: 0, more: false, budget: err.message };
           // Malformed model output, or a refusal, is not worth retrying on the same documents; mark them and move on.
           if (!(err instanceof ScoredJsonError) && !(err instanceof ModelRefusalError)) throw err;
           console.warn(`[context] fact extraction returned unusable output for org ${orgId} (${FACT_EXTRACTION_PROMPT_VERSION}): ${err.message}`);
         }
         await markFactsExtracted(docs, sql);
-        return { n: docs.length, c, more: docs.length === EXTRACT_BATCH };
+        return { n: docs.length, c, more: docs.length === EXTRACT_BATCH, budget: null };
       });
       documents += r.n;
       candidates += r.c;
+      budget = r.budget;
       if (!r.more) break;
       if (batch === batches) remaining = 1;
     }
     if (remaining) await step.sendEvent("continue", contextFactsExtractRequested.create({ orgId, siteId, maxDocuments }));
     await step.sendEvent("completed", contextFactsExtractCompleted.create({ orgId, documents, candidates, remaining }));
-    return { orgId, documents, candidates, remaining };
+    return { orgId, documents, candidates, remaining, ...(budget ? { stopped: budget } : {}) };
   },
 );
 

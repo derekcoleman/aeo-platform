@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Route } from "next";
 import { ActionButton } from "@/components/app/action-button";
+import { BudgetCapForm } from "@/components/app/budget-forms";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { HealthBadge, SiteStatusBadge, when } from "@/components/app/status";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +13,7 @@ import { OPS_SECTIONS, opsHref, resolveTab, settingsHref } from "@/lib/app/nav";
 import { remediateFaqAction, restateMetricsAction, runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
 import { setAutonomyControlAction } from "@/lib/app/takedown-actions";
 import { controlFor, listAutonomyControls, type AutonomyControl, type ControlTarget } from "@/lib/ops/controls";
+import { budgetCapMaxUsd, listBudgets, RESOURCE_LABEL, type BudgetRow } from "@/lib/ops/spend";
 import { opsFailedSyncs, opsLlmSpend, opsLlmSpendForSite, opsOrganizations, opsSites, type SiteSpendRow } from "@/lib/app/queries";
 import { METHODOLOGY_VERSION } from "@/lib/app/methodology";
 import { auditLog } from "@/lib/app/org";
@@ -34,7 +36,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const scope = site ? { siteId: site.id, orgId: site.org_id } : {};
   const sections = OPS_SECTIONS;
   const tab = resolveTab(sections, requestedTab, "sites");
-  const [orgs, sites, failed, spend, siteSpend, audit, controls] = await Promise.all([
+  const [orgs, sites, failed, spend, siteSpend, audit, controls, budgets] = await Promise.all([
     opsOrganizations(scope),
     opsSites(scope),
     opsFailedSyncs(7, scope),
@@ -42,6 +44,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
     site ? opsLlmSpendForSite(site.id) : Promise.resolve([] as SiteSpendRow[]),
     auditLog(site?.org_id ?? null, 200, undefined, site?.id ?? null),
     listAutonomyControls(),
+    listBudgets({ orgId: site?.org_id ?? null }),
   ]);
   const platform = controlFor(controls, { scope: "global", id: null });
   const failingSites = sites.filter((s) => s.last_health_ok === false).length;
@@ -64,7 +67,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           <TabsTrigger value="sites">{site ? "Site" : "Sites"}</TabsTrigger>
           <TabsTrigger value="orgs">{site ? "Organisation" : "Organisations"}</TabsTrigger>
           <TabsTrigger value="health">Connector health</TabsTrigger>
-          <TabsTrigger value="spend">LLM spend</TabsTrigger>
+          <TabsTrigger value="spend">Spend</TabsTrigger>
           <TabsTrigger value="audit">Audit log</TabsTrigger>
         </TabsList>
 
@@ -152,7 +155,18 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           </Card>
         </TabsContent>
 
-        <TabsContent value="spend" className="pt-4">
+        <TabsContent value="spend" className="space-y-4 pt-4">
+          <Card>
+            <CardHeader><CardTitle>{site ? "Budgets of this project's organisation" : "Budgets"}</CardTitle><CardDescription>What the spend governor enforces (ops.budgets). Every model call, SERP call and answer probe holds its estimated cost on each budget covering it before it runs; none starts once spent reaches the cap. An organisation&apos;s monthly budgets appear the first time it spends. The org-wide SERP cap is the organisation&apos;s own setting, so editing it here edits that. Periods are UTC.</CardDescription></CardHeader>
+            <CardContent>
+              {budgets.length === 0 ? <p className="text-muted-foreground text-sm">No budgets yet: nothing has been spent through the governor.</p> : (
+                <Table>
+                  <TableHeader><TableRow><TableHead>Org</TableHead><TableHead>Scope</TableHead><TableHead>Resource</TableHead><TableHead>Period</TableHead><TableHead>Cap</TableHead><TableHead>Spent</TableHead><TableHead>Held</TableHead><TableHead>Used</TableHead></TableRow></TableHeader>
+                  <TableBody>{budgets.map((b) => <BudgetTableRow key={b.id} budget={b} />)}</TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader><CardTitle>{site ? "Model spend by pipeline task, last 30 days" : "Model spend by organisation, last 30 days"}</CardTitle><CardDescription>From ops.llm_calls. Billing truth is the provider invoice; this is the {site ? "per-project" : "per-tenant"} view.</CardDescription></CardHeader>
             <CardContent>
@@ -215,5 +229,25 @@ function ControlButtons({ target, control }: { target: ControlTarget; control: A
         {indexing ? "Resume indexing" : "Pause indexing"}
       </ActionButton>
     </>
+  );
+}
+
+/** One budget: this period's spend and holds against its cap, the cap editable in place. */
+function BudgetTableRow({ budget: b }: { budget: BudgetRow }) {
+  const used = b.cap_usd > 0 ? Math.round((b.spent_usd / b.cap_usd) * 100) : null;
+  return (
+    <TableRow>
+      <TableCell>{b.org_name}</TableCell>
+      <TableCell className="text-xs">{b.site_name ?? "Organisation"}</TableCell>
+      <TableCell>{RESOURCE_LABEL[b.resource]}</TableCell>
+      <TableCell className="text-xs">{b.period === "day" ? `day ${b.period_start}` : `month from ${b.period_start}`}</TableCell>
+      <TableCell><BudgetCapForm budgetId={b.id} capUsd={b.cap_usd} maxUsd={budgetCapMaxUsd(b)} /></TableCell>
+      <TableCell className="font-mono">${b.spent_usd.toFixed(2)}</TableCell>
+      <TableCell className="font-mono">{b.reserved_usd > 0 ? `$${b.reserved_usd.toFixed(2)}` : "—"}</TableCell>
+      <TableCell>
+        {used === null ? <Badge variant="destructive">cap $0</Badge> : <Badge variant={used >= 100 ? "destructive" : used >= 80 ? "warning" : "outline"}>{used}%</Badge>}
+        {b.alerted_pct ? <p className="text-muted-foreground text-xs">told at {b.alerted_pct}%</p> : null}
+      </TableCell>
+    </TableRow>
   );
 }

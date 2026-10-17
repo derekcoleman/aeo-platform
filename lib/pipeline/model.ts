@@ -2,14 +2,17 @@ import type { ZodType } from "zod";
 import { bareModelId, ModelRefusalError, modelFromEnv, type Completion, type Effort, type TextModel } from "@/lib/ai/model";
 import { parseScoredJson, ScoredJsonError } from "@/lib/ai/scored-json";
 import { appDb } from "@/lib/db/app";
+import { defaultSpendGovernor, usdFromEnv, type SpendGovernor } from "@/lib/ops/spend";
 import type postgres from "postgres";
 import type { ModelRun } from "./types";
 
 /**
  * Task → model routing for the pipeline. The full ModelRouter (config in
- * ops.model_routes, fallbacks, per-org budgets) is a later slice; this reads
- * env so the routing is at least not a constant, and every call still lands
- * in ops.llm_calls with its task key so cost per article is a query today.
+ * ops.model_routes, fallbacks) is a later slice; this reads env so the
+ * routing is at least not a constant. Every call reserves its worst-case
+ * cost against the org's model budget first (lib/ops/spend.ts) and lands in
+ * ops.llm_calls with its task key, run and opportunity, so cost per article
+ * is a query and the per-article cap is a sum.
  */
 
 export type TaskKey = "pipeline.brief" | "pipeline.draft" | "pipeline.qa.judge" | "context.facts.extract" | "context.manifest.draft" | "site.profile.extract";
@@ -121,16 +124,70 @@ export interface LlmCallScope {
   orgId: string;
   siteId?: string | null;
   contentItemId?: string | null;
-  /** The Inngest run and the opportunity the call served. Carried for the spend ledger; ops.llm_calls does not store them yet. */
+  /** The Inngest run and the opportunity (article) the call served; the per-article cap sums by the latter. */
   runId?: string | null;
   opportunityId?: string | null;
+  /** Budget enforcement. Defaults to defaultSpendGovernor(sql): Postgres when a database is configured, else a no-op. */
+  governor?: SpendGovernor;
 }
 
 export async function recordLlmCall(task: TaskKey, scope: LlmCallScope, run: ModelRun, sql: postgres.Sql = appDb()): Promise<void> {
   await sql`
-    insert into ops.llm_calls (org_id, site_id, task_key, model, prompt_version, input_tokens, output_tokens, cost_usd, content_item_id)
+    insert into ops.llm_calls (org_id, site_id, task_key, model, prompt_version, input_tokens, output_tokens, cost_usd,
+                               cache_creation_input_tokens, cache_read_input_tokens, stop_reason, run_id, opportunity_id, content_item_id)
     values (${scope.orgId}, ${scope.siteId ?? null}, ${task}, ${run.model}, ${run.promptVersion},
-            ${run.inputTokens}, ${run.outputTokens}, ${run.costUsd}, ${scope.contentItemId ?? null})`;
+            ${run.inputTokens}, ${run.outputTokens}, ${run.costUsd},
+            ${run.cacheWriteTokens ?? 0}, ${run.cacheReadTokens ?? 0}, ${run.stopReason ?? null}, ${scope.runId ?? null}, ${scope.opportunityId ?? null},
+            ${scope.contentItemId ?? null})`;
+}
+
+/** Characters per token for the pre-call estimate: low on purpose, so the hold errs high. */
+const CHARS_PER_TOKEN = 3.5;
+
+/** The most a call can cost: the whole prompt in, and every token of `maxTokens` out (thinking included). */
+export function worstCaseCostUsd(model: string, input: Pick<TaskInput, "system" | "prompt">, maxTokens: number): number {
+  return estimateCostUsd(model, Math.ceil((input.system.length + input.prompt.length) / CHARS_PER_TOKEN), maxTokens);
+}
+
+export const DEFAULT_ARTICLE_COST_CAP_USD = 15;
+
+export function articleCostCapUsd(env: Record<string, string | undefined> = process.env): number {
+  return usdFromEnv("AEO_ARTICLE_COST_CAP_USD", DEFAULT_ARTICLE_COST_CAP_USD, env);
+}
+
+/** One article's model spend reached its cap. Another attempt would add to it; a human decides. */
+export class ArticleBudgetExceededError extends Error {
+  constructor(
+    public readonly opportunityId: string,
+    public readonly spentUsd: number,
+    public readonly capUsd: number,
+  ) {
+    super(
+      `this article has cost $${spentUsd.toFixed(2)} in model calls, at or over its $${capUsd.toFixed(2)} cap (AEO_ARTICLE_COST_CAP_USD); ` +
+        `asking for it again ("Write about this", or "Refresh now" for a refresh) starts a new allowance`,
+    );
+    this.name = "ArticleBudgetExceededError";
+  }
+}
+
+/**
+ * The per-article cost cap, checked before each brief and draft attempt:
+ * every model call made for the opportunity, across runs, against
+ * AEO_ARTICLE_COST_CAP_USD (default $15). A loop of QA failures or
+ * regenerations stops here instead of at the org's monthly budget. A person
+ * reopening the opportunity (content.opportunities.cost_cap_reset_at) starts
+ * the count over: that is the per-article way past the cap.
+ */
+export async function assertArticleBudget(opportunityId: string, sql: postgres.Sql = appDb(), env: Record<string, string | undefined> = process.env): Promise<{ spentUsd: number; capUsd: number }> {
+  const capUsd = articleCostCapUsd(env);
+  const [row] = await sql<{ spent_usd: number }[]>`
+    select coalesce(sum(l.cost_usd), 0)::float as spent_usd
+    from ops.llm_calls l
+    left join content.opportunities o on o.id = l.opportunity_id
+    where l.opportunity_id = ${opportunityId} and l.created_at >= coalesce(o.cost_cap_reset_at, '-infinity')`;
+  const spentUsd = row?.spent_usd ?? 0;
+  if (spentUsd >= capUsd) throw new ArticleBudgetExceededError(opportunityId, spentUsd, capUsd);
+  return { spentUsd, capUsd };
 }
 
 export interface TaskInput {
@@ -162,6 +219,8 @@ function runOf(input: TaskInput, out: Completion): ModelRun {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     costUsd: usage.costUsd ?? estimateCostUsd(usage.model, usage.inputTokens, usage.outputTokens),
+    ...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+    ...(usage.cacheWriteTokens !== undefined ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
     ...(out.stopReason ? { stopReason: out.stopReason } : {}),
   };
 }
@@ -176,6 +235,10 @@ function runOf(input: TaskInput, out: Completion): ModelRun {
  * it is thrown as ModelTruncatedError for the caller to retry. A refusal is
  * recorded, then thrown as ModelRefusalError: it needs a human, not another
  * attempt.
+ *
+ * Each call holds its worst-case cost on the org's model budget first
+ * (BudgetExceededError when there is no room, before anything is paid),
+ * settles with what it cost, and gives the hold back if the call throws.
  */
 export async function runJsonTask<T>(
   task: TaskKey,
@@ -186,16 +249,38 @@ export async function runJsonTask<T>(
   sql: postgres.Sql = appDb(),
 ): Promise<{ value: T; run: ModelRun }> {
   const settings = TASK_SETTINGS[task];
+  const governor = scope.governor ?? defaultSpendGovernor(sql);
   const call = async (maxTokens: number) => {
-    const out = await model.complete(input.prompt, {
-      system: input.system,
-      json: true,
-      maxTokens,
-      effort: input.effort ?? settings.effort,
-      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+    const hold = await governor.reserve({
+      orgId: scope.orgId,
+      siteId: scope.siteId ?? null,
+      resource: "llm",
+      estimateUsd: worstCaseCostUsd(model.id, input, maxTokens),
+      ref: { task, model: model.id, maxTokens, runId: scope.runId ?? null, opportunityId: scope.opportunityId ?? null },
     });
+    let out: Completion;
+    try {
+      out = await model.complete(input.prompt, {
+        system: input.system,
+        json: true,
+        maxTokens,
+        effort: input.effort ?? settings.effort,
+        ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      });
+    } catch (e) {
+      // A failed release must not hide why the call failed; the sweeper gives the hold back.
+      await governor.release(hold).catch((err) => console.warn(`[spend] release after a failed ${task} call: ${err instanceof Error ? err.message : String(err)}`));
+      throw e;
+    }
     const run = runOf(input, out);
-    await recordLlmCall(task, scope, run, sql);
+    // Counted before it is ledgered: the money is spent whether or not the row
+    // lands. The row lands even when counting failed: the article cap and the
+    // next period's counter read the ledger.
+    try {
+      await governor.settle(hold, run.costUsd);
+    } finally {
+      await recordLlmCall(task, scope, run, sql);
+    }
     if (out.stopReason === "refusal") throw new ModelRefusalError(run.model, out.refusalCategory ?? null);
     return { out, run };
   };

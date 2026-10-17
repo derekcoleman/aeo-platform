@@ -1,5 +1,6 @@
 import { redriveWebhookEvents } from "@/lib/connectors/webhook-redrive";
 import { tryRecordHeartbeat } from "@/lib/jobs/heartbeat";
+import { sweepSpendReservations } from "@/lib/ops/spend";
 import { concurrencyCap, inngest, opsPingRequested } from "./client";
 
 /**
@@ -26,4 +27,15 @@ export const webhookRedriveFunction = inngest.createFunction(
   async ({ step }) => step.run("redrive", () => redriveWebhookEvents({ send: (e) => inngest.send(e) })),
 );
 
-export const opsFunctions = [opsPingFunction, webhookRedriveFunction];
+/**
+ * Every 15 minutes: give back spend holds whose worker died between reserve
+ * and settle (held over 30 minutes), so a crashed call does not keep part of
+ * an org's budget, and drop closed holds past retention. A late settle still
+ * counts its spend. One run at a time; the next run is the retry.
+ */
+export const spendReservationSweeperFunction = inngest.createFunction(
+  { id: "spend-reservation-sweeper", triggers: [{ cron: "*/15 * * * *" }], concurrency: [{ limit: concurrencyCap(1) }], retries: 0 },
+  async ({ step }) => step.run("sweep", () => sweepSpendReservations()),
+);
+
+export const opsFunctions = [opsPingFunction, webhookRedriveFunction, spendReservationSweeperFunction];

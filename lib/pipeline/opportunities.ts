@@ -206,6 +206,8 @@ export async function createManualOpportunity(siteId: string, input: ManualOppor
             ${scored.score}, ${sql.json(scored.breakdown as never)}, ${sql.json({ manual: true, note: input.note ?? null } as never)}, ${dedupeKey})
     on conflict (site_id, dedupe_key) do update
       set status = case when content.opportunities.status in ('dismissed', 'failed', 'published') then 'open' else content.opportunities.status end,
+          -- Asked for again after it stopped: the per-article cost cap starts over (assertArticleBudget).
+          cost_cap_reset_at = case when content.opportunities.status in ('dismissed', 'failed', 'published') then now() else content.opportunities.cost_cap_reset_at end,
           title = excluded.title, topic_id = coalesce(excluded.topic_id, content.opportunities.topic_id), format = coalesce(excluded.format, content.opportunities.format),
           score = greatest(content.opportunities.score, excluded.score),
           evidence = (content.opportunities.evidence - 'bySource') || excluded.evidence || jsonb_build_object('bySource',

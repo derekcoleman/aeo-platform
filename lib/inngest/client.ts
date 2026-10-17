@@ -293,3 +293,20 @@ export const metricsRestatementRequested = eventType("metrics/restatement.reques
 export const opsPingRequested = eventType("ops/ping.requested", {
   schema: z.object({ nonce: z.string().min(8), sentAt: z.string() }),
 });
+
+/**
+ * A budget reached its cap for the period (lib/ops/spend.ts), sent once per
+ * budget per period. Nothing consumes it yet; it is the hook a circuit
+ * breaker listens on.
+ */
+export const opsBudgetExceeded = eventType("ops/budget.exceeded", {
+  schema: z.object({
+    orgId: z.guid(),
+    siteId: z.guid().nullable(),
+    resource: z.enum(["llm", "serp", "answer_probe"]),
+    period: z.enum(["day", "month"]),
+    periodStart: z.string(),
+    capUsd: z.number(),
+    spentUsd: z.number(),
+  }),
+});

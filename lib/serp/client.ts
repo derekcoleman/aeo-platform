@@ -8,7 +8,9 @@ import type { AiOverview, AutocompleteResult, PaaItem, SerpProvider, SerpProvide
 /**
  * The client the rest of the product calls. It routes by purpose — bulk to
  * the cheap provider, AI Overview extraction to the high-fidelity one — and
- * wraps every call in the day cache and the per-org budget guard.
+ * wraps every call in the day cache and the per-org budget guard: a cache
+ * miss holds its estimate before the call, settles at the vendor's reported
+ * cost, and gives the hold back when the call throws.
  */
 
 export interface SerpTenant {
@@ -65,10 +67,22 @@ export function createSerpClient(opts: SerpClientOptions): SerpClient {
       await budget.record({ orgId: t.orgId, siteId: t.siteId ?? null, provider: provider.name, method, query: q.query, costUsd: 0, cached: true });
       return { ...hit, cached: true };
     }
-    await budget.reserve(t.orgId, estimate[provider.name][method]);
-    const result = await call();
-    await cache.set(key, result, { provider: provider.name, method, query: q, day, costUsd: result.costUsd });
-    await budget.record({ orgId: t.orgId, siteId: t.siteId ?? null, provider: provider.name, method, query: q.query, costUsd: result.costUsd, cached: false });
+    const hold = await budget.reserve(t.orgId, estimate[provider.name][method], { siteId: t.siteId ?? null, provider: provider.name, method, query: q.query });
+    let result: T;
+    try {
+      result = await call();
+    } catch (e) {
+      // A failed call is not billed (or is retried and billed then); its hold goes back now. A failed
+      // release must not hide the vendor's error (callers classify it); the sweeper gives the hold back.
+      await budget.release(hold).catch((err) => console.warn(`[serp] release after a failed ${method} call: ${err instanceof Error ? err.message : String(err)}`));
+      throw e;
+    }
+    // Settled and ledgered as soon as the vendor answers: the call is paid for, whatever happens next.
+    await budget.record({ orgId: t.orgId, siteId: t.siteId ?? null, provider: provider.name, method, query: q.query, costUsd: result.costUsd, cached: false }, hold);
+    // A failed cache write costs a repeat call later; failing this one would have the caller retry and pay again now.
+    await cache
+      .set(key, result, { provider: provider.name, method, query: q, day, costUsd: result.costUsd })
+      .catch((err) => console.warn(`[serp] cache write after a paid ${method} call: ${err instanceof Error ? err.message : String(err)}`));
     return { ...result, cached: false };
   }
 

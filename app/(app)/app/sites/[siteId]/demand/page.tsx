@@ -50,6 +50,7 @@ export default async function DemandPage({ params, searchParams }: { params: Pro
   const locale = mineLocale(site.locale);
   const providerConfigured = serpConfigured();
   const budgetPct = spend.budget_usd > 0 ? Math.min(100, Math.round((spend.org_month_usd / spend.budget_usd) * 100)) : 0;
+  const headroom = Math.max(0, spend.budget_usd - spend.org_month_usd - spend.reserved_usd);
   const sections = sitePage("demand").sections!;
   const defaultTab = gaps.length ? "gaps" : counts.questions ? "questions" : "mine";
   const tab = resolveTab(sections, requestedTab, defaultTab);
@@ -158,10 +159,10 @@ export default async function DemandPage({ params, searchParams }: { params: Pro
             <CardContent>{editor ? <MineForm siteId={siteId} suggestedSeeds={seeds} locale={locale} /> : <p className="text-muted-foreground text-sm">Editors and above can mine.</p>}</CardContent>
           </Card>
           <Card>
-            <CardHeader><CardTitle>Spend this month</CardTitle><CardDescription>Cached by (query, locale, device, day); the budget guard stops calls before the limit, never after.</CardDescription></CardHeader>
+            <CardHeader><CardTitle>Spend this month</CardTitle><CardDescription>Cached by (query, locale, device, day). Each call holds its estimated cost against the budget before it is made, and no call starts once the month&apos;s spend reaches the limit (UTC months).</CardDescription></CardHeader>
             <CardContent className="text-sm">
               <p>This project: <span className="font-mono">${spend.site_month_usd.toFixed(2)}</span> across {spend.calls_month} calls ({spend.cached_month} served from cache).</p>
-              <p>Organisation: <span className="font-mono">${spend.org_month_usd.toFixed(2)}</span> of <span className="font-mono">${spend.budget_usd.toFixed(2)}</span> ({budgetPct}%). Change the budget in <Link className="underline-offset-2 hover:underline" href={settingsHref(site.id, null, "general") as Route}>organisation settings</Link>.</p>
+              <p>Organisation: <span className="font-mono">${spend.org_month_usd.toFixed(2)}</span> of <span className="font-mono">${spend.budget_usd.toFixed(2)}</span> ({budgetPct}%){spend.reserved_usd > 0 ? <>, plus <span className="font-mono">${spend.reserved_usd.toFixed(2)}</span> held by calls in flight</> : null}; <span className="font-mono">${headroom.toFixed(2)}</span> left. Change the budget in <Link className="underline-offset-2 hover:underline" href={settingsHref(site.id, null, "general") as Route}>organisation settings</Link>.</p>
             </CardContent>
           </Card>
         </TabsContent>

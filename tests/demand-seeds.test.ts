@@ -67,7 +67,7 @@ describe("snapshotFailure", () => {
 
   it("records a refused query at once and stops the batch on the budget", () => {
     expect(snapshotFailure(new SerpProviderError("serpapi", "400 Unsupported location"), 0)).toBe("record");
-    expect(snapshotFailure(new BudgetExceededError("org", 10, 10), 0)).toBe("budget");
-    expect(snapshotFailure(new BudgetExceededError("org", 10, 10), 2)).toBe("budget");
+    expect(snapshotFailure(new BudgetExceededError("serp", "org", 10, 10), 0)).toBe("budget");
+    expect(snapshotFailure(new BudgetExceededError("serp", "org", 10, 10), 2)).toBe("budget");
   });
 });

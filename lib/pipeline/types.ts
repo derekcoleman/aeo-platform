@@ -87,6 +87,9 @@ export interface ModelRun {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  /** Prompt-cache tokens, when the provider reported them. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   /** How the call that produced this output stopped (absent when the model did not say). */
   stopReason?: StopReason;
 }

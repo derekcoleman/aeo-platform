@@ -34,6 +34,7 @@ export {
   metricsContentIdsRequested,
   metricsRestatementRequested,
   opsPingRequested,
+  opsBudgetExceeded,
 } from "./client";
 import { analyticsFunctions } from "./analytics";
 import { auditFunction } from "./audit";

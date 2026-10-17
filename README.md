@@ -139,3 +139,34 @@ to the organisation's alerts channel and owners.
   the platform, one organisation or one project (`ops.autonomy_controls`).
   A held publish step waits an hour and asks again, for up to three days,
   then the run fails and says why.
+
+### Spend budgets
+
+Every paid call goes through one governor (`lib/ops/spend.ts`, migration
+0021): model calls (`llm`), SERP calls (`serp`) and AI-answer probes
+(`answer_probe`).
+
+- **Before the call** it holds the call's worst-case cost on every budget
+  that covers it: the organisation's and, when one is set, the project's.
+  A model call's worst case is the whole prompt plus every `max_tokens`
+  token. One conditional update admits the call while spent plus held is
+  under the cap, so two workers cannot both take the last dollar. The call
+  admitted last may overshoot the cap by at most its own estimate. A refused
+  call is never made and costs nothing.
+- **After the call** the hold settles at the actual cost, or is released if
+  the call failed. Holds older than 30 minutes belonged to a worker that
+  died; a cron releases them every 15 minutes.
+- **Monthly defaults** apply from an organisation's first spend: $200 for
+  models and $25 for probes (`AEO_DEFAULT_*_MONTHLY_BUDGET_USD`). The SERP
+  cap is the organisation's own setting. Staff change any cap in
+  Ops → Spend. Periods are UTC months, or UTC days for a daily budget.
+- **Alerts:** the organisation is told at 80% and at 100% of a budget, once
+  each per period. At 100%, `ops/budget.exceeded` is also sent.
+- **One article** (opportunity) may cost at most `AEO_ARTICLE_COST_CAP_USD`
+  ($15) in model calls across all its attempts. The pipeline checks before
+  each brief and draft. Past the cap, or when the organisation's model
+  budget is spent, the run stops and hands the article to a human instead
+  of retrying. The human's lever for one article is to ask for it again
+  ("Write about this", or "Refresh now" for a refresh): reopening a
+  stopped opportunity starts its count over. The env var moves the cap for
+  every article.

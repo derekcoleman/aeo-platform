@@ -5,6 +5,7 @@ import { runSiteOnboarding } from "@/lib/onboarding/run";
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { z } from "zod";
 import type { Route } from "next";
 import { canEdit, canManage, requireStaff, requireUser } from "@/lib/auth/session";
 import { setFeature } from "@/lib/connectors/store";
@@ -22,6 +23,8 @@ import {
   siteOnboardingRequested,
 } from "@/lib/inngest";
 import { loadApproval, recordDecision } from "@/lib/pipeline/approvals";
+import { setBudgetCap } from "@/lib/ops/spend";
+import { BUDGET_CAP_MAX_USD } from "@/lib/ops/spend-limits";
 import { loadOpportunity, markOpportunity } from "@/lib/pipeline/opportunities";
 import { createPreflight } from "@/lib/proxy/store";
 import { createOrganization, createSite, createSiteSchema, deleteSite, loadSite, setSiteStatus, SiteInputError } from "./store";
@@ -195,6 +198,24 @@ export async function setSiteStatusAction(siteId: string, status: "paused" | "ac
 export async function setFeatureAction(orgId: string, feature: string, enabled: boolean): Promise<ActionResult> {
   await requireStaff();
   await setFeature(orgId, feature, enabled);
+  revalidatePath("/ops");
+  return { ok: true };
+}
+
+// A cleared field is an error, not a $0 cap that would stop every call.
+const budgetCapForm = z.object({ budgetId: z.guid(), capUsd: z.string().trim().regex(/^\d+(\.\d+)?$/).transform(Number).refine((n) => n <= BUDGET_CAP_MAX_USD) });
+
+/**
+ * Set one spend budget's cap (Ops → Spend). The org-wide monthly SERP cap is
+ * written to the org's own setting, within the limit its settings form
+ * allows; audited either way.
+ */
+export async function setBudgetCapAction(_prev: ActionResult | null, form: FormData): Promise<ActionResult> {
+  const staff = await requireStaff();
+  const parsed = budgetCapForm.safeParse({ budgetId: form.get("budgetId"), capUsd: form.get("capUsd") });
+  if (!parsed.success) return fail(`Enter a cap between 0 and ${BUDGET_CAP_MAX_USD} USD.`);
+  const changed = await setBudgetCap(parsed.data.budgetId, parsed.data.capUsd, staff.id);
+  if (!changed.ok) return fail(changed.error);
   revalidatePath("/ops");
   return { ok: true };
 }

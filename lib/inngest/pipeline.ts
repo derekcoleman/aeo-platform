@@ -1,6 +1,7 @@
 import { ModelRefusalError } from "@/lib/ai/model";
 import { connectorContext } from "@/lib/connectors";
 import { appDb } from "@/lib/db/app";
+import { BudgetExceededError } from "@/lib/ops/spend";
 import {
   createApproval,
   expireApproval,
@@ -20,7 +21,7 @@ import { composeVersion, qaDocumentFor } from "@/lib/pipeline/compose";
 import { generateDraft, slugify } from "@/lib/pipeline/draft";
 import { applyDecision, approvalUrl, GATE_TTL_DAYS, humanGate, type DecisionDeps, type GateDeps } from "@/lib/pipeline/gate";
 import { citationStatus, loadPublishedAt, POST_PUBLISH_WINDOWS_DAYS, windowDate, windowsStart } from "@/lib/pipeline/loop";
-import { modelFor, ModelTruncatedError, TASK_SETTINGS } from "@/lib/pipeline/model";
+import { ArticleBudgetExceededError, assertArticleBudget, modelFor, ModelTruncatedError, TASK_SETTINGS } from "@/lib/pipeline/model";
 import { loadOpportunity, markOpportunity, openRefreshOpportunity, scanSite } from "@/lib/pipeline/opportunities";
 import { holdWhilePaused, isHeld, publishGuard } from "@/lib/pipeline/guard";
 import { isTakenDown, loadSiteOrganization, loadSiteRoute } from "@/lib/pipeline/publish";
@@ -83,11 +84,15 @@ function gateDeps(): GateDeps {
  * is not retried by Inngest; the run hands it to a human. A cut-off comes
  * back with the larger budget, and the retry runs in a step of its own, so
  * each long call gets its own invocation (and request timeout) and a replay
- * never pays for the first call again.
+ * never pays for the first call again. A spent budget (the article's cap, or
+ * the org's model budget for the month) is not retried either: another
+ * attempt minutes later finds it just as spent, and raising it is a person's
+ * call.
  */
-function handedBack(e: unknown): { refused: string } | { truncated: number } | null {
+function handedBack(e: unknown): { refused: string } | { truncated: number } | { overBudget: string } | null {
   if (e instanceof ModelRefusalError) return { refused: e.category ?? "no category given" };
   if (e instanceof ModelTruncatedError) return { truncated: e.retryMaxTokens };
+  if (e instanceof ArticleBudgetExceededError || e instanceof BudgetExceededError) return { overBudget: e.message };
   return null;
 }
 
@@ -133,6 +138,7 @@ export const contentPipelineFunction = inngest.createFunction(
         const writeBrief = (maxTokens: number) => async () => {
           const ctx = await loadBriefContext(opp);
           try {
+            await assertArticleBudget(opportunityId);
             const { spec, run } = await generateBrief(modelFor("pipeline.brief"), { ...ctx, note: briefNote, previous: previousBrief }, scope, appDb(), { maxTokens, retryTruncated: false });
             const { id } = await insertBrief({ siteId, opportunityId, version: v, spec, run });
             return { id, spec };
@@ -144,6 +150,7 @@ export const contentPipelineFunction = inngest.createFunction(
         };
         let brief = await step.run(`brief:${v}`, writeBrief(TASK_SETTINGS["pipeline.brief"].maxTokens));
         if ("truncated" in brief) brief = await step.run(`brief:${v}:more-room`, writeBrief(brief.truncated));
+        if ("overBudget" in brief) return await fail(`brief not written: ${brief.overBudget} — needs a human`);
         if ("refused" in brief) return await fail(`model refused the brief (${brief.refused}) — needs a human`);
         if ("truncated" in brief) return await fail("the brief was cut off at max_tokens even with more room — needs a human");
         if (briefId) await step.run(`brief:${v}:supersede-previous`, () => setBriefStatus(briefId!, "superseded"));
@@ -244,6 +251,7 @@ export const contentPipelineFunction = inngest.createFunction(
             const now = new Date();
             let generated: Awaited<ReturnType<typeof generateDraft>>;
             try {
+              await assertArticleBudget(opportunityId, sql);
               generated = await generateDraft(
                 modelFor("pipeline.draft"),
                 {
@@ -306,6 +314,7 @@ export const contentPipelineFunction = inngest.createFunction(
           };
           let r = await step.run(`draft:${attemptNo}`, writeDraft(TASK_SETTINGS["pipeline.draft"].maxTokens));
           if ("truncated" in r) r = await step.run(`draft:${attemptNo}:more-room`, writeDraft(r.truncated));
+          if ("overBudget" in r) return await fail(`draft not written: ${r.overBudget} — needs a human`);
           if ("refused" in r) return await fail(`model refused the draft (${r.refused}) — needs a human`);
           if ("truncated" in r) return await fail("the draft was cut off at max_tokens even with more room — needs a human");
           versionId = r.versionId;

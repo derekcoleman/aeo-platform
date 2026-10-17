@@ -68,20 +68,37 @@ export async function demandCounts(siteId: string, sql: postgres.Sql = appDb()):
 
 export interface SerpSpendSummary {
   site_month_usd: number;
+  /** The org's SERP spend this month as the spend governor counts it (the ledger before its first call). */
   org_month_usd: number;
+  /** Held by calls in flight; counts against the budget until they settle. */
+  reserved_usd: number;
   budget_usd: number;
   calls_month: number;
   cached_month: number;
 }
 
+/**
+ * This month's SERP spend against the org's budget. Spent, held and the cap
+ * come from the governor's counter (ops.spend_counters), which is what
+ * refuses the next call; the site's share and the call counts from the
+ * ledger. Months are UTC, as the governor's are.
+ */
 export async function serpSpendSummary(orgId: string, siteId: string, sql: postgres.Sql = appDb()): Promise<SerpSpendSummary> {
   const [row] = await sql<SerpSpendSummary[]>`
-    select coalesce((select sum(cost_usd) from measure.serp_spend where site_id = ${siteId} and not cached and at >= date_trunc('month', now())), 0)::float as site_month_usd,
-           coalesce((select sum(cost_usd) from measure.serp_spend where org_id = ${orgId} and not cached and at >= date_trunc('month', now())), 0)::float as org_month_usd,
-           (select serp_monthly_budget_usd::float from app.organizations where id = ${orgId}) as budget_usd,
-           (select count(*)::int from measure.serp_spend where site_id = ${siteId} and at >= date_trunc('month', now())) as calls_month,
-           (select count(*)::int from measure.serp_spend where site_id = ${siteId} and cached and at >= date_trunc('month', now())) as cached_month`;
-  return row ?? { site_month_usd: 0, org_month_usd: 0, budget_usd: 0, calls_month: 0, cached_month: 0 };
+    with m as (select date_trunc('month', now() at time zone 'utc') at time zone 'utc' as since,
+                      date_trunc('month', now() at time zone 'utc')::date as period_start)
+    select coalesce((select sum(cost_usd) from measure.serp_spend where site_id = ${siteId} and not cached and at >= m.since), 0)::float as site_month_usd,
+           coalesce(c.spent_usd, (select sum(cost_usd) from measure.serp_spend where org_id = ${orgId} and not cached and at >= m.since), 0)::float as org_month_usd,
+           coalesce(c.reserved_usd, 0)::float as reserved_usd,
+           coalesce(b.cap_usd, o.serp_monthly_budget_usd)::float as budget_usd,
+           (select count(*)::int from measure.serp_spend where site_id = ${siteId} and at >= m.since) as calls_month,
+           (select count(*)::int from measure.serp_spend where site_id = ${siteId} and cached and at >= m.since) as cached_month
+    from app.organizations o
+    cross join m
+    left join ops.budgets b on b.org_id = o.id and b.site_id is null and b.resource = 'serp' and b.period = 'month'
+    left join ops.spend_counters c on c.budget_id = b.id and c.period_start = m.period_start
+    where o.id = ${orgId}`;
+  return row ?? { site_month_usd: 0, org_month_usd: 0, reserved_usd: 0, budget_usd: 0, calls_month: 0, cached_month: 0 };
 }
 
 export async function setQuestionTracking(siteId: string, questionId: string, tier: QuestionRow["tracking_tier"], sql: postgres.Sql = appDb()): Promise<boolean> {

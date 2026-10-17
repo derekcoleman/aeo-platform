@@ -230,7 +230,8 @@ export async function queueRefreshForItem(cmsItemId: string, sql: postgres.Sql =
     select id, status from content.opportunities where site_id = ${row.site_id} and dedupe_key = ${input.dedupeKey}`;
   if (!opp) return null;
   if (opp.status === "dismissed" || opp.status === "failed" || opp.status === "published") {
-    await sql`update content.opportunities set status = 'open', score = ${Math.max(input.score, REFRESH_THRESHOLD)}, evidence = ${sql.json(input.evidence as never)}, updated_at = ${now} where id = ${opp.id}`;
+    // Asked for again after it stopped: the per-article cost cap starts over (assertArticleBudget).
+    await sql`update content.opportunities set status = 'open', score = ${Math.max(input.score, REFRESH_THRESHOLD)}, evidence = ${sql.json(input.evidence as never)}, cost_cap_reset_at = now(), updated_at = ${now} where id = ${opp.id}`;
     return { id: opp.id, status: "open" };
   }
   return opp;

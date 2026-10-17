@@ -1253,3 +1253,119 @@ begin;
 rollback;
 
 \echo 'isolation: takedown and kill switch assertions passed'
+
+-- ── 0021: spend governor ─────────────────────────────────────────────────────
+do $$ begin
+  if (select count(*) from information_schema.columns where table_schema = 'ops' and table_name = 'llm_calls' and column_name in ('run_id', 'opportunity_id', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'stop_reason')) <> 5 then
+    raise exception 'FAIL llm_calls spend columns missing';
+  end if;
+end $$;
+
+insert into ops.budgets (id, org_id, resource, cap_usd) values
+  ('d1000000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'llm', 200),
+  ('d2000000-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222', 'llm', 200);
+-- org_id deliberately wrong on the site budget: the trigger takes it from the site.
+insert into ops.budgets (id, org_id, site_id, resource, period, cap_usd) values
+  ('d1000000-0000-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222', 'aaaaaaaa-0000-0000-0000-000000000001', 'serp', 'day', 5);
+-- org_id deliberately omitted on counters and holds: the counter trigger takes it from the budget.
+insert into ops.spend_counters (budget_id, period_start, spent_usd, reserved_usd) values
+  ('d1000000-0000-0000-0000-000000000001', date_trunc('month', now())::date, 12.5, 0.4),
+  ('d1000000-0000-0000-0000-000000000003', current_date, 1, 0),
+  ('d2000000-0000-0000-0000-000000000002', date_trunc('month', now())::date, 3, 0);
+insert into ops.spend_reservations (org_id, resource, budget_ids, amount_usd, ref) values
+  ('11111111-1111-1111-1111-111111111111', 'llm', '{d1000000-0000-0000-0000-000000000001}', 0.4, '{"task":"pipeline.draft"}'),
+  ('22222222-2222-2222-2222-222222222222', 'serp', '{d2000000-0000-0000-0000-000000000002}', 0.02, '{"query":"sso vs scim"}');
+
+do $$ begin
+  if (select org_id from ops.budgets where id = 'd1000000-0000-0000-0000-000000000003') <> '11111111-1111-1111-1111-111111111111' then
+    raise exception 'FAIL a site budget must carry its site''s org';
+  end if;
+  if exists (select 1 from ops.spend_counters c join ops.budgets b on b.id = c.budget_id where c.org_id is distinct from b.org_id) then
+    raise exception 'FAIL spend_counters org trigger';
+  end if;
+  begin
+    insert into ops.budgets (org_id, resource, cap_usd) values ('11111111-1111-1111-1111-111111111111', 'llm', 50);
+    raise exception 'FAIL a second org-wide monthly llm budget must be rejected';
+  exception when unique_violation then null;
+  end;
+  begin
+    insert into ops.budgets (org_id, resource, period, cap_usd) values ('11111111-1111-1111-1111-111111111111', 'llm', 'week', 50);
+    raise exception 'FAIL an unknown budget period must be rejected';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into ops.spend_reservations (org_id, resource, budget_ids, amount_usd, status) values ('11111111-1111-1111-1111-111111111111', 'llm', '{}', 1, 'spent');
+    raise exception 'FAIL an unknown reservation status must be rejected';
+  exception when check_violation then null;
+  end;
+  raise notice 'ok  budgets are one per scope and carry their org';
+end $$;
+
+-- Changing the org's SERP budget in its settings moves the governor's cap.
+begin;
+  insert into ops.budgets (org_id, resource, cap_usd) values ('11111111-1111-1111-1111-111111111111', 'serp', 25);
+  update app.organizations set serp_monthly_budget_usd = 60 where id = '11111111-1111-1111-1111-111111111111';
+  select pg_temp.expect('org serp setting moves the monthly serp cap',
+    (select cap_usd::int from ops.budgets where org_id = '11111111-1111-1111-1111-111111111111' and site_id is null and resource = 'serp'), 60);
+  select pg_temp.expect('org serp setting leaves site budgets alone',
+    (select cap_usd::int from ops.budgets where id = 'd1000000-0000-0000-0000-000000000003'), 5);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member sees own budgets', (select count(*) from ops.budgets), 2);
+  select pg_temp.expect('acme member never sees globex budgets',
+    (select count(*) from ops.budgets where org_id = '22222222-2222-2222-2222-222222222222'), 0);
+  select pg_temp.expect('acme member sees own spend counters', (select count(*) from ops.spend_counters), 2);
+  select pg_temp.expect('acme member never sees globex counters',
+    (select count(*) from ops.spend_counters where budget_id = 'd2000000-0000-0000-0000-000000000002'), 0);
+  select pg_temp.expect('member cannot read spend holds, even their own org''s', (select count(*) from ops.spend_reservations), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('globex member sees only globex budgets', (select count(*) from ops.budgets), 1);
+  select pg_temp.expect('globex member never sees acme counters',
+    (select count(*) from ops.spend_counters where org_id = '11111111-1111-1111-1111-111111111111'), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every budget', (select count(*) from ops.budgets), 3);
+  select pg_temp.expect('staff sees every counter', (select count(*) from ops.spend_counters), 3);
+  select pg_temp.expect('staff reads spend holds', (select count(*) from ops.spend_reservations), 2);
+rollback;
+
+begin;
+  set local role app_user;
+  do $$ begin
+    if (select count(*) from ops.budgets) + (select count(*) from ops.spend_counters) <> 0 then raise exception 'FAIL budgets readable without claims'; end if;
+    raise notice 'ok  absent claims see no budgets';
+  end $$;
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare t text;
+  declare denied boolean;
+  begin
+    foreach t in array array['ops.budgets', 'ops.spend_counters', 'ops.spend_reservations'] loop
+      denied := false;
+      begin
+        execute format('select 1 from %s limit 1', t);
+      exception when insufficient_privilege then
+        denied := true;
+      end;
+      if not denied then
+        raise exception 'FAIL renderer must not read %', t;
+      end if;
+    end loop;
+    raise notice 'ok  renderer cannot read budgets, counters or holds';
+  end $$;
+rollback;
+
+\echo 'isolation: spend governor assertions passed'

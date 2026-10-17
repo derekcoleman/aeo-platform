@@ -141,7 +141,7 @@ export const OPS_SECTIONS: NavSection[] = [
   { value: "sites", label: "Sites" },
   { value: "orgs", label: "Organisations" },
   { value: "health", label: "Connector health" },
-  { value: "spend", label: "LLM spend" },
+  { value: "spend", label: "Spend" },
   { value: "audit", label: "Audit log" },
 ];
 
