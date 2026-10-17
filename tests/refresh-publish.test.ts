@@ -163,6 +163,8 @@ describe("publishRefreshToCms", () => {
     expect(wf.calls.filter((c) => c.method === "POST" && c.path === "/collections/col1/items")).toHaveLength(0);
     const flip = sql.queries.find((q) => q.text.startsWith("update content.content_items set status = 'published'"))!;
     expect(flip.values).toContain(cms.url);
+    // A refresh written back to the CMS counts toward the publishing pace.
+    expect(flip.text).toMatch(/pipeline_published_at = \$\d+/);
     expect(sql.queries.some((q) => q.text.startsWith("update content.cms_items set title"))).toBe(true);
     expect(sql.queries.some((q) => q.text.startsWith("insert into content.external_publications"))).toBe(true);
     expect(sql.queries.some((q) => q.text.startsWith("insert into content.published_pages"))).toBe(false);

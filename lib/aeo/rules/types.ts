@@ -17,6 +17,8 @@ export interface PageInput {
   headers?: Headers;
   /** Hint from the brief: comparative intent requires a table. */
   intent?: "comparative" | "informational" | "howto" | "unknown";
+  /** Hint from the brief: false when nothing shows buyers ask separate questions, so no FAQ is expected (faq_block does not apply). */
+  faqExpected?: boolean;
   now?: Date;
 }
 

@@ -131,7 +131,9 @@ describe("publishVersion", () => {
     expect(upsert!.text).toContain("status = case when $11::boolean or published_pages.content_item_id is distinct from excluded.content_item_id then 'live' else published_pages.status end");
     expect(upsert!.values.slice(10)).toEqual([false, false, false]);
     expect(flip!.text).toMatch(/^update content\.content_items set status = 'published'/);
-    expect(flip!.values).toEqual(["SSO vs SCIM", "ver-1", "https://acme.com/resources/sso-vs-scim", when, when, when, "item-1"]);
+    // A pipeline publish is new work for the publishing pace; a restore (rollback) is not.
+    expect(flip!.text).toContain("pipeline_published_at = case when $6::boolean then pipeline_published_at else $7 end");
+    expect(flip!.values).toEqual(["SSO vs SCIM", "ver-1", "https://acme.com/resources/sso-vs-scim", when, when, false, when, when, "item-1"]);
   });
 
   it("reports a page that stays taken down, and one a restore put back live", async () => {

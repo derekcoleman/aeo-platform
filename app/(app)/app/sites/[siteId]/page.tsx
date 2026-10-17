@@ -23,6 +23,8 @@ import { crawlSummary } from "@/lib/analytics/crawl";
 import { CrawlersPanel } from "@/components/app/crawlers-panel";
 import { BusinessProfileCard } from "@/components/app/business-profile";
 import { DeleteSiteDialog } from "@/components/app/delete-site-dialog";
+import { DismissOpportunity } from "@/components/app/opportunity-forms";
+import { explainEV0, PERSON_DISMISS_REASONS } from "@/lib/pipeline/opportunities";
 import { canEdit } from "@/lib/auth/session";
 import { listTopics } from "@/lib/strategy/topics";
 
@@ -242,25 +244,26 @@ export default async function SitePage({ params, searchParams }: { params: Promi
           <Card>
             <CardHeader>
               <CardTitle>Opportunity queue</CardTitle>
-              <CardDescription>Citation gaps, buyer questions and signals, scored so the number is arguable. Start one to run it through brief → draft → QA → approval → publish.</CardDescription>
+              <CardDescription>Citation gaps, buyer questions, signals and refreshes, ranked on expected value: demand × intent × how likely the gap is to close × the topic&apos;s priority × fit with the site, divided by the work. Hover a score for its factors. Start one to run it through brief → draft → QA → approval → publish.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
               <div><ActionButton size="sm" variant="outline" action={scanOpportunitiesAction.bind(null, siteId)} done="Scan queued">Rescan now</ActionButton></div>
               {opportunities.length === 0 ? <p className="text-muted-foreground text-sm">Nothing queued. Connect Search Console or mine a question graph to fill this.</p> : (
                 <Table>
-                  <TableHeader><TableRow><TableHead>Score</TableHead><TableHead>Opportunity</TableHead><TableHead>Source</TableHead><TableHead>Status</TableHead><TableHead></TableHead></TableRow></TableHeader>
+                  <TableHeader><TableRow><TableHead>Score</TableHead><TableHead>Opportunity</TableHead><TableHead>Source</TableHead><TableHead>Action</TableHead><TableHead>Status</TableHead><TableHead></TableHead></TableRow></TableHeader>
                   <TableBody>
                     {opportunities.map((o) => (
                       <TableRow key={o.id}>
-                        <TableCell className="font-mono">{o.score.toFixed(0)}</TableCell>
+                        <TableCell className="font-mono" title={explainEV0(o.score_breakdown) ?? "Scored before expected value; the next scan re-scores it"}>{o.score.toFixed(o.score < 10 ? 1 : 0)}</TableCell>
                         <TableCell className="max-w-md"><p className="truncate font-medium">{o.title}</p><p className="text-muted-foreground truncate text-xs">{o.target_query}</p></TableCell>
                         <TableCell><Badge variant="outline">{o.source}</Badge></TableCell>
+                        <TableCell><Badge variant={o.action_type === "new_page" ? "secondary" : "outline"}>{o.action_type.replace("_", " ")}</Badge></TableCell>
                         <TableCell>{o.status}</TableCell>
                         <TableCell className="text-right">
                           {o.status === "open" ? (
                             <span className="inline-flex gap-2">
                               <ActionButton size="sm" action={startPipelineAction.bind(null, o.id, undefined)} done="Started">Draft it</ActionButton>
-                              <ActionButton size="sm" variant="ghost" action={dismissOpportunityAction.bind(null, o.id)} done="Dismissed">Dismiss</ActionButton>
+                              <DismissOpportunity action={dismissOpportunityAction.bind(null, o.id)} reasons={PERSON_DISMISS_REASONS} />
                             </span>
                           ) : null}
                         </TableCell>

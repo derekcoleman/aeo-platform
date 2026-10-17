@@ -1,6 +1,6 @@
 import { NonRetriableError } from "inngest";
 import { connectorContext } from "@/lib/connectors";
-import { holdWhilePaused, isHeld, publishGuard } from "@/lib/pipeline/guard";
+import { heldFor, holdWhilePaused, isHeld, publishGuard } from "@/lib/pipeline/guard";
 import { loadPublishTarget, pushItemEverywhere, pushItemToTarget } from "@/lib/publishing/targets";
 import { contentPublished, inngest, publishingPushRequested } from "./client";
 
@@ -22,7 +22,7 @@ export const publishingOnPublished = inngest.createFunction(
     const { contentItemId, siteId } = event.data;
     const results = await holdWhilePaused(step, (n) => step.run(n === 0 ? "push-all" : `push-all:${n}`, async () => {
       const verdict = await publishGuard(siteId);
-      return verdict.ok ? pushItemEverywhere(contentItemId, siteId, connectorContext(), { onlyAuto: true }) : { held: verdict.reason };
+      return verdict.ok ? pushItemEverywhere(contentItemId, siteId, connectorContext(), { onlyAuto: true }) : heldFor(verdict);
     }));
     if (isHeld(results)) throw paused(results.held);
     return { pushed: results.filter((r) => r.result.ok).length, results: results.map((r) => ({ targetId: r.targetId, ok: r.result.ok, skipped: r.result.skipped ?? null, error: r.result.error ?? null })) };
@@ -36,7 +36,7 @@ export const publishingPush = inngest.createFunction(
     if (targetId) {
       const result = await holdWhilePaused(step, (n) => step.run(n === 0 ? "push-one" : `push-one:${n}`, async () => {
         const verdict = await publishGuard(siteId);
-        if (!verdict.ok) return { held: verdict.reason };
+        if (!verdict.ok) return heldFor(verdict);
         const target = await loadPublishTarget(targetId);
         if (!target || target.site_id !== siteId) return { ok: false, error: "target not found for site" };
         return pushItemToTarget(contentItemId, target, connectorContext(), { force: !!force });
@@ -46,7 +46,7 @@ export const publishingPush = inngest.createFunction(
     }
     const results = await holdWhilePaused(step, (n) => step.run(n === 0 ? "push-all" : `push-all:${n}`, async () => {
       const verdict = await publishGuard(siteId);
-      return verdict.ok ? pushItemEverywhere(contentItemId, siteId, connectorContext(), { force: !!force }) : { held: verdict.reason };
+      return verdict.ok ? pushItemEverywhere(contentItemId, siteId, connectorContext(), { force: !!force }) : heldFor(verdict);
     }));
     if (isHeld(results)) throw paused(results.held);
     return { results: results.map((r) => ({ targetId: r.targetId, ...r.result })) };

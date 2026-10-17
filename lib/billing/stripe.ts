@@ -22,7 +22,7 @@ export interface PlanSpec {
 export const PLANS: readonly PlanSpec[] = [
   { key: "starter", name: "Visibility", monthlyUsd: 149, blurb: "Self-serve. Know where you stand in AI answers.", includes: ["AI Overview citation tracking (50 questions)", "Crawler telemetry and live-fetch alerts", "Monthly readiness audit", "GSC and GA4 attribution"], priceEnv: "STRIPE_PRICE_STARTER" },
   { key: "pro", name: "Visibility Pro", monthlyUsd: 299, blurb: "Self-serve, more questions, weekly cadence.", includes: ["250 tracked questions, weekly snapshots", "Competitor citation gap queue", "Brand brain and manifesto", "Everything in Visibility"], priceEnv: "STRIPE_PRICE_PRO" },
-  { key: "managed", name: "Managed growth", monthlyUsd: 3000, blurb: "We publish on your domain and prove what moved.", includes: ["3–4 grounded articles a week on your domain", "Reverse-proxy install and health monitoring", "Brief approvals in Slack", "Closed-loop attribution per asset"], priceEnv: "STRIPE_PRICE_MANAGED" },
+  { key: "managed", name: "Managed growth", monthlyUsd: 3000, blurb: "We publish on your domain and prove what moved.", includes: ["Up to 3–4 grounded articles a week once your site's indexing is proven", "Reverse-proxy install and health monitoring", "Brief approvals in Slack", "Closed-loop attribution per asset"], priceEnv: "STRIPE_PRICE_MANAGED" },
 ];
 
 export function planSpec(key: string): PlanSpec | undefined {

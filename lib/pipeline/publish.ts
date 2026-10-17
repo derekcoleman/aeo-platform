@@ -164,7 +164,9 @@ export async function publishVersion(
       update content.content_items set
         status = 'published', title = ${input.page.head.title ?? null}, current_version_id = ${input.versionId},
         canonical_url = ${input.page.canonicalUrl}, published_at = ${now},
-        first_published_at = coalesce(first_published_at, ${now}), updated_at = ${now}
+        first_published_at = coalesce(first_published_at, ${now}),
+        -- A restore puts back what was there: not new work for the publishing pace.
+        pipeline_published_at = case when ${restore}::boolean then pipeline_published_at else ${now} end, updated_at = ${now}
       where id = ${input.contentItemId}`;
     return { status: after?.status ?? "live", statusBefore: before?.status ?? null };
   })) as { status: PageStatus; statusBefore: PageStatus | null };

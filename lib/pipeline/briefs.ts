@@ -7,6 +7,7 @@ import { appDb } from "@/lib/db/app";
 import { loadExistingContent, type ExistingContent } from "@/lib/refresh/publish";
 import { structuralTargetBlock as structuralTargetBlock_, structuralTargetFor } from "@/lib/strategy/competitors";
 import { runJsonTask, type LlmCallScope, type TaskBudget } from "./model";
+import { refreshesExistingPage, type ActionType } from "./opportunities";
 import { briefSpecSchema, type BriefFact, type BriefSpec, type ModelRun } from "./types";
 
 /**
@@ -55,6 +56,15 @@ export interface BriefContext {
   structuralTarget?: Record<string, unknown> | null;
   /** For a refresh: the article as it stands today, so the brief improves it rather than starting over. */
   existingContent?: ExistingContent | null;
+  /** The work: a refresh, or a statistics update that leaves a winning page's structure and wording alone. */
+  actionType?: ActionType | null;
+  /**
+   * Whether the article may carry an FAQ: the question has a People Also Ask
+   * answer, comes from a PAA box or has PAA siblings, or the page being
+   * refreshed already has an FAQ. Without that evidence an FAQ section (and
+   * its FAQPage markup) is padding. Absent means allowed.
+   */
+  allowFaq?: boolean;
 }
 
 const FORMAT_GUIDE: Record<NonNullable<BriefContext["format"]>, string> = {
@@ -113,19 +123,27 @@ export function briefPrompt(ctx: BriefContext): string {
     parts.push(`Verified brand facts (key → fact; only public ones may be cited in the article):\n${ctx.brain.facts.map((f) => `- ${f.key} [${f.type}, ${f.visibility}] ${f.text}`).join("\n")}`);
   }
   if (ctx.brain?.contextBlock) parts.push(ctx.brain.contextBlock);
-  if (ctx.existingContent) parts.push(existingContentBlock(ctx.existingContent));
+  if (ctx.allowFaq === false) parts.push("FAQ: none. Nothing shows buyers ask these as separate questions, so return an empty faq list and put every question in the outline.");
+  if (ctx.existingContent) parts.push(existingContentBlock(ctx.existingContent, ctx.actionType ?? null));
   if (ctx.previous) parts.push(`Previous brief (revise it, do not start over):\n${JSON.stringify(ctx.previous)}`);
   if (ctx.note) parts.push(`Reviewer note — this takes priority over everything above:\n${ctx.note}`);
   parts.push(`Return JSON with exactly this shape:\n${JSON.stringify(schema, null, 2)}`);
   return parts.join("\n\n");
 }
 
+/** What a statistics update may change on a page that is winning: figures and dates, nothing else. */
+export const UPDATE_STATS_RULES =
+  "Update rules: this page is cited and holding its traffic, so it is NOT rewritten. Keep the title, the head question, every heading, the order of sections and the wording; change only figures, dates and references that are out of date, each new figure with a provided source (or remove the figure). Add no sections and remove none.";
+
 /** The prompt block for a refresh: what exists, why it was picked, and the rules a refresh follows. */
-export function existingContentBlock(e: ExistingContent): string {
+export function existingContentBlock(e: ExistingContent, actionType: ActionType | null = null): string {
+  const statsOnly = actionType === "update_stats";
   return [
-    `THIS IS A REFRESH of an article that is already published${e.url ? ` at ${e.url}` : ""}${e.lastUpdated ? ` (last updated ${e.lastUpdated})` : ""}, ${e.wordCount} words.`,
+    `THIS IS A ${statsOnly ? "FIGURES-AND-DATES UPDATE" : "REFRESH"} of an article that is already published${e.url ? ` at ${e.url}` : ""}${e.lastUpdated ? ` (last updated ${e.lastUpdated})` : ""}, ${e.wordCount} words.`,
     e.reasons.length ? `Why it was selected for a refresh:\n${e.reasons.map((r) => `- ${r}`).join("\n")}` : "",
-    "Refresh rules: keep the same head question and URL; keep the sections that already answer buyer questions well; replace stale figures with sourced current ones (or remove them); add the questions buyers now ask that it does not cover; tighten the opening so the first paragraph is the quotable answer. The title may be improved but must stay on the same topic.",
+    statsOnly
+      ? UPDATE_STATS_RULES
+      : "Refresh rules: keep the same head question and URL; keep the sections that already answer buyer questions well; replace stale figures with sourced current ones (or remove them); add the questions buyers now ask that it does not cover; tighten the opening so the first paragraph is the quotable answer. The title may be improved but must stay on the same topic.",
     `Current title: ${e.title}`,
     e.description ? `Current summary: ${e.description}` : "",
     `Current article (Markdown):\n${e.bodyMd}`,
@@ -144,7 +162,9 @@ export async function generateBrief(
 ): Promise<{ spec: BriefSpec; run: ModelRun }> {
   const { value, run } = await runJsonTask("pipeline.brief", model, { system: briefSystemPrompt(), prompt: briefPrompt(ctx), promptVersion: BRIEF_PROMPT_VERSION, ...budget }, briefSpecSchema, scope, sql);
   const spec = materializeFacts(value, ctx.brain ?? null);
-  return { spec: { ...spec, format: ctx.format ?? spec.format ?? null, structuralTarget: ctx.structuralTarget ?? null }, run };
+  // Code, not the model, decides whether there is an FAQ: without the evidence it is dropped whatever came back.
+  const allowFaq = ctx.allowFaq !== false;
+  return { spec: { ...spec, faq: allowFaq ? spec.faq : [], allowFaq, format: ctx.format ?? spec.format ?? null, structuralTarget: ctx.structuralTarget ?? null }, run };
 }
 
 export const MAX_BRIEF_FACTS = 12;
@@ -180,7 +200,7 @@ export async function loadBriefBrain(scope: { orgId: string; siteId: string }, q
 }
 
 export async function loadBriefContext(
-  opportunity: { org_id: string; site_id: string; question_id: string | null; title: string; target_query: string; source: string; evidence: Record<string, unknown>; topic_id?: string | null; format?: BriefContext["format"]; content_item_id?: string | null },
+  opportunity: { org_id: string; site_id: string; question_id: string | null; title: string; target_query: string; source: string; evidence: Record<string, unknown>; topic_id?: string | null; format?: BriefContext["format"]; content_item_id?: string | null; action_type?: ActionType | null },
   sql: postgres.Sql = appDb(),
 ): Promise<BriefContext> {
   const [site] = await sql<{ canonical_domain: string; path_prefix: string; organization: { name?: string } | null }[]>`
@@ -189,13 +209,18 @@ export async function loadBriefContext(
     where s.id = ${opportunity.site_id}`;
   if (!site) throw new Error(`site ${opportunity.site_id} not found`);
   const related = opportunity.question_id
-    ? await sql<{ text: string }[]>`
-        select text from measure.questions
+    ? await sql<{ text: string; source: string }[]>`
+        select text, source::text as source from measure.questions
         where site_id = ${opportunity.site_id}
           and (parent_question_id = ${opportunity.question_id}
                or cluster_id = (select cluster_id from measure.questions where id = ${opportunity.question_id} and site_id = ${opportunity.site_id} and cluster_id is not null))
           and id <> ${opportunity.question_id}
         order by demand_score desc limit 12`
+    : [];
+  const [head] = opportunity.question_id
+    ? await sql<{ source: string; has_paa_answer: boolean }[]>`
+        select source::text as source, (paa_answer is not null) as has_paa_answer from measure.questions
+        where id = ${opportunity.question_id} and site_id = ${opportunity.site_id}`
     : [];
   const pages = await sql<{ url: string; title: string }[]>`
     select coalesce(i.canonical_url, p.path) as url, coalesce(i.title, p.head->>'title', p.path) as title
@@ -218,19 +243,33 @@ export async function loadBriefContext(
   } catch (e) {
     console.warn(`[pipeline] structural target unavailable for site ${opportunity.site_id}: ${e instanceof Error ? e.message : String(e)}`);
   }
-  const existingContent = opportunity.source === "refresh" ? await loadExistingContent(opportunity, sql) : null;
+  const existingContent = refreshesExistingPage(opportunity) ? await loadExistingContent(opportunity, sql) : null;
   return {
     topic: topic ?? null,
     format,
     structuralTarget,
     structuralTargetBlock,
     existingContent,
+    actionType: opportunity.action_type ?? null,
+    allowFaq: faqAllowed({ head: head ?? null, related, existingFaq: existingContent?.faq.length ?? 0 }),
     opportunity: { title: opportunity.title, targetQuery: opportunity.target_query, source: opportunity.source, evidence: opportunity.evidence },
     site: { domain: site.canonical_domain, pathPrefix: site.path_prefix, organizationName: site.organization?.name ?? site.canonical_domain },
     relatedQuestions: related.map((r) => r.text),
     existingPages: pages,
     brain,
   };
+}
+
+/**
+ * FAQ only with evidence: Google showed a People Also Ask answer for the
+ * question, the question came out of a PAA box, or PAA-sourced questions sit
+ * next to it in its family or cluster. A refresh keeps the FAQ the page
+ * already has.
+ */
+export function faqAllowed(e: { head: { source: string; has_paa_answer: boolean } | null; related: { source: string }[]; existingFaq: number }): boolean {
+  if (e.existingFaq > 0) return true;
+  if (e.head?.has_paa_answer || e.head?.source === "paa") return true;
+  return e.related.some((r) => r.source === "paa");
 }
 
 export interface BriefRow {

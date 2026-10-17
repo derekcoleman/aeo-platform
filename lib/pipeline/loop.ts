@@ -17,6 +17,8 @@ export interface CitationStatus {
   /** We hold at least one AI Overview citation in the latest snapshot. */
   owned: boolean;
   competitorDomains: string[];
+  /** How many named competitors (source role competitor) those domains are; a rival on two hosts is one. */
+  namedCompetitors: number;
 }
 
 /**
@@ -32,8 +34,8 @@ export async function citationStatus(questionId: string, siteId: string, sql: po
     where question_id = ${questionId} and site_id = ${siteId}
     order by fetched_at desc limit 1`;
   if (!snap) return null;
-  const cites = await sql<{ domain: string; is_owned: boolean }[]>`
-    select domain, is_owned from measure.serp_citations
+  const cites = await sql<{ domain: string; is_owned: boolean; source_role: string | null; entity_id: string | null }[]>`
+    select domain, is_owned, source_role::text as source_role, entity_id from measure.serp_citations
     where serp_snapshot_id = ${snap.id} and surface = 'ai_overview' order by position`;
   return {
     snapshotId: snap.id,
@@ -41,6 +43,7 @@ export async function citationStatus(questionId: string, siteId: string, sql: po
     aioTriggered: snap.aio_triggered,
     owned: cites.some((c) => c.is_owned),
     competitorDomains: [...new Set(cites.filter((c) => !c.is_owned).map((c) => c.domain))],
+    namedCompetitors: new Set(cites.filter((c) => !c.is_owned && c.source_role === "competitor").map((c) => c.entity_id ?? c.domain)).size,
   };
 }
 

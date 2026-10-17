@@ -2,6 +2,7 @@ import type postgres from "postgres";
 import type { TextModel } from "@/lib/ai/model";
 import { appDb } from "@/lib/db/app";
 import { runJsonTask, type LlmCallScope, type TaskBudget } from "./model";
+import type { ActionType } from "./opportunities";
 import { draftOutputSchema, type BriefSpec, type DraftOutput, type ModelRun } from "./types";
 
 /**
@@ -24,7 +25,9 @@ export interface DraftContext {
   note?: string | null;
   previous?: DraftOutput | null;
   /** Set when `previous` is the live article being refreshed rather than an earlier attempt. */
-  refresh?: { url: string | null; lastUpdated: string | null; reasons: string[] } | null;
+  refresh?: { url: string | null; lastUpdated: string | null; reasons: string[]; actionType?: ActionType | null } | null;
+  /** False when the brief found no evidence for an FAQ (BriefSpec.allowFaq): any FAQ the model returns is dropped. */
+  allowFaq?: boolean;
 }
 
 export function draftSystemPrompt(): string {
@@ -51,7 +54,7 @@ export function draftPrompt(ctx: DraftContext): string {
     `Company: ${ctx.site.organizationName} (${ctx.site.domain}). Author byline: ${ctx.author.name}${ctx.author.jobTitle ? `, ${ctx.author.jobTitle}` : ""}.`,
     `Title: ${b.title}\nMeta description: ${b.description}\nIntent: ${b.intent}\nHead question: ${b.headQuestion}\nTarget answer (open with this): ${b.targetAnswer}`,
     `Outline:\n${b.outline.map((s, i) => `${i + 1}. ${s.heading}${s.goal ? ` — ${s.goal}` : ""}${s.sourceKeys.length ? ` [sources: ${s.sourceKeys.join(", ")}]` : ""}`).join("\n")}`,
-    b.faq.length ? `FAQ questions to answer (return them in the faq array, not in bodyMd):\n${b.faq.map((q) => `- ${q}`).join("\n")}` : "FAQ: none.",
+    b.faq.length && ctx.allowFaq !== false ? `FAQ questions to answer (return them in the faq array, not in bodyMd):\n${b.faq.map((q) => `- ${q}`).join("\n")}` : "FAQ: none. Return an empty faq array and no FAQ section.",
     b.entities.length ? `Entities to cover by name: ${b.entities.join(", ")}` : "",
     b.internalLinks.length ? `Internal links (use each once):\n${b.internalLinks.map((l) => `- [${l.anchor}](${l.url})`).join("\n")}` : "Internal links: none.",
     ctx.manifest ? `Brand manifesto (voice, terminology, banned phrases, competitor stance — all binding):\n${ctx.manifest}` : "",
@@ -65,11 +68,14 @@ export function draftPrompt(ctx: DraftContext): string {
       : "Verified brand facts: NONE provided. Therefore make no claims about what the company supports, ships, integrates with or has proven; write about the topic, not the company.",
   ].filter(Boolean);
   if (ctx.refresh) {
+    const statsOnly = ctx.refresh.actionType === "update_stats";
     parts.push(
       [
-        `This is a REFRESH of an article that is already live${ctx.refresh.url ? ` at ${ctx.refresh.url}` : ""}${ctx.refresh.lastUpdated ? ` (last updated ${ctx.refresh.lastUpdated})` : ""}.`,
+        `This is a ${statsOnly ? "FIGURES-AND-DATES UPDATE" : "REFRESH"} of an article that is already live${ctx.refresh.url ? ` at ${ctx.refresh.url}` : ""}${ctx.refresh.lastUpdated ? ` (last updated ${ctx.refresh.lastUpdated})` : ""}.`,
         ctx.refresh.reasons.length ? `It was selected because:\n${ctx.refresh.reasons.map((r) => `- ${r}`).join("\n")}` : "",
-        "Keep what already works (structure, sections that answer real questions, the voice); rewrite what is stale or thin; every number must now carry a {{src:key}} marker to a provided source, so drop figures no source supports rather than keeping them. The result replaces the live article under the same URL.",
+        statsOnly
+          ? "It is cited and holding its traffic, so it is not rewritten: keep the title, every heading, the order of sections and the wording; change only figures, dates and references that are out of date, each with a {{src:key}} marker to a provided source, and drop a figure no source supports. The result replaces the live article under the same URL."
+          : "Keep what already works (structure, sections that answer real questions, the voice); rewrite what is stale or thin; every number must now carry a {{src:key}} marker to a provided source, so drop figures no source supports rather than keeping them. The result replaces the live article under the same URL.",
       ]
         .filter(Boolean)
         .join("\n"),
@@ -94,7 +100,8 @@ export async function generateDraft(
   budget: TaskBudget = {},
 ): Promise<{ draft: DraftOutput; run: ModelRun }> {
   const { value, run } = await runJsonTask("pipeline.draft", model, { system: draftSystemPrompt(), prompt: draftPrompt(ctx), promptVersion: DRAFT_PROMPT_VERSION, ...budget }, draftOutputSchema, scope, sql);
-  return { draft: value, run };
+  // No FAQ (and so no FAQPage markup) without the evidence for one, whatever the model returned.
+  return { draft: ctx.allowFaq === false ? { ...value, faq: [] } : value, run };
 }
 
 /** kebab-case slug from a title; the content_items check constraint enforces the same shape. */

@@ -188,8 +188,11 @@ describe("publishGuard", () => {
 describe("holdWhilePaused", () => {
   function fakeStep() {
     const sleeps: { id: string; duration: string }[] = [];
-    const step = { async sleep(id: string, duration: string) { sleeps.push({ id, duration }); } };
-    return { step: step as unknown as Pick<GateStep, "sleep">, sleeps };
+    const step = {
+      async sleep(id: string, duration: string) { sleeps.push({ id, duration }); },
+      async sleepUntil(id: string, until: Date) { sleeps.push({ id, duration: `until ${until.toISOString()}` }); },
+    };
+    return { step: step as unknown as Pick<GateStep, "sleep" | "sleepUntil">, sleeps };
   }
 
   it("publishes at once when nothing holds, under the caller's original step", async () => {

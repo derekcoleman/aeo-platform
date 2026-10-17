@@ -258,3 +258,35 @@ export async function loadFactStatuses(orgId: string, ids: string[], sql: postgr
     from context.brand_facts where org_id = ${orgId} and id = any(${sql.array(ids)}::uuid[])`;
   return rows.map((r) => ({ id: r.id, status: r.status, visibility: r.visibility, effective: isEffective(r, asOf) }));
 }
+
+/** Below this length an internal statement is too generic to call a leak ("SOC 2 status" is any security article). */
+export const INTERNAL_STATEMENT_MIN_CHARS = 24;
+
+/**
+ * For the QA safety gate: what must not appear in a published article. The
+ * org's customers that no public verified fact names (a customer in a public
+ * case study may be named; one known only from a sales call may not), and
+ * the org's internal verified facts, as written and as quoted from their
+ * source, when long enough to be specific.
+ */
+export async function loadInternalTerms(orgId: string, sql: postgres.Sql = appDb()): Promise<string[]> {
+  const [customers, facts] = await Promise.all([
+    sql<{ name: string; aliases: string[] }[]>`
+      select e.name, e.aliases from context.entities e
+      where e.org_id = ${orgId} and e.type = 'customer'
+        and not exists (
+          select 1 from context.brand_facts f
+          where f.org_id = e.org_id and f.status = 'verified' and f.visibility = 'public'
+            and (f.subject_entity_id = e.id or strpos(lower(f.subject_text || ' ' || f.object_text), lower(e.name)) > 0)
+        )`,
+    sql<Pick<FactRow, "subject_text" | "predicate" | "object_text" | "effective_from" | "effective_to" | "source_quote">[]>`
+      select subject_text, predicate, object_text, effective_from::text as effective_from, effective_to::text as effective_to, source_quote
+      from context.brand_facts where org_id = ${orgId} and status = 'verified' and visibility = 'internal'
+      order by updated_at desc limit 500`,
+  ]);
+  const terms = customers.flatMap((c) => [c.name, ...c.aliases]);
+  for (const f of facts) {
+    for (const t of [`${f.subject_text} ${f.predicate} ${f.object_text}`, f.source_quote ?? ""]) if (t.trim().length >= INTERNAL_STATEMENT_MIN_CHARS) terms.push(t.trim());
+  }
+  return [...new Set(terms.map((t) => t.trim()).filter(Boolean))];
+}

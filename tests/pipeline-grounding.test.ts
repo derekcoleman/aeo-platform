@@ -75,7 +75,7 @@ describe("groundingGate", () => {
     const grounding = report.gates.find((g) => g.gate === "grounding")!;
     expect(grounding.passed).toBe(true);
     expect(grounding.detail).toMatchObject({ offeredPublic: 0, required: 0 });
-    expect(report.gates.map((g) => g.gate)).toEqual(["structure", "sources", "grounding", "mechanics", "slop"]);
+    expect(report.gates.map((g) => g.gate)).toEqual(["structure", "sources", "grounding", "mechanics", "slop", "safety"]);
     expect(report.citedFacts).toEqual([]);
   });
 

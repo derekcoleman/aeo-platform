@@ -106,7 +106,7 @@ export default async function ApprovalPage({ params }: { params: Promise<{ appro
                 {qa.length === 0 ? <p className="text-muted-foreground">No gate results recorded.</p> : qa.map((g) => (
                   <div key={g.gate} className="flex items-start justify-between gap-2">
                     <span className="font-mono text-xs">{g.gate}</span>
-                    <Badge variant={g.passed ? "success" : "destructive"}>{g.passed ? "pass" : "fail"}</Badge>
+                    {g.passed ? <Badge variant="success">pass</Badge> : g.detail.blocking === false ? <Badge variant="warning" title="Does not fail the draft: it is why a person reviews it.">review</Badge> : <Badge variant="destructive">fail</Badge>}
                   </div>
                 ))}
                 {version.structure_score ? <p className="text-muted-foreground text-xs">Structure score: {Object.entries(version.structure_score).filter(([, v]) => typeof v === "number").map(([k, v]) => `${k} ${v}`).join(" · ") || "recorded"}</p> : null}

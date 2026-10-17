@@ -187,7 +187,8 @@ export async function publishRefreshToCms(input: { contentItemId: string; versio
     await tx`
       update content.content_items set
         status = 'published', title = ${version.title}, current_version_id = ${input.versionId},
-        canonical_url = ${item.url}, published_at = ${now}, first_published_at = coalesce(first_published_at, ${now}), updated_at = ${now}
+        canonical_url = ${item.url}, published_at = ${now}, first_published_at = coalesce(first_published_at, ${now}),
+        pipeline_published_at = ${now}, updated_at = ${now}
       where id = ${input.contentItemId}`;
     await tx`
       update content.cms_items set

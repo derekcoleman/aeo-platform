@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { composeQaDocument, composeVersion, qaDocumentFor } from "@/lib/pipeline/compose";
-import { mechanicsGate, runQaGates, safeSourceFetcher, sentenceLengthCv, slopGate, structureGate, structureMinFrom, unmarkedStatistics, verifySources, verifySourcesWith } from "@/lib/pipeline/qa";
+import { mechanicsGate, runQaGates, safeSourceFetcher, scopeGate, scopeKey, sectionHeadings, sentenceLengthCv, slopGate, structureGate, structureMinFrom, unmarkedStatistics, verifySources, verifySourcesWith } from "@/lib/pipeline/qa";
 import { author, brief, draft, gartnerSource, scimFact, site } from "./fixtures/pipeline";
 
 const NOW = new Date("2026-09-01T12:00:00Z");
@@ -63,8 +63,9 @@ describe("runQaGates", () => {
   it("passes a grounded draft whose only statistic is cited and verifiable", async () => {
     const fetchImpl = fakeFetch({ [gartnerSource.url]: `<p>${gartnerSource.quote}.</p>` });
     const report = await runQaGates(qaInput(), { fetchImpl, structureMin: 0 });
-    expect(report.gates.map((g) => [g.gate, g.passed])).toEqual([["structure", true], ["sources", true], ["grounding", true], ["mechanics", true], ["slop", true]]);
+    expect(report.gates.map((g) => [g.gate, g.passed])).toEqual([["structure", true], ["sources", true], ["grounding", true], ["mechanics", true], ["slop", true], ["safety", true]]);
     expect(report.passed).toBe(true);
+    expect(report.requiresHuman).toBe(false);
     expect(report.routeTo).toBeNull();
     expect(report.verifications).toEqual([expect.objectContaining({ key: "gartner-2026", verified: true })]);
     expect(report.structure.normalized).toBeGreaterThan(0);
@@ -229,6 +230,27 @@ describe("mechanicsGate / slopGate", () => {
     expect(report.feedback).toEqual(expect.arrayContaining([expect.stringMatching(/^Mechanics: the FAQ section appears 2 times/)]));
   });
 
+  it("without FAQ evidence neither scores nor asks for an FAQ, and fails one written into the body", async () => {
+    const noFaq = (body = draft.bodyMd) => {
+      const c = composeVersion({ draft: { ...draft, bodyMd: body, faq: [] }, brief, site, organization: { name: "Acme" }, author, slug: "sso-vs-scim", datePublished: NOW });
+      return { title: draft.title, bodyMd: c.bodyMd, bodyHtml: c.bodyHtml, sources: brief.sources, facts: [scimFact], intent: brief.intent, jsonLd: c.page.jsonLd, now: NOW };
+    };
+    // With an FAQ expected, a draft without one loses faq_block's points and is told to add one.
+    const expected = await runQaGates(noFaq(), { structureMin: 101 });
+    expect(expected.structure.findings.find((f) => f.key === "faq_block")).toMatchObject({ passed: false, notApplicable: false });
+    expect(expected.feedback).toEqual(expect.arrayContaining([expect.stringMatching(/^\[faq_block\] Add an FAQ section/)]));
+    // Without evidence: not scored, never asked for.
+    const report = await runQaGates({ ...noFaq(), allowFaq: false }, { structureMin: 101 });
+    expect(report.structure.findings.find((f) => f.key === "faq_block")).toMatchObject({ notApplicable: true, recommendation: undefined });
+    expect(report.feedback.some((f) => /faq/i.test(f))).toBe(false);
+    expect(report.structure.maxScore).toBe(expected.structure.maxScore - 6);
+    // An FAQ the model writes into the body anyway goes back.
+    const bodyFaq = `${draft.bodyMd}\n\n## Frequently asked questions\n\n### Is SCIM required?\n\nNo.\n\n### Does SCIM need SSO?\n\nUsually.\n\n### Is SCIM free?\n\nIt depends.`;
+    const r = mechanicsGate({ ...noFaq(bodyFaq), allowFaq: false });
+    expect(r.detail.problems).toEqual([expect.stringMatching(/^the body has an FAQ section, but this article has none/)]);
+    expect(mechanicsGate(noFaq(bodyFaq)).passed).toBe(true);
+  });
+
   it("flags banned phrases and uniform sentence length", () => {
     const uniform = Array.from({ length: 12 }, () => "This sentence has exactly seven words total.").join(" ");
     const r = slopGate({ title: "T", bodyMd: "", bodyHtml: `<p>Let's delve into it. ${uniform}</p>`, sources: [], intent: "unknown" });
@@ -240,5 +262,44 @@ describe("mechanicsGate / slopGate", () => {
   it("sentenceLengthCv measures variation", () => {
     expect(sentenceLengthCv("One two three. One two three.").cv).toBe(0);
     expect(sentenceLengthCv("Short one here. This one is a good deal longer than the first one was.").cv).toBeGreaterThan(0.4);
+  });
+});
+
+describe("scope gate (a figures-and-dates update)", () => {
+  // The live page as loadExistingContent hands it over: markers out, FAQ split off.
+  const live = { title: "SSO vs SCIM in 2025: what mid-market security teams need", bodyMd: draft.bodyMd.replace(/\{\{(?:src|fact):[^}]+\}\}/g, "").replace("62%", "58%") };
+  const updated = (body = draft.bodyMd, title = "SSO vs SCIM in 2026: what mid-market security teams need") => ({ ...qaInput(body), title, keep: live });
+
+  it("is off unless the work is a figures-and-dates update", () => {
+    expect(scopeGate(qaInput())).toBeNull();
+  });
+
+  it("passes a draft that kept the title, the headings in order and the length, numbers aside", () => {
+    expect(sectionHeadings(compose().bodyMd)).toEqual(["What does SSO actually do?", "What does SCIM add on top of SSO?", "Which should a mid-market team implement first?"]);
+    expect(scopeKey("What changed in **2026**? See [the report](https://x.test/r)")).toBe("what changed in # see the report");
+    expect(scopeGate(updated())).toMatchObject({ gate: "scope", passed: true, detail: { problems: [] } });
+  });
+
+  it("sends back a rewrite with the headings it must keep", async () => {
+    const body = draft.bodyMd.replace("## Which should a mid-market team implement first?", "## A brand new section\n\nWith new text.\n\n## Which should a mid-market team implement first?");
+    const gate = scopeGate(updated(body, "SCIM: the definitive guide"))!;
+    expect(gate.passed).toBe(false);
+    expect(gate.detail.problems).toEqual([
+      'the title changed: keep "SSO vs SCIM in 2025: what mid-market security teams need"',
+      "the headings changed: keep every heading of the live page, in its order, and add none",
+    ]);
+    const report = await runQaGates(updated(body, "SCIM: the definitive guide"), { structureMin: 0 });
+    expect(report.gates.map((g) => g.gate)).toContain("scope");
+    expect(report.passed).toBe(false);
+    expect(report.routeTo).toBe("draft");
+    expect(report.feedback[0]).toMatch(/^This is a figures-and-dates update of a live page that is winning, not a rewrite: the title changed/);
+    expect(report.feedback[1]).toBe('Keep these headings, in this order: "What does SSO actually do?", "What does SCIM add on top of SSO?", "Which should a mid-market team implement first?".');
+  });
+
+  it("holds the length within a quarter, and only the headings it saw when the live body was cut short", () => {
+    const padded = `${draft.bodyMd}\n\n${"More words that were not there before. ".repeat(40)}`;
+    expect(scopeGate(updated(padded))!.detail.problems).toEqual([expect.stringMatching(/^the length changed from \d+ to \d+ words/)]);
+    const cut = { ...updated(padded), keep: { ...live, bodyMd: live.bodyMd.split("## Which should")[0]!, truncated: true } };
+    expect(scopeGate(cut)).toMatchObject({ passed: true });
   });
 });

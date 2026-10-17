@@ -19,6 +19,7 @@ The foundation and the render/proxy vertical slice.
 | ✅ | Install config generation for all four proxy modes |
 | ✅ | Connectors page: every source listed connected or not; Google property and Slack channel setup; custom API / MCP sources (`docs/CONNECTORS.md`) |
 | ✅ | Content refresh: Webflow inventory × Search Console × citations → ranked, updated in place (`docs/REFRESH.md`) |
+| ✅ | One expected-value scorer for the whole queue; coverage guard, topical floor, publishing pace, QA safety gate |
 | ⬜ | Ops console, publish pipeline, brand brain, audit port |
 
 ## Architecture in one diagram
@@ -139,6 +140,55 @@ to the organisation's alerts channel and owners.
   the platform, one organisation or one project (`ops.autonomy_controls`).
   A held publish step waits an hour and asks again, for up to three days,
   then the run fails and says why.
+
+### What gets written, and how fast
+
+The queue and the pipeline's guards (migration 0025) keep the site to one
+page per question, on topic, at a pace Google does not read as scaled
+content.
+
+- **Ranking.** Every producer (citation-gap scan, "Write about this", the
+  post-publish loop, the refresh scan, the signal bridge) scores with
+  `scoreEV0` (`lib/pipeline/opportunities.ts`): demand (search volume, else
+  Search Console impressions, else the mined score as a cold start) ×
+  intent weight × the gap's prior × the topic's priority ÷ 5 × topical fit
+  ÷ the action's effort. The breakdown is stored next to the score and
+  shown on hover in the queue. Each opportunity carries its action
+  (`new_page`, `refresh`, `update_stats`…); a person dismisses with a
+  reason. Rows scored on the old formula are re-scored by the next scan.
+- **Coverage guard.** Before an automated new page is briefed
+  (`lib/pipeline/coverage.ts`), the site is checked for a page that already
+  answers it: its own result in the organic top 10 or the featured
+  snippet, a CMS post or article with the same title, or a page of its
+  website that says the same thing (embedding similarity ≥ 0.85). A page
+  we can edit turns the work into a refresh of it, under the refresh
+  lifecycle: not when other work on that page is queued or running, nor
+  within 45 days of its last change, and only a figures-and-dates update
+  for a protected winner. Any other page, a page someone took down
+  included, dismisses it (`auto_coverage`). Work that names none of the
+  site's topics, seeds, keywords or entities is dismissed too
+  (`auto_topical_floor`). A person's request passes both. Work turned away
+  by the floor comes back at the next scan once its question clears it
+  (added to a topic, say), and work turned away by the lifecycle after 45
+  days; the guard looks again when it runs. A run the guard
+  turned into a rewrite of an existing page always stops at the draft gate,
+  naming the page it will replace.
+- **Pace.** The pipeline publishes at most 1.5× a site's trailing weekly
+  cadence in any 7 days, at least 2 and at most 5
+  (`AEO_PUBLISH_VELOCITY_MAX` moves the ceiling); refreshes count, a
+  rollback does not (`content_items.pipeline_published_at`), and an article
+  published again is one page, not two. A run over it waits for a slot.
+- **FAQ only with evidence.** An article gets an FAQ section and FAQPage
+  markup only when Google shows People Also Ask for its question (or the
+  page being refreshed already has one). Without that evidence QA does not
+  score or ask for an FAQ, and sends back one written into the body.
+- **Safety.** QA also looks for email addresses, customers and internal
+  statements from the brand brain, deal figures, instructions aimed at a
+  model, zero-width characters and hidden text. A finding does not fail the
+  draft; it puts a person in front of it, even under auto-publish (the
+  Content page shows "safety review", not a failing gate). A
+  figures-and-dates update must keep the live page's title, headings, their
+  order and its length (QA's scope gate), or it goes back to the draft.
 
 ### Spend budgets
 

@@ -193,7 +193,7 @@ describe.skipIf(!DB_URL)("source roles against Postgres", () => {
     const gap = (await citationGaps(SITE, 10, sql)).find((g) => g.question_id === Q2)!;
     expect(gap).toMatchObject({ named_competitor_domains: [`blog.${RIVAL}`, RIVAL], named_competitors: 1 });
     const [o] = opportunitiesFromCitationGaps([gap]);
-    expect(o!.scoreBreakdown).toMatchObject({ citationGap: { value: 73 }, difficulty: { value: 38 } });
+    expect(o!.scoreBreakdown).toMatchObject({ formula: "ev0", components: { gap: { type: "aio_named_competitor", prior: 0.6 } } });
   });
 
   it("pages analysed on a forum or a review site leave the structural target, at once and for good", async () => {

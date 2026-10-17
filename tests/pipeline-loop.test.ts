@@ -22,14 +22,16 @@ describe("citationStatus", () => {
     const sql = fakeSql([
       [/from measure\.v_native_aio/, () => [{ id: "snap-9", fetched_at: fetched, aio_triggered: true }]],
       [/from measure\.serp_citations/, () => [
-        { domain: "okta.com", is_owned: false },
-        { domain: "acme.com", is_owned: true },
-        { domain: "okta.com", is_owned: false },
-        { domain: "microsoft.com", is_owned: false },
+        { domain: "okta.com", is_owned: false, source_role: "competitor", entity_id: "e-okta" },
+        { domain: "acme.com", is_owned: true, source_role: "owned", entity_id: null },
+        { domain: "okta.com", is_owned: false, source_role: "competitor", entity_id: "e-okta" },
+        { domain: "blog.okta.com", is_owned: false, source_role: "competitor", entity_id: "e-okta" },
+        { domain: "microsoft.com", is_owned: false, source_role: "unknown", entity_id: null },
       ]],
     ]);
     const status = await citationStatus("q-1", "site-1", sql);
-    expect(status).toEqual({ snapshotId: "snap-9", fetchedAt: fetched, aioTriggered: true, owned: true, competitorDomains: ["okta.com", "microsoft.com"] });
+    // Okta on two of its hosts is one named competitor; an unclassified domain is not one.
+    expect(status).toEqual({ snapshotId: "snap-9", fetchedAt: fetched, aioTriggered: true, owned: true, competitorDomains: ["okta.com", "blog.okta.com", "microsoft.com"], namedCompetitors: 1 });
     const cites = sql.queries[1]!;
     expect(cites.text).toContain("surface = 'ai_overview'");
     expect(cites.values).toEqual(["snap-9"]);

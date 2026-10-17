@@ -62,6 +62,7 @@ export async function refreshItemAction(siteId: string, cmsItemId: string, note?
   if (!conn || conn.status !== "active") return fail("The Webflow connection is not active.");
   const opp = await queueRefreshForItem(cmsItemId, sql);
   if (!opp) return fail("Could not open a refresh opportunity for this item.");
+  if (opp.status === "queued" || opp.status === "in_progress") return fail("Work on this post is already queued or running; refresh it again once that has finished.");
   if (opp.status !== "open") return fail(`A refresh is already ${opp.status} for this item.`);
   await markOpportunity(opp.id, "queued", sql);
   const jobError = await queueJob(contentPipelineRequested.create({ opportunityId: opp.id, siteId, orgId: site.org_id, note: note?.trim() || null }));

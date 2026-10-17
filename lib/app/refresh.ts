@@ -6,7 +6,9 @@ import { REFRESH_THRESHOLD, type RefreshScore, type RefreshSignals } from "@/lib
 /**
  * Read models for the Refresh page: the inventory with its scores and
  * signals, the refresh opportunity (if any) behind each row, and where the
- * data came from so every number can be labelled.
+ * data came from so every number can be labelled. Work in flight on a post
+ * shows whatever produced it (the refresh scan's in-flight test): a question
+ * the coverage guard sent to the post keeps its own source.
  */
 
 export interface RefreshItemRow {
@@ -29,7 +31,7 @@ export interface RefreshItemRow {
   content_status: string | null;
   refresh_score: number | null;
   refresh_breakdown: RefreshScore["breakdown"] | null;
-  refresh_signals: (RefreshSignals & { exclusion?: string | null }) | null;
+  refresh_signals: (RefreshSignals & { exclusion?: string | null; protected?: string | null }) | null;
   refresh_reasons: string[];
   scored_at: string | Date | null;
   last_refreshed_at: string | Date | null;
@@ -53,7 +55,9 @@ export async function listRefreshItems(siteId: string, limit = 500, sql: postgre
     left join content.content_items ci on ci.id = i.content_item_id
     left join lateral (
       select id, status from content.opportunities o
-      where o.site_id = i.site_id and o.source = 'refresh' and o.evidence->>'cmsItemId' = i.id::text
+      where o.site_id = i.site_id
+        and ((o.source = 'refresh' and o.evidence->>'cmsItemId' = i.id::text)
+             or (o.status in ('queued', 'in_progress') and (o.evidence->>'cmsItemId' = i.id::text or o.content_item_id = i.content_item_id)))
       order by (o.status in ('queued', 'in_progress')) desc, (o.status = 'open') desc, o.updated_at desc limit 1
     ) o on true
     where i.site_id = ${siteId}

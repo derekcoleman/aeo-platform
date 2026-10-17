@@ -11,7 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { listContentItems } from "@/lib/app/content";
 import { rollbackPageAction, setIndexingPausedAction, setPageStatusAction } from "@/lib/app/takedown-actions";
-import { publishGuard } from "@/lib/pipeline/guard";
+import { publishGuard, publishVelocity, VELOCITY_WINDOW_DAYS } from "@/lib/pipeline/guard";
 import { listExternalPublications } from "@/lib/publishing/targets";
 import { loadSite } from "@/lib/app/store";
 import { canEdit, canManage, requireUser, roleIn } from "@/lib/auth/session";
@@ -39,13 +39,16 @@ export default async function ContentPage({ params }: { params: Promise<{ siteId
   if (!site || !roleIn(user, site.org_id)) notFound();
   const edit = canEdit(user, site.org_id);
   const manage = canManage(user, site.org_id);
-  const [items, publications, guard] = await Promise.all([listContentItems(siteId), listExternalPublications(siteId), publishGuard(siteId)]);
+  const [items, publications, guard, pace] = await Promise.all([listContentItems(siteId), listExternalPublications(siteId), publishGuard(siteId), publishVelocity(siteId)]);
   const pushed = new Map<string, typeof publications>();
   for (const p of publications) pushed.set(p.content_item_id, [...(pushed.get(p.content_item_id) ?? []), p]);
   return (
     <AppShell user={user} site={site} page="content">
       <PageHeader title="Content" eyebrow={site.name} description="Every piece the pipeline has produced, its latest version, QA state and where it is published.">
         <Badge variant="secondary">{items.length} items</Badge>
+        <Badge variant={pace.published7d >= pace.cap ? "warning" : "outline"} title={`At most ${pace.cap} pages (new or refreshed) in any ${VELOCITY_WINDOW_DAYS} days: 1.5× this project's weekly pace over the last 90 days, at least 2, at most 5 unless staff set another ceiling. A run over it waits for a slot.`}>
+          {pace.published7d}/{pace.cap} published this week
+        </Badge>
         {manage ? (
           site.indexing_paused
             ? <ActionButton size="sm" variant="outline" action={setIndexingPausedAction.bind(null, siteId, false)} done="resumed">Resume indexing</ActionButton>
@@ -70,7 +73,7 @@ export default async function ContentPage({ params }: { params: Promise<{ siteId
                     <TableCell className="max-w-md"><p className="truncate font-medium">{i.title ?? i.slug}</p><p className="text-muted-foreground font-mono text-xs">{i.slug}</p></TableCell>
                     <TableCell><Badge variant={STATUS_VARIANT[i.status] ?? "secondary"}>{i.status}</Badge></TableCell>
                     <TableCell>{i.version_no ? `v${i.version_no} · ${i.word_count ?? 0} words` : "—"}</TableCell>
-                    <TableCell>{i.current_version_id ? (i.qa_failed ? <Badge variant="destructive">{i.qa_failed} failing</Badge> : <Badge variant="success">passed</Badge>) : "—"}</TableCell>
+                    <TableCell>{i.current_version_id ? (i.qa_failed ? <Badge variant="destructive">{i.qa_failed} failing</Badge> : i.qa_review ? <Badge variant="warning" title="Passed. The safety check found something a person looks at before it publishes.">passed · safety review</Badge> : <Badge variant="success">passed</Badge>) : "—"}</TableCell>
                     <TableCell>{i.published_path ? <a className="underline-offset-2 hover:underline" href={`https://${site.canonical_domain}${i.published_path}`} target="_blank" rel="noreferrer">{i.published_path}</a> : <span className="text-muted-foreground">not yet</span>}{i.page_status && PAGE_STATUS[i.page_status] ? <div className="text-xs"><Badge variant={PAGE_STATUS[i.page_status]!.variant} title={PAGE_STATUS[i.page_status]!.title}>{PAGE_STATUS[i.page_status]!.label}</Badge></div> : null}{(pushed.get(i.id) ?? []).map((p) => <div key={p.id} className="text-xs">{p.status === "published" ? <Badge variant="success">{p.target_name}</Badge> : p.status === "failed" ? <Badge variant="destructive">{p.target_name} failed</Badge> : <Badge variant="secondary">{p.target_name} {p.status}</Badge>}{p.external_url ? <a className="ml-1 underline-offset-2 hover:underline" href={p.external_url} target="_blank" rel="noreferrer">open</a> : null}</div>)}</TableCell>
                     <TableCell>{when(i.updated_at)}</TableCell>
                     <TableCell className="text-right">

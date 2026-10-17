@@ -68,6 +68,13 @@ export const briefSpecSchema = z.object({
   format: z.enum(["comparison", "howto", "guide", "listicle", "faq"]).nullable().default(null),
   /** What currently-cited pages look like for this topic; set by code from measure.competitor_pages. */
   structuralTarget: z.record(z.string(), z.unknown()).nullable().default(null),
+  /**
+   * Whether the article may carry an FAQ (and FAQPage markup): only with
+   * evidence buyers ask these as separate questions (Google's People Also
+   * Ask) or when the page being refreshed already has one. Set by code; a
+   * brief stored before the rule reads as allowed.
+   */
+  allowFaq: z.boolean().default(true),
 });
 export type BriefSpec = z.infer<typeof briefSpecSchema>;
 
@@ -98,7 +105,7 @@ export type ApprovalDecision = "approve" | "changes" | "regenerate";
 export type ApprovalPolicy = "auto_publish" | "approve_brief" | "approve_post" | "approve_both";
 
 export interface QaGateResult {
-  gate: "structure" | "sources" | "grounding" | "mechanics" | "slop";
+  gate: "structure" | "sources" | "grounding" | "mechanics" | "slop" | "safety" | "scope";
   passed: boolean;
   detail: Record<string, unknown>;
 }
@@ -110,4 +117,10 @@ export interface QaReport {
   routeTo: "draft" | "brief" | null;
   /** Human-readable feedback fed into the regenerate prompt. */
   feedback: string[];
+  /**
+   * The safety gate found something (an email address, an internal name, a
+   * deal figure, an injected instruction, hidden text): a person reviews the
+   * draft before it publishes, whatever the approval policy says.
+   */
+  requiresHuman: boolean;
 }

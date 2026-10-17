@@ -12,7 +12,7 @@ import type { OpportunityRow } from "@/lib/pipeline/opportunities";
 
 export async function listOpportunities(siteId: string, limit = 25, sql: postgres.Sql = appDb()): Promise<OpportunityRow[]> {
   return sql<OpportunityRow[]>`
-    select id, org_id, site_id, source, status, title, target_query, question_id, content_item_id, score::float as score, evidence
+    select id, org_id, site_id, source, status, action_type, title, target_query, question_id, content_item_id, topic_id, format, score::float as score, evidence, score_breakdown
     from content.opportunities where site_id = ${siteId} and status in ('open', 'queued', 'in_progress')
     order by (status = 'in_progress') desc, score desc limit ${limit}`;
 }

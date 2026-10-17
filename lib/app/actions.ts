@@ -27,7 +27,7 @@ import {
 import { loadApproval, recordDecision } from "@/lib/pipeline/approvals";
 import { setBudgetCap } from "@/lib/ops/spend";
 import { BUDGET_CAP_MAX_USD } from "@/lib/ops/spend-limits";
-import { loadOpportunity, markOpportunity } from "@/lib/pipeline/opportunities";
+import { dismissOpportunity, loadOpportunity, markOpportunity, PERSON_DISMISS_REASONS, type DismissReason } from "@/lib/pipeline/opportunities";
 import { createPreflight } from "@/lib/proxy/store";
 import { createOrganization, createSite, createSiteSchema, deleteSite, loadSite, setSiteStatus, SiteInputError } from "./store";
 import { vaultSecrets } from "@/lib/secrets/vault";
@@ -159,13 +159,17 @@ export async function startPipelineAction(opportunityId: string, note?: string):
   return { ok: true };
 }
 
-export async function dismissOpportunityAction(opportunityId: string): Promise<ActionResult> {
+/** Dismiss from the queue with a reason a person picks (the pipeline's own reasons are not theirs to give). */
+export async function dismissOpportunityAction(opportunityId: string, reason: string = "other"): Promise<ActionResult> {
+  const picked = PERSON_DISMISS_REASONS.find((r) => r.value === reason);
+  if (!picked) return fail("Pick a reason.");
   const opp = await loadOpportunity(opportunityId);
   if (!opp) return fail("Opportunity not found.");
-  const { site, error } = await siteForAction(opp.site_id, "edit");
+  const { user, site, error } = await siteForAction(opp.site_id, "edit");
   if (!site) return fail(error!);
   if (error) return fail(error);
-  await markOpportunity(opportunityId, "dismissed", appDb(), "dismissed in app");
+  const { applied } = await dismissOpportunity(opportunityId, picked.value as DismissReason, `dismissed in app by ${user.name ?? user.email}: ${picked.label.toLowerCase()}`, appDb());
+  if (!applied) return fail(`Opportunity is already ${opp.status}.`);
   revalidatePath(`/app/sites/${opp.site_id}`);
   return { ok: true };
 }

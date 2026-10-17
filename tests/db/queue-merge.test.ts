@@ -32,7 +32,7 @@ describe.skipIf(!DB_URL)("queue merge and mining batches against Postgres", () =
   });
 
   const opp = (source: OpportunityInput["source"], score: number, evidence: Record<string, unknown>): OpportunityInput => ({
-    source, title: "sso vs scim", targetQuery: "sso vs scim", questionId: Q, score, scoreBreakdown: { by: source, score }, evidence, dedupeKey: `question:${Q}`,
+    source, title: "sso vs scim", targetQuery: "sso vs scim", questionId: Q, score, scoreBreakdown: { formula: "ev0", by: source, score }, evidence, dedupeKey: `question:${Q}`,
   });
   const row = async () => {
     const [r] = await sql<{ source: string; score: number; score_breakdown: { by: string }; evidence: Record<string, unknown> & { bySource?: Record<string, unknown> } }[]>`

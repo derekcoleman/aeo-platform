@@ -1827,3 +1827,116 @@ begin;
 rollback;
 
 \echo 'isolation: answer ledger assertions passed'
+
+-- ── 0025: opportunity scoring ────────────────────────────────────────────────
+do $$ begin
+  if (select count(*) from information_schema.columns where table_schema = 'content' and table_name = 'opportunities' and column_name in ('action_type', 'dismiss_reason')) <> 2 then
+    raise exception 'FAIL opportunity action_type / dismiss_reason missing';
+  end if;
+  if (select count(*) from information_schema.columns where table_schema = 'measure' and table_name = 'questions' and column_name in ('search_volume', 'keyword_difficulty', 'search_intent')) <> 3 then
+    raise exception 'FAIL question keyword columns missing';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_schema = 'content' and table_name = 'content_items' and column_name = 'pipeline_published_at') then
+    raise exception 'FAIL content_items.pipeline_published_at missing';
+  end if;
+  if (select count(*) from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+      where n.nspname = 'content' and t.typname = 'action_type') <> 6 then
+    raise exception 'FAIL content.action_type must have six values';
+  end if;
+  if (select count(*) from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+      where n.nspname = 'content' and t.typname = 'dismiss_reason') <> 10 then
+    raise exception 'FAIL content.dismiss_reason must have ten values';
+  end if;
+  raise notice 'ok  opportunity scoring enums and columns present';
+end $$;
+
+begin;
+  select pg_temp.expect('an opportunity is a new page unless it says otherwise',
+    (select count(*) from content.opportunities where id in ('dddddddd-1000-0000-0000-000000000001', 'dddddddd-1000-0000-0000-000000000002') and action_type = 'new_page'), 2);
+  update content.opportunities set status = 'dismissed', dismiss_reason = 'auto_coverage', dismissed_reason = 'acme.com/sso already ranks #3'
+  where id = 'dddddddd-1000-0000-0000-000000000001';
+  select pg_temp.expect('a dismissal keeps its reason',
+    (select count(*) from content.opportunities where id = 'dddddddd-1000-0000-0000-000000000001' and dismiss_reason = 'auto_coverage'), 1);
+  update content.opportunities set status = 'open' where id = 'dddddddd-1000-0000-0000-000000000001';
+  select pg_temp.expect('reopening clears the reason',
+    (select count(*) from content.opportunities where id = 'dddddddd-1000-0000-0000-000000000001' and dismiss_reason is null), 1);
+  update content.opportunities set status = 'open', dismiss_reason = 'low_value' where id = 'dddddddd-1000-0000-0000-000000000001';
+  select pg_temp.expect('an open opportunity carries no reason',
+    (select count(*) from content.opportunities where id = 'dddddddd-1000-0000-0000-000000000001' and dismiss_reason is null), 1);
+  update content.opportunities set status = 'failed', dismiss_reason = 'model_refusal' where id = 'dddddddd-1000-0000-0000-000000000001';
+  select pg_temp.expect('a refusal is recorded on the failed row',
+    (select count(*) from content.opportunities where id = 'dddddddd-1000-0000-0000-000000000001' and dismiss_reason = 'model_refusal'), 1);
+rollback;
+
+do $$ begin
+  begin
+    update content.opportunities set dismiss_reason = 'bored' where id = 'dddddddd-1000-0000-0000-000000000001';
+    raise exception 'FAIL an unknown dismiss reason must be rejected';
+  exception when invalid_text_representation then null;
+  end;
+  begin
+    update measure.questions set search_intent = 'comparison' where id = 'dddddddd-0000-0000-0000-000000000001';
+    raise exception 'FAIL an unknown search intent must be rejected';
+  exception when check_violation then null;
+  end;
+  begin
+    update measure.questions set keyword_difficulty = 101 where id = 'dddddddd-0000-0000-0000-000000000001';
+    raise exception 'FAIL a keyword difficulty above 100 must be rejected';
+  exception when check_violation then null;
+  end;
+  begin
+    update measure.questions set search_volume = -1 where id = 'dddddddd-0000-0000-0000-000000000001';
+    raise exception 'FAIL a negative search volume must be rejected';
+  exception when check_violation then null;
+  end;
+  raise notice 'ok  dismiss reasons and keyword data are checked';
+end $$;
+
+update measure.questions set search_volume = 880, keyword_difficulty = 34, search_intent = 'commercial' where id = 'dddddddd-0000-0000-0000-000000000001';
+update content.opportunities set action_type = 'refresh' where id = 'dddddddd-1000-0000-0000-000000000002';
+update content.content_items set pipeline_published_at = now() where id = 'dddddddd-3000-0000-0000-000000000002';
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member reads the action of its own opportunities only',
+    (select count(*) from content.opportunities where action_type = 'refresh'), 0);
+  select pg_temp.expect('acme member reads its own question''s keyword data',
+    (select count(*) from measure.questions where search_volume = 880 and search_intent = 'commercial'), 1);
+  select pg_temp.expect('acme member never reads globex''s publishing pace',
+    (select count(*) from content.content_items where pipeline_published_at is not null), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('globex member reads its own refresh',
+    (select count(*) from content.opportunities where action_type = 'refresh'), 1);
+  select pg_temp.expect('globex member never reads acme keyword data',
+    (select count(*) from measure.questions where search_volume is not null), 0);
+  select pg_temp.expect('globex member reads its own publishing pace',
+    (select count(*) from content.content_items where pipeline_published_at is not null), 1);
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare t text;
+  declare denied boolean;
+  begin
+    foreach t in array array['content.opportunities', 'measure.questions', 'content.content_items'] loop
+      denied := false;
+      begin
+        execute format('select 1 from %s limit 1', t);
+      exception when insufficient_privilege then
+        denied := true;
+      end;
+      if not denied then
+        raise exception 'FAIL renderer must not read %', t;
+      end if;
+    end loop;
+    raise notice 'ok  renderer cannot read opportunities, questions or content items';
+  end $$;
+rollback;
+
+\echo 'isolation: opportunity scoring assertions passed'

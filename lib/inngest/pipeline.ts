@@ -14,7 +14,7 @@ import {
   type ApprovalKind,
   type ApprovalNotice,
 } from "@/lib/pipeline/approvals";
-import { loadFactStatuses } from "@/lib/context/facts";
+import { loadFactStatuses, loadInternalTerms } from "@/lib/context/facts";
 import { loadManifest, manifestPromptBlock } from "@/lib/context/manifest";
 import { generateBrief, insertBrief, loadBrief, loadBriefContext, setBriefStatus } from "@/lib/pipeline/briefs";
 import { composeVersion, qaDocumentFor } from "@/lib/pipeline/compose";
@@ -22,12 +22,13 @@ import { generateDraft, slugify } from "@/lib/pipeline/draft";
 import { applyDecision, approvalUrl, GATE_TTL_DAYS, humanGate, type DecisionDeps, type GateDeps } from "@/lib/pipeline/gate";
 import { citationStatus, loadPublishedAt, POST_PUBLISH_WINDOWS_DAYS, windowDate, windowsStart } from "@/lib/pipeline/loop";
 import { ArticleBudgetExceededError, assertArticleBudget, modelFor, ModelTruncatedError, TASK_SETTINGS } from "@/lib/pipeline/model";
-import { loadOpportunity, markOpportunity, openRefreshOpportunity, scanSite } from "@/lib/pipeline/opportunities";
-import { holdWhilePaused, isHeld, publishGuard } from "@/lib/pipeline/guard";
+import { coverageGuard } from "@/lib/pipeline/coverage";
+import { loadOpportunity, markFailed, markOpportunity, openRefreshOpportunity, scanSite, type DismissReason } from "@/lib/pipeline/opportunities";
+import { heldFor, holdWhilePaused, isHeld, publishGuard } from "@/lib/pipeline/guard";
 import { isTakenDown, loadSiteOrganization, loadSiteRoute } from "@/lib/pipeline/publish";
-import { runQaGates, safeSourceFetcher } from "@/lib/pipeline/qa";
+import { runQaGates, safeSourceFetcher, safetySummary } from "@/lib/pipeline/qa";
 import { recomposeFromVersion, remediateDuplicateFaq, sitesWithDuplicateFaq, type FaqRemediation } from "@/lib/pipeline/republish";
-import { importCmsItem, loadExistingContent, publishRefreshToCms } from "@/lib/refresh/publish";
+import { EXISTING_BODY_MAX_CHARS, importCmsItem, loadExistingContent, publishRefreshToCms } from "@/lib/refresh/publish";
 import type { BriefSpec, DraftOutput } from "@/lib/pipeline/types";
 import {
   createContentItem,
@@ -54,11 +55,12 @@ import {
 } from "./client";
 
 /**
- * The content pipeline as one durable function: brief → (human gate) → draft
- * → QA → (human gate) → publish → +14/+30/+60d re-measure. Every LLM call and
- * every DB write sits in its own `step.run`, so a retry after a provider
- * blip re-pays nothing that completed, and the gates are `waitForEvent`s
- * that hold the run for days with its state intact.
+ * The content pipeline as one durable function: (coverage guard) → brief →
+ * (human gate) → draft → QA → (human gate) → publish → +14/+30/+60d
+ * re-measure. Every LLM call and every DB write sits in its own `step.run`,
+ * so a retry after a provider blip re-pays nothing that completed, and the
+ * gates are `waitForEvent`s that hold the run for days with its state
+ * intact.
  */
 
 const MAX_BRIEF_VERSIONS = 3;
@@ -108,8 +110,8 @@ export const contentPipelineFunction = inngest.createFunction(
     const scope = { orgId, siteId, runId, opportunityId };
     let stage: "brief" | "brief_gate" | "draft" | "qa" | "draft_gate" | "publish" = "brief";
 
-    const fail = async (reason: string) => {
-      await step.run(`fail:${stage}`, () => markOpportunity(opportunityId, "failed", appDb(), reason));
+    const fail = async (reason: string, code?: DismissReason) => {
+      await step.run(`fail:${stage}`, () => (code ? markFailed(opportunityId, reason, code) : markOpportunity(opportunityId, "failed", appDb(), reason)));
       await step.sendEvent("failed", contentPipelineFailed.create({ opportunityId, siteId, orgId, stage, error: reason }));
       return { ok: false as const, stage, error: reason };
     };
@@ -128,6 +130,20 @@ export const contentPipelineFunction = inngest.createFunction(
     const organizationName = site.organization.name ?? site.route.canonicalDomain;
 
     try {
+      // ── coverage guard ────────────────────────────────────────────────
+      // One canonical URL per intent, and nothing off-topic written by a
+      // scan: automated new-page work is checked before any model is paid.
+      // The run goes on from the guard's answer (it may have become a
+      // refresh of an existing page), never from the opportunity loaded above.
+      const guard = await step.run("coverage-guard", () => coverageGuard(opp));
+      if (!guard.proceed) return { ok: false as const, skipped: guard.reason, dismissed: guard.dismissReason };
+      const work = { ...opp, action_type: guard.actionType, content_item_id: guard.contentItemId, evidence: guard.evidence };
+      // Sent to an existing page by the guard, the run rewrites that page in
+      // place (a CMS post is overwritten), not the new page that was asked
+      // for: a person sees the draft first, whatever the approval policy.
+      const covered = guard.checked && guard.actionType !== "new_page" ? (guard.evidence.coverage as { url?: string | null; title?: string | null } | undefined) : undefined;
+      const replaces = covered ? { label: "Replaces", value: `${covered.url ?? covered.title ?? "an existing page"}: the site already answers this question there, so this rewrites that page in place` } : null;
+
       // ── brief ─────────────────────────────────────────────────────────
       let briefId: string | null = null;
       let spec: BriefSpec | null = null;
@@ -136,7 +152,7 @@ export const contentPipelineFunction = inngest.createFunction(
       for (let v = 1; v <= MAX_BRIEF_VERSIONS; v++) {
         stage = "brief";
         const writeBrief = (maxTokens: number) => async () => {
-          const ctx = await loadBriefContext(opp);
+          const ctx = await loadBriefContext(work);
           try {
             await assertArticleBudget(opportunityId);
             const { spec, run } = await generateBrief(modelFor("pipeline.brief"), { ...ctx, note: briefNote, previous: previousBrief }, scope, appDb(), { maxTokens, retryTruncated: false });
@@ -151,7 +167,7 @@ export const contentPipelineFunction = inngest.createFunction(
         let brief = await step.run(`brief:${v}`, writeBrief(TASK_SETTINGS["pipeline.brief"].maxTokens));
         if ("truncated" in brief) brief = await step.run(`brief:${v}:more-room`, writeBrief(brief.truncated));
         if ("overBudget" in brief) return await fail(`brief not written: ${brief.overBudget} — needs a human`);
-        if ("refused" in brief) return await fail(`model refused the brief (${brief.refused}) — needs a human`);
+        if ("refused" in brief) return await fail(`model refused the brief (${brief.refused}) — needs a human`, "model_refusal");
         if ("truncated" in brief) return await fail("the brief was cut off at max_tokens even with more room — needs a human");
         if (briefId) await step.run(`brief:${v}:supersede-previous`, () => setBriefStatus(briefId!, "superseded"));
         briefId = brief.id;
@@ -179,6 +195,7 @@ export const contentPipelineFunction = inngest.createFunction(
                 { label: "Sections", value: String(brief.spec.outline.length) },
                 { label: "Sources", value: String(brief.spec.sources.length) },
                 { label: "Brand facts", value: String(brief.spec.facts.length) },
+                ...(replaces ? [replaces] : []),
               ],
             },
           },
@@ -204,14 +221,14 @@ export const contentPipelineFunction = inngest.createFunction(
       // CMS in place, never to the proxy), or a brand-new article.
       const item = await step.run("content-item", async () => {
         const sql = appDb();
-        if (opp.content_item_id) {
-          const existing = await loadContentItem(opp.content_item_id, sql);
+        if (work.content_item_id) {
+          const existing = await loadContentItem(work.content_item_id, sql);
           if (existing) {
             await sql`update content.content_items set brief_id = ${approvedBriefId}, updated_at = now() where id = ${existing.id}`;
             return { id: existing.id, slug: existing.slug, refresh: true, origin: existing.origin };
           }
         }
-        const cmsItemId = typeof opp.evidence.cmsItemId === "string" ? opp.evidence.cmsItemId : null;
+        const cmsItemId = typeof work.evidence.cmsItemId === "string" ? work.evidence.cmsItemId : null;
         if (cmsItemId) {
           const imported = await importCmsItem(cmsItemId, { opportunityId, authorId: site.author?.id ?? null }, sql);
           await sql`update content.content_items set brief_id = ${approvedBriefId}, updated_at = now() where id = ${imported.id}`;
@@ -224,7 +241,7 @@ export const contentPipelineFunction = inngest.createFunction(
       });
 
       // A refresh drafts from the live article, not from a blank page.
-      const existing = item.refresh ? await step.run("load-existing", () => loadExistingContent({ content_item_id: item.id, evidence: opp.evidence })) : null;
+      const existing = item.refresh ? await step.run("load-existing", () => loadExistingContent({ content_item_id: item.id, evidence: work.evidence })) : null;
 
       // The manifesto the brief was written under is the one the draft is written under.
       const manifest = await step.run("load-manifest", async () => {
@@ -238,8 +255,15 @@ export const contentPipelineFunction = inngest.createFunction(
       let reviewNote: string | null = null;
       // The live FAQ rides in `faq`, as a draft returns it; loadExistingContent cut it out of the body.
       let previousDraft: DraftOutput | null = existing ? { title: existing.title, description: existing.description ?? approvedBrief.description, bodyMd: existing.bodyMd, faq: existing.faq } : null;
-      const refresh = existing ? { url: existing.url, lastUpdated: existing.lastUpdated, reasons: existing.reasons } : null;
+      const refresh = existing ? { url: existing.url, lastUpdated: existing.lastUpdated, reasons: existing.reasons, actionType: work.action_type } : null;
+      // A figures-and-dates update is held to the live page by the scope gate.
+      const keep = existing && work.action_type === "update_stats" ? { title: existing.title, bodyMd: existing.bodyMd, truncated: existing.bodyMd.length >= EXISTING_BODY_MAX_CHARS } : undefined;
       let attemptNo = 0;
+      // A safety finding on any attempt (an email address, an internal name,
+      // an injected instruction…) puts a person in front of the draft, even
+      // under auto-publish: a later attempt that drops it is still one
+      // someone should look at.
+      let safetyFindings: string[] = [];
       rounds: for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
         let feedback: string[] = [];
         let passed = false;
@@ -263,6 +287,7 @@ export const contentPipelineFunction = inngest.createFunction(
                   note: reviewNote,
                   previous: previousDraft,
                   refresh: previousDraft && refresh && attemptNo === 1 ? refresh : null,
+                  allowFaq: approvedBrief.allowFaq,
                 },
                 { ...scope, contentItemId: item.id },
                 sql,
@@ -280,6 +305,9 @@ export const contentPipelineFunction = inngest.createFunction(
             const report = await runQaGates(
               {
                 title: draft.title,
+                description: draft.description,
+                faq: composed.faq,
+                allowFaq: approvedBrief.allowFaq,
                 bodyMd: composed.bodyMd,
                 bodyHtml: composed.bodyHtml,
                 sources: approvedBrief.sources,
@@ -287,9 +315,10 @@ export const contentPipelineFunction = inngest.createFunction(
                 intent: approvedBrief.intent,
                 jsonLd: composed.page.jsonLd,
                 ...document,
+                keep,
                 now,
               },
-              { fetchSource: safeSourceFetcher(), loadFacts: (ids) => loadFactStatuses(orgId, ids, sql, now) },
+              { fetchSource: safeSourceFetcher(), loadFacts: (ids) => loadFactStatuses(orgId, ids, sql, now), loadInternalTerms: () => loadInternalTerms(orgId, sql) },
             );
             const version = await insertVersion(
               {
@@ -310,15 +339,17 @@ export const contentPipelineFunction = inngest.createFunction(
             await insertSources(version.id, composed.cited, report.verifications, sql, now);
             await insertContentFacts(version.id, report.citedFacts, sql);
             await insertQaResults(version.id, report.gates, sql);
-            return { versionId: version.id, versionNo: version.versionNo, draft, passed: report.passed, routeTo: report.routeTo, feedback: report.feedback, wordCount: composed.wordCount, structure: report.structure.normalized };
+            return { versionId: version.id, versionNo: version.versionNo, draft, passed: report.passed, routeTo: report.routeTo, feedback: report.feedback, wordCount: composed.wordCount, structure: report.structure.normalized, safety: report.requiresHuman ? safetySummary(report.safety) : [] };
           };
           let r = await step.run(`draft:${attemptNo}`, writeDraft(TASK_SETTINGS["pipeline.draft"].maxTokens));
           if ("truncated" in r) r = await step.run(`draft:${attemptNo}:more-room`, writeDraft(r.truncated));
           if ("overBudget" in r) return await fail(`draft not written: ${r.overBudget} — needs a human`);
-          if ("refused" in r) return await fail(`model refused the draft (${r.refused}) — needs a human`);
+          if ("refused" in r) return await fail(`model refused the draft (${r.refused}) — needs a human`, "model_refusal");
           if ("truncated" in r) return await fail("the draft was cut off at max_tokens even with more room — needs a human");
           versionId = r.versionId;
           previousDraft = r.draft;
+          // Absent on a draft step replayed from before the safety gate.
+          if (r.safety?.length) safetyFindings = [...new Set([...safetyFindings, ...r.safety])];
           if (r.passed) {
             passed = true;
             break;
@@ -328,7 +359,7 @@ export const contentPipelineFunction = inngest.createFunction(
           feedback = r.feedback;
         }
         if (!passed) return await fail(`draft failed QA ${MAX_QA_ATTEMPTS} times: ${feedback.slice(0, 3).join(" | ")}`);
-        if (!gates.includes("draft")) break;
+        if (!gates.includes("draft") && safetyFindings.length === 0 && !replaces) break;
 
         stage = "draft_gate";
         const gate = await humanGate(
@@ -343,7 +374,11 @@ export const contentPipelineFunction = inngest.createFunction(
               kind: "draft",
               title: previousDraft!.title,
               summary: previousDraft!.description,
-              facts: [{ label: "Path", value: `${site.route.pathPrefix}/${item.slug}` }],
+              facts: [
+                { label: "Path", value: `${site.route.pathPrefix}/${item.slug}` },
+                ...(replaces ? [replaces] : []),
+                ...(safetyFindings.length ? [{ label: "Safety check", value: `review before publishing: ${safetyFindings.slice(0, 3).join("; ")}` }] : []),
+              ],
             },
           },
           gateDeps(),
@@ -365,8 +400,9 @@ export const contentPipelineFunction = inngest.createFunction(
       // comes back as { held } to sleep and ask again (lib/pipeline/guard.ts).
       const outcome = await holdWhilePaused(step, (n) => step.run(n === 0 ? "publish" : `publish:${n}`, async () => {
         const sql = appDb();
-        const verdict = await publishGuard(siteId, sql);
-        if (!verdict.ok) return { held: verdict.reason };
+        // The pipeline also holds at the site's publishing pace; a hold for that sleeps until a slot frees.
+        const verdict = await publishGuard(siteId, sql, { velocity: true, contentItemId: item.id });
+        if (!verdict.ok) return heldFor(verdict);
         const now = new Date();
         if (item.origin === "cms") {
           // Back to the CMS, same item, same slug. The proxy never serves this one.
@@ -392,6 +428,7 @@ export const contentPipelineFunction = inngest.createFunction(
       // From the step's memoised result: a replay must not move the re-measure windows.
       const publishedAt = await windowsStart(step, published, () => loadPublishedAt(item.id));
       const windows: { days: number; owned: boolean | null }[] = [];
+      let everCited = false;
       for (const days of POST_PUBLISH_WINDOWS_DAYS) {
         await step.sleepUntil(`window:${days}d`, windowDate(publishedAt, days));
         await step.sendEvent(`window:${days}d:track`, serpTrackRequested.create({ siteId, orgId, questionIds: [questionId] }));
@@ -399,6 +436,7 @@ export const contentPipelineFunction = inngest.createFunction(
         await step.sleep(`window:${days}d:settle`, "30m");
         const status = await step.run(`window:${days}d:check`, () => citationStatus(questionId, siteId));
         windows.push({ days, owned: status?.owned ?? null });
+        if (status?.owned) everCited = true;
         if (status && !status.owned) {
           // A page taken out of the index since is not queued for a refresh: a rewrite of it is someone's call.
           await step.run(`window:${days}d:refresh`, async () =>
@@ -406,6 +444,9 @@ export const contentPipelineFunction = inngest.createFunction(
               siteId,
               contentItemId: item.id,
               questionId,
+              topicId: opp.topic_id,
+              // Cited at an earlier window and not now: a lost citation. Never cited: the gap it was written for is still open.
+              gapType: everCited ? "refresh_lost_citation" : status.namedCompetitors > 0 ? "aio_named_competitor" : "aio_other_sources",
               title: opp.title,
               targetQuery: opp.target_query,
               windowDays: days,

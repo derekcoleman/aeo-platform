@@ -119,7 +119,7 @@ export default async function RefreshPage({ params, searchParams }: { params: Pr
           <Card>
             <CardHeader>
               <CardTitle>Prioritised</CardTitle>
-              <CardDescription>Score = staleness 25% · search demand 25% · decline 20% · citation gap 20% · thinness 10%. The nightly scan opens the top {candidates.length > 20 ? 20 : candidates.length || "few"} as refresh opportunities; anything here can be started by hand.</CardDescription>
+              <CardDescription>Score = staleness 25% · search demand 25% · decline 20% · citation gap 20% · thinness 10%. The nightly scan opens the top {candidates.length > 20 ? 20 : candidates.length || "few"} by expected value as refresh opportunities; a page cited and holding its traffic gets its figures and dates updated, never a rewrite. Anything here can be started by hand.</CardDescription>
             </CardHeader>
             <CardContent>
               {candidates.length === 0 ? (
@@ -140,7 +140,7 @@ export default async function RefreshPage({ params, searchParams }: { params: Pr
                           <TableCell><span title={day(i.last_updated)}>{ageLabel(i.last_updated)}</span></TableCell>
                           <TableCell className="text-right tabular-nums">{s?.gsc.available ? <>{n(s.gsc.clicks)} / {n(s.gsc.impressions)}{delta(s.gsc.clicks, s.gsc.clicksPrev) ? <span className="text-muted-foreground ml-1 text-xs">{delta(s.gsc.clicks, s.gsc.clicksPrev)}</span> : null}</> : <span className="text-muted-foreground">no GSC</span>}</TableCell>
                           <TableCell className="text-right tabular-nums">{s ? <>{s.citations.nativeAvailable ? `${s.citations.native}` : "—"}{s.citations.profoundAvailable ? <span className="text-muted-foreground ml-1 text-xs">· Profound {s.citations.profound}</span> : null}</> : "—"}</TableCell>
-                          <TableCell className="max-w-xs text-xs">{i.refresh_reasons.length ? i.refresh_reasons.join(" · ") : <span className="text-muted-foreground">no single reason stands out</span>}</TableCell>
+                          <TableCell className="max-w-xs text-xs">{s?.protected ? <Badge variant="outline" className="mr-1" title={s.protected}>figures only</Badge> : null}{i.refresh_reasons.length ? i.refresh_reasons.join(" · ") : <span className="text-muted-foreground">no single reason stands out</span>}</TableCell>
                           <TableCell className="text-right">
                             <span className="inline-flex items-center gap-2">
                               <RefreshState i={i} />
