@@ -21,6 +21,10 @@ import {
  *
  *  1. the latest native SERP snapshot (measure.v_native_aio) has one of the
  *     site's pages in the organic top 10, or holds the featured snippet;
+ *  1b. the competitor gap says which of the site's pages already ranks for
+ *     the keyword (striking distance, 11–20 in DataForSEO Labs:
+ *     lib/strategy/competitor-gap.ts), and it is a page we can refresh, so
+ *     that page is the one to improve;
  *  2. a CMS post or one of our published articles has (nearly) the same
  *     title or slug (token Jaccard ≥ 0.8);
  *  3. a page of the site's own website crawl says the same thing (chunk
@@ -31,15 +35,16 @@ import {
  * body) turns the work into a refresh of that page. A hit on anything else
  * (the home page ranks, a product page says it, or the article that says it
  * was taken down) is a setup task the pipeline cannot do, and the
- * opportunity is dismissed saying so. Either way no second URL competes with
- * the first. A miss writes the new page.
+ * opportunity is dismissed saying so; 1b only ever names a page we can edit,
+ * so a vendor's ranking estimate alone never makes a setup task. Either way
+ * no second URL competes with the first. A miss writes the new page.
  */
 
 export const COVERAGE_TOP_N = 10;
 export const COVERAGE_TITLE_JACCARD = 0.8;
 export const COVERAGE_CHUNK_COSINE = 0.85;
 
-export type CoverageKind = "serp_owned" | "title_match" | "site_similarity";
+export type CoverageKind = "serp_owned" | "keyword_rank" | "title_match" | "site_similarity";
 
 export interface CoverageHit {
   kind: CoverageKind;
@@ -49,7 +54,7 @@ export interface CoverageHit {
   contentItemId: string | null;
   /** A CMS post with a body, which a refresh imports and writes back in place. */
   cmsItemId: string | null;
-  /** Rank (serp_owned), token Jaccard (title_match) or cosine similarity (site_similarity). */
+  /** Rank (serp_owned, keyword_rank), token Jaccard (title_match) or cosine similarity (site_similarity). */
   measure: number;
   surface?: "organic" | "featured_snippet";
   /** The content item's page was taken down (noindex or retired): someone decided it should not be a live answer. */
@@ -140,6 +145,83 @@ export async function ownedSerpHit(siteId: string, questionId: string, sql: post
     surface: row.surface,
     ...hit,
     reason: `${row.url} already ${row.surface === "featured_snippet" ? "holds the featured snippet" : `ranks #${row.position}`} for this question${takenDownNote(hit)}`,
+  };
+}
+
+interface RankedPageRow {
+  content_item_id: string | null;
+  cms_item_id: string | null;
+  title: string | null;
+  taken_down: CoverageHit["takenDown"];
+}
+
+/** The site's page an opportunity says already ranks for its keyword, from keyword data rather than a snapshot. */
+export interface RankedPage {
+  url: string;
+  rank: number | null;
+}
+
+/** A URL's path without its trailing slash: "" for a home page, null when it does not parse. */
+function pathOf(url: string): string | null {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the competitor gap's own evidence says ranks already (brandUrl and
+ * brandRank): its entry under bySource when other producers' work on the
+ * same question merged into the row, or the evidence itself on a row only
+ * the gap opened. Never the merged top level, which carries whatever the
+ * last producer wrote: the gap's organic estimate speaks for the gap's
+ * entry, not for an AI Overview gap's. Null when it says nothing, or names
+ * the home page, which ranks a little for most of what a site sells and is
+ * no keyword's page to rewrite.
+ */
+export function rankedPageOf(opp: { source?: string | null; evidence?: Record<string, unknown> | null }): RankedPage | null {
+  const bySource = opp.evidence?.bySource as Record<string, Record<string, unknown> | undefined> | undefined;
+  const own = bySource && typeof bySource === "object" ? bySource.competitor : opp.source === "competitor" ? opp.evidence : null;
+  const url = own?.brandUrl;
+  if (typeof url !== "string" || !pathOf(url)) return null;
+  const rank = own?.brandRank;
+  return { url, rank: typeof rank === "number" && Number.isFinite(rank) ? rank : null };
+}
+
+/**
+ * 1b. The page the competitor gap says ranks for the keyword, when it is one
+ * we can refresh: one of our articles that is still live, or a CMS post with
+ * a body. Anything else is no hit. A rank of 11–20 on a product page, a docs
+ * page or an article someone took down does not say the site answers the
+ * question, and an estimate alone must not turn the work into a setup task,
+ * which stays dismissed whatever later months show; the other checks still
+ * look (a page that does answer it is found by its title or its words).
+ */
+export async function rankedPageHit(siteId: string, page: RankedPage, sql: postgres.Sql = appDb()): Promise<CoverageHit | null> {
+  const [row] = await sql<RankedPageRow[]>`
+    select ci.id as content_item_id, i.id as cms_item_id, coalesce(ci.title, i.title) as title,
+           (select p.status::text from content.published_pages p where p.content_item_id = ci.id and p.status <> 'live' limit 1) as taken_down
+    from (select content.url_key(${page.url}) as k) u
+    left join lateral (
+      select id, title from content.content_items
+      where site_id = ${siteId} and canonical_url is not null and content.url_key(canonical_url) = u.k limit 1
+    ) ci on true
+    left join lateral (
+      select id, title from content.cms_items
+      where site_id = ${siteId} and url_key = u.k and missing_since is null and not is_archived and body_html is not null limit 1
+    ) i on true`;
+  if (!row || row.taken_down || !(row.content_item_id || row.cms_item_id)) return null;
+  return {
+    kind: "keyword_rank",
+    url: page.url,
+    title: row.title,
+    contentItemId: row.content_item_id,
+    cmsItemId: row.content_item_id ? null : row.cms_item_id,
+    measure: page.rank ?? 0,
+    surface: "organic",
+    takenDown: null,
+    reason: `${page.url} already ranks${page.rank ? ` #${page.rank}` : ""} for this keyword (DataForSEO Labs)`,
   };
 }
 
@@ -253,12 +335,14 @@ const editable = (h: CoverageHit) => !!(h.contentItemId || h.cmsItemId) && !h.ta
  * cannot edit is kept in case no editable one turns up.
  */
 export async function checkCoverage(
-  opp: Pick<OpportunityRow, "site_id" | "question_id" | "title" | "target_query">,
+  opp: Pick<OpportunityRow, "site_id" | "question_id" | "title" | "target_query"> & { source?: OpportunityRow["source"]; evidence?: Record<string, unknown> | null },
   sql: postgres.Sql = appDb(),
 ): Promise<CoverageVerdict> {
   let fallback: CoverageHit | null = null;
+  const ranked = rankedPageOf(opp);
   const checks: (() => Promise<CoverageHit | null>)[] = [
     () => (opp.question_id ? ownedSerpHit(opp.site_id, opp.question_id, sql) : Promise.resolve(null)),
+    () => (ranked ? rankedPageHit(opp.site_id, ranked, sql) : Promise.resolve(null)),
     () => titleMatchHit(opp.site_id, [...new Set([opp.title, opp.target_query])], sql),
     () => (opp.question_id ? siteSimilarityHit(opp.site_id, opp.question_id, sql) : Promise.resolve(null)),
   ];

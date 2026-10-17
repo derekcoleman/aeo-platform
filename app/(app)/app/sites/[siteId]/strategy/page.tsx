@@ -6,6 +6,7 @@ import { ActionButton } from "@/components/app/action-button";
 import { AnswerEngines, AnswerEnginesLoading } from "@/components/app/answer-engines";
 import { LiveRefresh } from "@/components/app/live-refresh";
 import { CompetitorDomainsLoading, NamedCompetitors, SourcesShapingAnswers } from "@/components/app/competitor-domains";
+import { CompetitorGapLoading, CompetitorKeywordGap } from "@/components/app/competitor-gap";
 import { MethodologyNote } from "@/components/app/methodology-note";
 import { AppShell, PageHeader } from "@/components/app/shell";
 import { SyncStatus } from "@/components/app/sync-status";
@@ -21,7 +22,7 @@ import { resolveTab, settingsHref, sitePage } from "@/lib/app/nav";
 import { currentRestatements, METHODOLOGY_PAGE_METRICS } from "@/lib/app/methodology";
 import { loadSite } from "@/lib/app/store";
 import { listPrompts, profoundByEngine, profoundByTopic, profoundConnection } from "@/lib/app/strategy";
-import { analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
+import { analyzeCompetitorGapAction, analyzeCompetitorsAction, assignTopicsAction, setQuestionFlagAction, setTopicStatusAction, syncConnectionNowAction } from "@/lib/app/strategy-actions";
 import { canEdit, canManage, requireUser, roleIn } from "@/lib/auth/session";
 import { latestSyncRun } from "@/lib/connectors/store";
 import { describeSyncState } from "@/lib/connectors/sync-status";
@@ -209,6 +210,18 @@ export default async function StrategyPage({ params, searchParams }: { params: P
               </CardContent>
             </Card>
           </div>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2">Keywords they rank for that you don&apos;t <Badge variant="outline">Organic rankings · DataForSEO Labs</Badge></CardTitle>
+              <CardDescription>Keywords where a named competitor ranks in Google&apos;s organic top 10 and you do not{topicFilter ? ", this topic only" : ""}, found on the 2nd of each month for up to five competitor domains. Keywords that name a competitor are left out unless they compare. Where you already rank 11–20 the page that ranks is the one to improve, and the queue sends the work there. The best of the rest are on the queue already. Organic rankings, not AI answers: never added to the AI Overview numbers on this page.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
+              {editor ? <div><ActionButton size="sm" variant="outline" action={analyzeCompetitorGapAction.bind(null, siteId)} done="Queued">Find keyword gaps now</ActionButton></div> : null}
+              <Suspense fallback={<CompetitorGapLoading />}>
+                <CompetitorKeywordGap siteId={siteId} locale={site.locale} topicId={topicFilter ?? null} topics={activeTopics} editor={editor} />
+              </Suspense>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader><CardTitle>Sources shaping answers</CardTitle><CardDescription>Sites cited in AI Overviews that are neither yours nor a competitor, last 30 days{profound ? "; Profound's engines listed separately below" : ""}: forums, review platforms, publishers, reference sites, analysts. They are where to be mentioned, not who to beat. Change a site&apos;s role for this project if it is wrong, or mark it a competitor.</CardDescription></CardHeader>
             <CardContent className="grid gap-4">

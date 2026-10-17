@@ -12,9 +12,10 @@ import { matchTopic } from "@/lib/strategy/topics";
  * reopening the same gap.
  *
  * Every producer (the citation-gap scan, "Write about this", the
- * post-publish loop, the refresh scan, the signal bridge) scores with one
- * function, scoreEV0, so their numbers compare: the expected value of doing
- * the work, divided by what the work costs.
+ * post-publish loop, the refresh scan, the signal bridge, the competitor
+ * organic gap) scores with one function, scoreEV0, so their numbers
+ * compare: the expected value of doing the work, divided by what the work
+ * costs.
  */
 
 // ── EV0: the unified expected-value scorer ──────────────────────────────────
@@ -367,7 +368,7 @@ export function demandOf(q: QuestionDemand | undefined, fallbackScore?: number |
 // ── opportunities ───────────────────────────────────────────────────────────
 
 export interface OpportunityInput {
-  source: "citation_gap" | "question_graph" | "signal" | "gsc" | "manual" | "refresh";
+  source: "citation_gap" | "question_graph" | "signal" | "gsc" | "manual" | "refresh" | "competitor";
   title: string;
   targetQuery: string;
   questionId?: string | null;
@@ -527,8 +528,9 @@ const numberOr = (v: unknown, fallback: number | null): number | null => (typeof
  * The EV0 inputs of a row, from what its producer stored: a person's request
  * takes the manual prior; a refresh-scan row its page's impressions and the
  * gap its stored signals show; a post-publish refresh the gap its article
- * was written for; a signal the unanswered-question prior; a citation gap
- * the prior for who holds the answer. The same inputs each producer scores
+ * was written for; a signal the unanswered-question prior; a keyword a
+ * named competitor outranks us on the organic-competitor prior; a citation
+ * gap the prior for who holds the answer. The same inputs each producer scores
  * a new row on.
  */
 export function storedEV0Input(
@@ -555,6 +557,7 @@ export function storedEV0Input(
   }
   const brandFit = topicalFit(r.target_query, topicId, ctx.fit);
   if (r.source === "signal") return { ...base, demand: demandOf(q, numberOr(r.evidence.demandScore, null)), gapType: "unanswered_signal", brandFit };
+  if (r.source === "competitor") return { ...base, demand: demandOf(q), gapType: "organic_competitor", brandFit };
   return { ...base, demand: demandOf(q), gapType: (numberOr(r.evidence.namedCompetitors, null) ?? 0) > 0 ? "aio_named_competitor" : "aio_other_sources", brandFit };
 }
 

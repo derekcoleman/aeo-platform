@@ -1,7 +1,7 @@
 import { defaultEmbedder } from "@/lib/ai/embed";
 import { appDb } from "@/lib/db/app";
 import { discoverQuestions, finalizeQuestionGraph, mergeQuestionNodes, type QuestionGraphStats, type QuestionNode } from "@/lib/demand/question-graph";
-import { listTrackedQuestions, loadSiteOwnership, recordSnapshot, upsertQuestionGraph, type TrackedQuestion } from "@/lib/demand/store";
+import { autoTrackQuestions, listTrackedQuestions, loadSiteOwnership, recordSnapshot, upsertQuestionGraph, type TrackedQuestion } from "@/lib/demand/store";
 import { BudgetExceededError, SerpProviderError, serpClientFromEnv } from "@/lib/serp";
 import { concurrencyCap, demandMineCompleted, demandMineRequested, inngest, serpTrackCompleted, serpTrackRequested } from "./client";
 
@@ -92,18 +92,7 @@ export const demandMineFunction = inngest.createFunction(
     });
 
     if (trackTop && trackTop > 0) {
-      await step.run("auto-track", async () => {
-        const sql = appDb();
-        await sql`
-          with top as (
-            select id from measure.questions
-            where site_id = ${siteId} and not is_tracked and not excluded
-            order by demand_score desc, seen_count desc
-            limit ${trackTop}
-          )
-          update measure.questions q set is_tracked = true, tracking_tier = 'weekly'
-          from top where q.id = top.id`;
-      });
+      await step.run("auto-track", () => autoTrackQuestions(siteId, trackTop));
     }
 
     const summary = {

@@ -31,6 +31,7 @@ export {
   siteVerified,
   siteOnboardingRequested,
   strategyCompetitorsAnalyzeRequested,
+  strategyCompetitorGapRequested,
   publishingPushRequested,
   refreshScanRequested,
   metricsContentIdsRequested,

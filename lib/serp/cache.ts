@@ -10,7 +10,8 @@ import type { SerpProviderName, SerpQuery } from "./types";
  * the cadence decides when we pay, the cache guarantees we pay at most once.
  */
 
-export type SerpMethod = "autocomplete" | "serp" | "answer";
+/** What was paid for: a SERP, autocomplete, an answer probe, or a domain's ranked keywords from DataForSEO Labs. */
+export type SerpMethod = "autocomplete" | "serp" | "answer" | "labs.ranked_keywords";
 
 export interface SerpCache {
   get<T>(key: string): Promise<T | null>;

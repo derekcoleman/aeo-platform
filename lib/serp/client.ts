@@ -1,4 +1,4 @@
-import { cacheKey, dayOf, memoryCache, postgresCache, type SerpCache } from "./cache";
+import { cacheKey, dayOf, memoryCache, postgresCache, type SerpCache, type SerpMethod } from "./cache";
 import { memoryBudget, postgresBudget, type BudgetGuard } from "./budget";
 import { dataForSeoProvider } from "./dataforseo";
 import { aioVendorPreference, dataForSeoConfigured, serpApiKey } from "./env";
@@ -45,6 +45,54 @@ const DEFAULT_ESTIMATE: Record<SerpProviderName, { serp: number; autocomplete: n
   serpapi: { serp: 0.02, autocomplete: 0.01 },
 };
 
+/** One paid vendor call the cache can answer: where it is cached, what it holds against the budget, and the call itself. */
+export interface PaidCall<T> {
+  key: string;
+  provider: SerpProviderName;
+  method: SerpMethod;
+  query: SerpQuery;
+  /** The day the cache row is filed under: the call's own, or the first of its month for a monthly key. */
+  day: string;
+  /** Held against the org's SERP budget before the call. */
+  estimateUsd: number;
+  tenant: SerpTenant;
+  call: () => Promise<T>;
+}
+
+/**
+ * The cache, then the budget, then the vendor. A hit is ledgered at no cost.
+ * A miss holds its estimate before the call, settles at the vendor's
+ * reported cost, and gives the hold back when the call throws; what it paid
+ * for is cached for every other caller of the same key.
+ */
+export async function paidCachedCall<T extends { costUsd: number }>(deps: { cache: SerpCache; budget: BudgetGuard }, c: PaidCall<T>): Promise<T & { cached: boolean }> {
+  const { cache, budget } = deps;
+  const { provider, method } = c;
+  const siteId = c.tenant.siteId ?? null;
+  const hit = await cache.get<T>(c.key);
+  if (hit) {
+    await budget.record({ orgId: c.tenant.orgId, siteId, provider, method, query: c.query.query, costUsd: 0, cached: true });
+    return { ...hit, cached: true };
+  }
+  const hold = await budget.reserve(c.tenant.orgId, c.estimateUsd, { siteId, provider, method, query: c.query.query });
+  let result: T;
+  try {
+    result = await c.call();
+  } catch (e) {
+    // A failed call is not billed (or is retried and billed then); its hold goes back now. A failed
+    // release must not hide the vendor's error (callers classify it); the sweeper gives the hold back.
+    await budget.release(hold).catch((err) => console.warn(`[serp] release after a failed ${method} call: ${err instanceof Error ? err.message : String(err)}`));
+    throw e;
+  }
+  // Settled and ledgered as soon as the vendor answers: the call is paid for, whatever happens next.
+  await budget.record({ orgId: c.tenant.orgId, siteId, provider, method, query: c.query.query, costUsd: result.costUsd, cached: false }, hold);
+  // A failed cache write costs a repeat call later; failing this one would have the caller retry and pay again now.
+  await cache
+    .set(c.key, result, { provider, method, query: c.query, day: c.day, costUsd: result.costUsd })
+    .catch((err) => console.warn(`[serp] cache write after a paid ${method} call: ${err instanceof Error ? err.message : String(err)}`));
+  return { ...result, cached: false };
+}
+
 export function createSerpClient(opts: SerpClientOptions): SerpClient {
   const bulk = opts.bulk;
   const aio = opts.aio ?? opts.bulk;
@@ -53,38 +101,10 @@ export function createSerpClient(opts: SerpClientOptions): SerpClient {
   const now = opts.now ?? (() => new Date());
   const estimate = { ...DEFAULT_ESTIMATE, ...opts.estimate };
 
-  async function cachedCall<T extends { costUsd: number }>(
-    provider: SerpProvider,
-    method: "serp" | "autocomplete",
-    q: SerpQuery,
-    t: SerpTenant,
-    call: () => Promise<T>,
-  ): Promise<T & { cached: boolean }> {
+  const cachedCall = <T extends { costUsd: number }>(provider: SerpProvider, method: "serp" | "autocomplete", q: SerpQuery, t: SerpTenant, call: () => Promise<T>) => {
     const day = dayOf(now());
-    const key = cacheKey(provider.name, method, q, day);
-    const hit = await cache.get<T>(key);
-    if (hit) {
-      await budget.record({ orgId: t.orgId, siteId: t.siteId ?? null, provider: provider.name, method, query: q.query, costUsd: 0, cached: true });
-      return { ...hit, cached: true };
-    }
-    const hold = await budget.reserve(t.orgId, estimate[provider.name][method], { siteId: t.siteId ?? null, provider: provider.name, method, query: q.query });
-    let result: T;
-    try {
-      result = await call();
-    } catch (e) {
-      // A failed call is not billed (or is retried and billed then); its hold goes back now. A failed
-      // release must not hide the vendor's error (callers classify it); the sweeper gives the hold back.
-      await budget.release(hold).catch((err) => console.warn(`[serp] release after a failed ${method} call: ${err instanceof Error ? err.message : String(err)}`));
-      throw e;
-    }
-    // Settled and ledgered as soon as the vendor answers: the call is paid for, whatever happens next.
-    await budget.record({ orgId: t.orgId, siteId: t.siteId ?? null, provider: provider.name, method, query: q.query, costUsd: result.costUsd, cached: false }, hold);
-    // A failed cache write costs a repeat call later; failing this one would have the caller retry and pay again now.
-    await cache
-      .set(key, result, { provider: provider.name, method, query: q, day, costUsd: result.costUsd })
-      .catch((err) => console.warn(`[serp] cache write after a paid ${method} call: ${err instanceof Error ? err.message : String(err)}`));
-    return { ...result, cached: false };
-  }
+    return paidCachedCall({ cache, budget }, { key: cacheKey(provider.name, method, q, day), provider: provider.name, method, query: q, day, estimateUsd: estimate[provider.name][method], tenant: t, call });
+  };
 
   return {
     providers: { bulk: bulk.name, aio: aio.name },

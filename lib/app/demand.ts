@@ -1,5 +1,6 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
+import { trackableByDemand } from "@/lib/demand/store";
 
 /**
  * Read models for the Demand page: the question graph with each question's
@@ -108,10 +109,14 @@ export async function setQuestionTracking(siteId: string, questionId: string, ti
   return rows.length > 0;
 }
 
-/** Track the top N by demand on a tier; anything already on a faster tier keeps it. Excluded questions are never picked. */
+/**
+ * Track the top N by demand on a tier; anything already on a faster tier
+ * keeps it. Excluded questions, and keywords only the competitor gap brought
+ * in, are never picked (trackableByDemand).
+ */
 export async function trackTopQuestions(siteId: string, n: number, tier: Exclude<QuestionRow["tracking_tier"], "none">, sql: postgres.Sql = appDb()): Promise<number> {
   const rows = await sql<{ id: string }[]>`
-    with top as (select id from measure.questions where site_id = ${siteId} and not excluded order by demand_score desc, seen_count desc limit ${n})
+    with top as (select id from measure.questions where site_id = ${siteId} and ${trackableByDemand(sql)} order by demand_score desc, seen_count desc limit ${n})
     update measure.questions q set is_tracked = true,
       tracking_tier = case when q.tracking_tier = 'daily' or (q.tracking_tier = 'weekly' and ${tier} = 'monthly') then q.tracking_tier else ${tier}::measure.tracking_tier end
     from top where q.id = top.id returning q.id`;

@@ -72,10 +72,7 @@ export function locationCode(country: string): { code: number; fallback: boolean
 /** Per-call deadlines: a live SERP with the AI Overview loaded can take a minute; autocomplete is quick. */
 export const DATAFORSEO_TIMEOUTS_MS = { serp: 90_000, autocomplete: 30_000 };
 
-export interface DataForSeoConfig {
-  login?: string;
-  password?: string;
-  fetchImpl?: typeof fetch;
+export interface DataForSeoConfig extends DataForSeoCredentials {
   /** Fallback cost per call when the response carries none. */
   serpCostUsd?: number;
   autocompleteCostUsd?: number;
@@ -164,15 +161,33 @@ export function parseDataForSeoAutocomplete(result: DfsAutocompleteResult): stri
   return out;
 }
 
-export function dataForSeoProvider(cfg: DataForSeoConfig = {}): SerpProvider {
+export interface DataForSeoCredentials {
+  login?: string;
+  password?: string;
+  fetchImpl?: typeof fetch;
+}
+
+/** One live task's first result, what DataForSEO says it cost, and the whole envelope. */
+export interface DataForSeoResponse<T> {
+  result: T;
+  cost: number;
+  raw: unknown;
+}
+
+/**
+ * A POST to one DataForSEO live endpoint (SERP, autocomplete, Labs), one
+ * task per call, with the call's own deadline. 429s and 5xx are retried with
+ * backoff; a timed-out call is not retried in-process (the job step is). A
+ * task with an error status (the 40000s: refused, such as a location Labs
+ * does not cover or a bad target; the 50000s: the vendor failed) or that
+ * came back empty is a SerpProviderError with the task's status code.
+ */
+export function dataForSeoPost(cfg: DataForSeoCredentials = {}) {
   const login = cfg.login ?? process.env.DATAFORSEO_LOGIN;
   const password = cfg.password ?? process.env.DATAFORSEO_PASSWORD;
   const fetchImpl = cfg.fetchImpl ?? fetch;
-  const serpCost = cfg.serpCostUsd ?? vendorCostUsd("DATAFORSEO_SERP_COST_USD", 0.002);
-  const acCost = cfg.autocompleteCostUsd ?? vendorCostUsd("DATAFORSEO_AUTOCOMPLETE_COST_USD", 0.0006);
-  const timeouts = { ...DATAFORSEO_TIMEOUTS_MS, ...cfg.timeoutsMs };
 
-  async function post<T>(path: string, body: unknown, timeoutMs: number): Promise<{ result: T; cost: number; raw: unknown }> {
+  return async function post<T>(path: string, body: unknown, timeoutMs: number): Promise<DataForSeoResponse<T>> {
     if (!login || !password) throw new SerpProviderError("dataforseo", "DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD not set");
     const auth = Buffer.from(`${login}:${password}`).toString("base64");
     return withRetry(async () => {
@@ -193,7 +208,14 @@ export function dataForSeoProvider(cfg: DataForSeoConfig = {}): SerpProvider {
       }
       return { result: task.result[0], cost: task.cost ?? 0, raw: env };
     }, { maxRetries: 2, shouldRetry: retryUnlessTimedOut });
-  }
+  };
+}
+
+export function dataForSeoProvider(cfg: DataForSeoConfig = {}): SerpProvider {
+  const post = dataForSeoPost(cfg);
+  const serpCost = cfg.serpCostUsd ?? vendorCostUsd("DATAFORSEO_SERP_COST_USD", 0.002);
+  const acCost = cfg.autocompleteCostUsd ?? vendorCostUsd("DATAFORSEO_AUTOCOMPLETE_COST_USD", 0.0006);
+  const timeouts = { ...DATAFORSEO_TIMEOUTS_MS, ...cfg.timeoutsMs };
 
   function common(q: SerpQuery) {
     const loc = locationCode(q.locale.country);

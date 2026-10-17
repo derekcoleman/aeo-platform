@@ -1940,3 +1940,155 @@ begin;
 rollback;
 
 \echo 'isolation: opportunity scoring assertions passed'
+
+-- ── 0026/0027: competitor organic gap ───────────────────────────────────────
+do $$ begin
+  if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+                 where n.nspname = 'content' and t.typname = 'opportunity_source' and e.enumlabel = 'competitor') then
+    raise exception 'FAIL content.opportunity_source competitor missing';
+  end if;
+  raise notice 'ok  competitor opportunity source present';
+end $$;
+
+insert into context.entities (id, org_id, type, name, aliases, domains) values
+  ('eeeeeeee-2000-0000-0000-000000000009', '22222222-2222-2222-2222-222222222222', 'competitor', 'Initech', '{}', '{initech.com}');
+-- org_id deliberately wrong on the first row: the trigger takes it from the site.
+insert into measure.competitor_keywords
+  (site_id, org_id, entity_id, domain, keyword, question_id, rank, url, search_volume, keyword_difficulty, search_intent, brand_rank, brand_url, locale) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', '22222222-2222-2222-2222-222222222222', 'eeeeeeee-2000-0000-0000-000000000002',
+   'okta.com', 'scim provisioning', 'dddddddd-0000-0000-0000-000000000001', 3, 'https://www.okta.com/scim', 880, 41, 'commercial', 14, 'https://acme.com/resources/scim', 'us-en'),
+  ('aaaaaaaa-0000-0000-0000-000000000001', null, 'eeeeeeee-2000-0000-0000-000000000002',
+   'okta.com', 'what is sso', null, 7, 'https://www.okta.com/sso', 5400, 62, 'informational', null, null, 'us-en'),
+  ('bbbbbbbb-0000-0000-0000-000000000002', null, 'eeeeeeee-2000-0000-0000-000000000009',
+   'initech.com', 'widget pricing', 'dddddddd-0000-0000-0000-000000000002', 2, 'https://initech.com/pricing', 320, 18, 'transactional', null, null, 'us-en');
+
+begin;
+  select pg_temp.expect('a competitor keyword takes its org from its site',
+    (select count(*) from measure.competitor_keywords where site_id = 'aaaaaaaa-0000-0000-0000-000000000001' and org_id = '11111111-1111-1111-1111-111111111111'), 2);
+  delete from context.entities where id = 'eeeeeeee-2000-0000-0000-000000000009';
+  select pg_temp.expect('deleting the competitor deletes its keywords',
+    (select count(*) from measure.competitor_keywords where site_id = 'bbbbbbbb-0000-0000-0000-000000000002'), 0);
+rollback;
+
+do $$ begin
+  begin
+    insert into measure.competitor_keywords (site_id, entity_id, domain, keyword, rank, locale)
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-2000-0000-0000-000000000009', 'initech.com', 'acme pricing', 1, 'us-en');
+    raise exception 'FAIL a competitor keyword must not name another org''s competitor';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into measure.competitor_keywords (site_id, entity_id, domain, keyword, question_id, rank, locale)
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-2000-0000-0000-000000000002', 'okta.com', 'widget pricing',
+            'dddddddd-0000-0000-0000-000000000002', 4, 'us-en');
+    raise exception 'FAIL a competitor keyword must not point at another site''s question';
+  exception when check_violation then null;
+  end;
+  begin
+    update measure.competitor_keywords set site_id = 'bbbbbbbb-0000-0000-0000-000000000002' where keyword = 'what is sso';
+    raise exception 'FAIL a competitor keyword must not move to another org''s site';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into measure.competitor_keywords (site_id, entity_id, domain, keyword, rank, locale)
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-2000-0000-0000-000000000002', 'https://www.okta.com/x', 'sso', 1, 'us-en');
+    raise exception 'FAIL a competitor keyword domain must be normalised';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into measure.competitor_keywords (site_id, entity_id, domain, keyword, rank, search_intent, locale)
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-2000-0000-0000-000000000002', 'okta.com', 'okta vs acme', 1, 'comparison', 'us-en');
+    raise exception 'FAIL an unknown search intent must be rejected';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into measure.competitor_keywords (site_id, entity_id, domain, keyword, rank, locale)
+    values ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-2000-0000-0000-000000000002', 'okta.com', 'sso', 0, 'us-en');
+    raise exception 'FAIL a rank below 1 must be rejected';
+  exception when check_violation then null;
+  end;
+  raise notice 'ok  competitor keyword scope and shape cannot be forged';
+end $$;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member sees own competitor keywords', (select count(*) from measure.competitor_keywords), 2);
+  select pg_temp.expect('acme member sees no globex competitor keywords',
+    (select count(*) from measure.competitor_keywords where site_id = 'bbbbbbbb-0000-0000-0000-000000000002'), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('globex member sees only globex competitor keywords', (select count(*) from measure.competitor_keywords), 1);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every competitor keyword', (select count(*) from measure.competitor_keywords), 3);
+rollback;
+
+begin;
+  set local role app_user;
+  do $$ begin
+    if (select count(*) from measure.competitor_keywords) <> 0 then
+      raise exception 'FAIL competitor keywords readable without claims';
+    end if;
+    raise notice 'ok  absent claims see no competitor keywords';
+  end $$;
+rollback;
+
+-- With the write grants in place, the table privilege check passes: what
+-- refuses a member's write is RLS, which has no policy for one.
+begin;
+  grant insert, update, delete on measure.competitor_keywords to app_user;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  do $$
+  declare
+    denied boolean := false;
+    touched int;
+  begin
+    begin
+      insert into measure.competitor_keywords (site_id, entity_id, domain, keyword, rank, locale)
+      values ('aaaaaaaa-0000-0000-0000-000000000001', 'eeeeeeee-2000-0000-0000-000000000002', 'okta.com', 'sso pricing', 2, 'us-en');
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL members must not write competitor keywords';
+    end if;
+    update measure.competitor_keywords set rank = 1;
+    get diagnostics touched = row_count;
+    if touched <> 0 then
+      raise exception 'FAIL members must not update competitor keywords (% rows)', touched;
+    end if;
+    delete from measure.competitor_keywords;
+    get diagnostics touched = row_count;
+    if touched <> 0 then
+      raise exception 'FAIL members must not delete competitor keywords (% rows)', touched;
+    end if;
+    raise notice 'ok  members cannot write competitor keywords, even granted the table';
+  end $$;
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from measure.competitor_keywords limit 1;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read measure.competitor_keywords';
+    end if;
+    raise notice 'ok  renderer cannot read competitor keywords';
+  end $$;
+rollback;
+
+\echo 'isolation: competitor organic gap assertions passed'

@@ -198,6 +198,33 @@ export const TRACKING_PLAN_STATUSES = ["trialing", "active", "past_due"] as cons
 export const TRACKING_SITE_STATUSES = ["provisioning", "verifying", "active"] as const;
 
 /**
+ * The questions picking by demand may start tracking ("track the top N", the
+ * miner's auto-track), as a condition on measure.questions: not excluded, and
+ * not a keyword only the competitor gap brought in (source competitor,
+ * demand 0: lib/strategy/competitor-gap.ts). The gap stores up to 500 a
+ * site; once the mined questions ran out, picking by demand would fill the
+ * rest with them, a recurring SERP fetch each that nobody chose. One the
+ * miner has found since carries its demand and qualifies.
+ */
+export function trackableByDemand(sql: postgres.Sql) {
+  return sql`not excluded and (source <> 'competitor' or demand_score > 0)`;
+}
+
+/** The miner's auto-track: the `n` untracked questions with the most demand that may be tracked, onto the weekly tier. */
+export async function autoTrackQuestions(siteId: string, n: number, sql: postgres.Sql = appDb()): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    with top as (
+      select id from measure.questions
+      where site_id = ${siteId} and not is_tracked and ${trackableByDemand(sql)}
+      order by demand_score desc, seen_count desc
+      limit ${n}
+    )
+    update measure.questions q set is_tracked = true, tracking_tier = 'weekly'
+    from top where q.id = top.id returning q.id`;
+  return rows.length;
+}
+
+/**
  * What a tier's scheduler snapshots: tracked questions that are not
  * excluded, on a site that is not paused or disabled, in an organisation
  * whose plan has not lapsed.

@@ -291,6 +291,16 @@ export const strategyCompetitorsAnalyzeRequested = eventType("strategy/competito
   schema: z.object({ siteId: z.guid(), orgId: z.guid(), topicId: z.guid().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }),
 });
 
+/**
+ * Ask DataForSEO Labs which keywords a site's named competitors rank for in
+ * Google's organic top 10 that it does not (lib/strategy/competitor-gap.ts).
+ * Monthly for every tracked site with a named competitor, or from
+ * Strategy → Competitors.
+ */
+export const strategyCompetitorGapRequested = eventType("strategy/competitor-gap.requested", {
+  schema: z.object({ siteId: z.guid(), orgId: z.guid(), requestedBy: z.guid().nullable().optional() }),
+});
+
 /** Score the CMS inventory against traffic and citations and open refresh opportunities for the top candidates. */
 export const refreshScanRequested = eventType("content/refresh.scan.requested", {
   schema: z.object({ siteId: z.guid(), orgId: z.guid() }),

@@ -12,9 +12,11 @@ import { markSyncRequested } from "@/lib/connectors/store";
 import { PROFOUND_FEATURE } from "@/lib/connectors/profound";
 import { PROFOUND_DEFAULT_BASE, ProfoundApi, ProfoundApiError, ProfoundDiscoveryError, type DiscoveryAttempt } from "@/lib/connectors/profound/api";
 import { appDb } from "@/lib/db/app";
-import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
+import { connectorSyncRequested, contentPipelineRequested, strategyCompetitorGapRequested, strategyCompetitorsAnalyzeRequested } from "@/lib/inngest";
 import { OVERRIDE_SOURCE_ROLES, removeCompetitor, saveCompetitor, seedCompetitorsFromDomains, setSourceOverride, SourceRoleInputError } from "@/lib/measure/source-roles";
 import { createManualOpportunity } from "@/lib/pipeline/opportunities";
+import { dataForSeoConfigured } from "@/lib/serp/env";
+import { gapMarketSupported, marketOf } from "@/lib/strategy/competitor-gap";
 import { OutOfSiteError, addManualPrompt, assertSiteScopedIds, assignQuestionsToTopics, createTopic, loadTopic, setQuestionFlags, topicInputSchema, updateTopic } from "@/lib/strategy/topics";
 import type { ActionResult } from "./actions";
 import { loadSite } from "./store";
@@ -22,7 +24,7 @@ import { loadSite } from "./store";
 /**
  * Server actions for the Strategy page: topics, prompt control, manual
  * content requests, named competitors and source roles, competitor
- * analysis and the Profound API connection.
+ * analysis, the competitor organic gap and the Profound API connection.
  */
 
 const fail = (error: string): ActionResult => ({ ok: false, error });
@@ -235,6 +237,25 @@ export async function analyzeCompetitorsAction(siteId: string, topicId?: string 
   const scope = await outOfSite(siteId, { topicId });
   if (scope) return fail(scope);
   const jobError = await queueJob(strategyCompetitorsAnalyzeRequested.create({ siteId, orgId: site.org_id, topicId: topicId ?? null }));
+  if (jobError) return fail(jobError);
+  return { ok: true };
+}
+
+/**
+ * Run the competitor organic gap now (it also runs on the 2nd of each
+ * month). It needs the DataForSEO login, a market the gap can read and a
+ * named competitor with a domain. The month's rankings are cached, so a
+ * second run in the same month re-reads them at no cost and only a
+ * competitor added since is paid for.
+ */
+export async function analyzeCompetitorGapAction(siteId: string): Promise<ActionResult> {
+  const { user, site, error } = await guard(siteId, "edit");
+  if (!site || error) return fail(error ?? "Site not found.");
+  if (!dataForSeoConfigured()) return fail("Keyword rankings come from DataForSEO Labs: set DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD first.");
+  if (!gapMarketSupported(marketOf(site.locale))) return fail(`The keyword gap reads keywords in the Latin alphabet only, and this site's market is ${site.locale}.`);
+  const [named] = await appDb()`select 1 from context.entities where org_id = ${site.org_id} and type = 'competitor' and cardinality(domains) > 0 limit 1`;
+  if (!named) return fail("Name a competitor with its domain first.");
+  const jobError = await queueJob(strategyCompetitorGapRequested.create({ siteId, orgId: site.org_id, requestedBy: user.id }));
   if (jobError) return fail(jobError);
   return { ok: true };
 }
