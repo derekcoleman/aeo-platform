@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { ActionButton } from "@/components/app/action-button";
+import { AnswerEngines, AnswerEnginesLoading } from "@/components/app/answer-engines";
 import { LiveRefresh } from "@/components/app/live-refresh";
 import { CompetitorDomainsLoading, NamedCompetitors, SourcesShapingAnswers } from "@/components/app/competitor-domains";
 import { MethodologyNote } from "@/components/app/methodology-note";
@@ -242,6 +243,17 @@ export default async function StrategyPage({ params, searchParams }: { params: P
         </TabsContent>
 
         <TabsContent value="visibility" className="grid gap-4 pt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2">Engines <Badge variant="outline">API-grounded probes via OpenRouter</Badge></CardTitle>
+              <CardDescription>How each AI engine&apos;s model answers your tracked prompts when we ask it through its API with web search on{topicFilter ? ", this topic only" : ""}. Our own probes, not the consumer apps, and never added to the Google AI Overview numbers or to Profound&apos;s below.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Suspense fallback={<AnswerEnginesLoading />}>
+                <AnswerEngines siteId={siteId} orgId={site.org_id} topicId={topicFilter ?? null} />
+              </Suspense>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle>Profound {profound ? <Badge variant={profound.status === "active" ? "success" : "destructive"}>{profound.status} · {profound.mode}</Badge> : null}</CardTitle>

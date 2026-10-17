@@ -46,11 +46,15 @@ export async function legacyTopicGaps(siteId: string, sql: postgres.Sql): Promis
   return row?.n ?? 0;
 }
 
-/** Demand's 7-day snapshot count, Profound's synced rows included. */
+/**
+ * Demand's 7-day snapshot count, Profound's synced rows included. Answer
+ * probes came later and were never on that page, so they are left out of
+ * the old number too: the restatement explains the Profound rows, not them.
+ */
 export async function legacySnapshots7d(siteId: string, sql: postgres.Sql): Promise<number> {
   const [row] = await sql<{ n: number }[]>`
     select count(*)::int as n from measure.serp_snapshots s
-    where s.site_id = ${siteId} and s.fetched_at >= now() - interval '7 days'`;
+    where s.site_id = ${siteId} and s.fetched_at >= now() - interval '7 days' and s.provider <> 'openrouter'`;
   return row?.n ?? 0;
 }
 

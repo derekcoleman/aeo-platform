@@ -67,8 +67,8 @@ describe("native-only competitor reads", () => {
   it("the cited-page set comes from Google AI Overview citations of our own trackers, never Profound's engines", async () => {
     const sql = fakeSql();
     await collectCompetitorUrls(SITE, {}, sql);
-    expect(sql.queries[0]!.text).toContain("c.surface = 'ai_overview' and c.source_role <> all ($2::measure.source_role[]) and s.provider = any ($3::measure.serp_provider[])");
-    expect(sql.queries[0]!.values[2]).toEqual(["dataforseo", "serpapi"]);
+    expect(sql.queries[0]!.text).toContain("join measure.v_native_aio s on s.id = c.serp_snapshot_id");
+    expect(sql.queries[0]!.text).toContain("c.surface = 'ai_overview' and c.source_role <> all ($2::measure.source_role[])");
   });
 
   it("forums, video, social, review sites, wikis, directories and marketplaces are never a structural target; publishers, vendors and unknown domains are", async () => {
@@ -83,18 +83,20 @@ describe("native-only competitor reads", () => {
   it("named competitors and sources shaping answers are native by default; Profound is asked for on its own, every surface counted", async () => {
     const sql = fakeSql();
     await namedCompetitors(SITE, {}, sql);
-    await namedCompetitors(SITE, { providers: ["profound"] }, sql);
+    await namedCompetitors(SITE, { source: "profound" }, sql);
     await sourcesShapingAnswers(SITE, {}, sql);
-    await sourcesShapingAnswers(SITE, { providers: ["profound"] }, sql);
+    await sourcesShapingAnswers(SITE, { source: "profound" }, sql);
     const [named, namedProfound, sources, sourcesProfound] = sql.queries;
-    expect(named!.text).toContain("c.source_role = 'competitor' and c.entity_id is not null and s.provider = any ($2::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')");
+    expect(named!.text).toContain("join measure.v_native_aio s on s.id = c.serp_snapshot_id");
+    expect(named!.text).toContain("c.source_role = 'competitor' and c.entity_id is not null and (c.surface = 'ai_overview' or s.provider = 'profound')");
     // Every competitor the org named is listed, cited or not, and only this site's org's.
-    expect(named!.text).toContain("from context.entities e join app.sites st on st.id = $5 and st.org_id = e.org_id left join cited ci on ci.entity_id = e.id where e.type = 'competitor'");
-    expect(named!.values[1]).toEqual(["dataforseo", "serpapi"]);
-    expect(namedProfound!.values[1]).toEqual(["profound"]);
-    expect(sources!.text).toContain("not c.is_owned and c.source_role not in ('owned', 'competitor') and s.provider = any ($3::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')");
-    expect(sources!.values[2]).toEqual(["dataforseo", "serpapi"]);
-    expect(sourcesProfound!.values[2]).toEqual(["profound"]);
+    expect(named!.text).toContain("from context.entities e join app.sites st on st.id = $4 and st.org_id = e.org_id left join cited ci on ci.entity_id = e.id where e.type = 'competitor'");
+    expect(namedProfound!.text).toContain("join (select * from measure.v_answer_observations where provider = 'profound') s on s.id = c.serp_snapshot_id");
+    expect(sources!.text).toContain("join measure.v_native_aio s on s.id = c.serp_snapshot_id");
+    expect(sources!.text).toContain("not c.is_owned and c.source_role not in ('owned', 'competitor') and (c.surface = 'ai_overview' or s.provider = 'profound')");
+    expect(sourcesProfound!.text).toContain("join (select * from measure.v_answer_observations where provider = 'profound') s on s.id = c.serp_snapshot_id");
+    // Never an answer probe: neither relation holds one.
+    for (const q of [named, namedProfound, sources, sourcesProfound]) expect(q!.text).not.toContain("measure.serp_snapshots");
   });
 
   it("sources group by role, the most cited role first and the unclassified last", () => {
@@ -110,14 +112,16 @@ describe("native-only competitor reads", () => {
   it("the Demand page's 7-day snapshot count is native only", async () => {
     const sql = fakeSql();
     await demandCounts(SITE, sql);
-    expect(sql.queries[0]!.text).toContain("s.provider = any ($2::measure.serp_provider[]) and s.fetched_at >= now() - interval '7 days'");
+    expect(sql.queries[0]!.text).toContain("(select count(*)::int from measure.v_native_aio s where s.site_id = $1 and s.fetched_at >= now() - interval '7 days') as snapshots_7d");
   });
 
   it("the refresh scan counts native AI Overview citations only, and Profound's on any surface", async () => {
     const sql = fakeSql();
     await loadInventorySignals(SITE, sql);
     const text = sql.queries.find((q) => q.text.startsWith("with gsc as"))!.text;
-    expect(text).toMatch(/filter \(where c\.surface = 'ai_overview' and s\.provider = any \(\$\d::measure\.serp_provider\[\]\) and s\.fetched_at >= now\(\) - interval '30 days'\) as native,/);
-    expect(text).toContain("filter (where s.provider = 'profound' and s.fetched_at >= now() - interval '30 days') as profound,");
+    expect(text).toContain("select id, question_id, fetched_at, 'native' as source from measure.v_native_aio");
+    expect(text).toContain("select id, question_id, fetched_at, 'profound' from measure.v_answer_observations where site_id = $3 and provider = 'profound'");
+    expect(text).toContain("filter (where s.source = 'native' and c.surface = 'ai_overview' and s.fetched_at >= now() - interval '30 days') as native,");
+    expect(text).toContain("filter (where s.source = 'profound' and s.fetched_at >= now() - interval '30 days') as profound,");
   });
 });

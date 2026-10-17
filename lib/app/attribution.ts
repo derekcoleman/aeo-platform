@@ -1,12 +1,12 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
-import { NATIVE_PROVIDERS } from "@/lib/demand/store";
 import { METHODOLOGY_VERSION } from "./methodology";
 
 /**
  * Per-asset attribution: three independent signals per published piece,
  * each from its own table, never estimated.
- *  - AI Overview citations (native providers only; Profound is enrichment)
+ *  - AI Overview citations (our own trackers only, measure.v_native_aio;
+ *    Profound is enrichment and answer probes are reported on their own)
  *    now versus the 30 days before publish — the "before" that makes a
  *    lift claim honest.
  *  - live_fetch crawler hits: a model reading the page mid-answer.
@@ -42,10 +42,10 @@ export async function assetAttribution(siteId: string, limit = 100, sql: postgre
       where ci.site_id = ${siteId} and ci.status = 'published'
     )
     select i.id, i.title, i.slug, i.path, i.published_at,
-      (select count(distinct s.question_id)::int from measure.serp_citations c join measure.serp_snapshots s on s.id = c.serp_snapshot_id
-        where c.content_id = i.id and c.is_owned and c.surface = 'ai_overview' and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and s.fetched_at >= now() - interval '30 days') as aio_questions_30d,
-      (select count(distinct s.question_id)::int from measure.serp_citations c join measure.serp_snapshots s on s.id = c.serp_snapshot_id
-        where c.content_id = i.id and c.is_owned and c.surface = 'ai_overview' and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[])
+      (select count(distinct s.question_id)::int from measure.serp_citations c join measure.v_native_aio s on s.id = c.serp_snapshot_id
+        where c.content_id = i.id and c.is_owned and c.surface = 'ai_overview' and s.fetched_at >= now() - interval '30 days') as aio_questions_30d,
+      (select count(distinct s.question_id)::int from measure.serp_citations c join measure.v_native_aio s on s.id = c.serp_snapshot_id
+        where c.content_id = i.id and c.is_owned and c.surface = 'ai_overview'
           and i.published_at is not null and s.fetched_at < i.published_at and s.fetched_at >= i.published_at - interval '30 days') as aio_questions_baseline,
       (select count(*)::int from analytics.crawl_events e where e.content_id = i.id and e.purpose = 'live_fetch' and e.ts >= now() - interval '7 days') as live_fetch_7d,
       (select count(*)::int from analytics.crawl_events e where e.content_id = i.id and e.purpose = 'live_fetch' and e.ts >= now() - interval '30 days') as live_fetch_30d,

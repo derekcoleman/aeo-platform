@@ -10,7 +10,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { OPS_SECTIONS, opsHref, resolveTab, settingsHref } from "@/lib/app/nav";
-import { remediateFaqAction, restateMetricsAction, runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
+import { remediateFaqAction, restateMetricsAction, runHealthCheckAction, runPreflightAction, sampleAnswersAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
+import { ANSWER_PROBES_FEATURE } from "@/lib/answers/sample";
 import { setAutonomyControlAction } from "@/lib/app/takedown-actions";
 import { controlFor, listAutonomyControls, type AutonomyControl, type ControlTarget } from "@/lib/ops/controls";
 import { budgetCapMaxUsd, listBudgets, RESOURCE_LABEL, type BudgetRow } from "@/lib/ops/spend";
@@ -118,7 +119,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           <Card>
             <CardContent>
               <Table>
-                <TableHeader><TableRow><TableHead>Organisation</TableHead><TableHead>Plan</TableHead><TableHead>Members</TableHead><TableHead>Sites</TableHead><TableHead>Profound</TableHead><TableHead>Kill switches</TableHead><TableHead>Created</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead>Organisation</TableHead><TableHead>Plan</TableHead><TableHead>Members</TableHead><TableHead>Sites</TableHead><TableHead>Profound</TableHead><TableHead title="Weekly API-grounded probes of each AI engine through OpenRouter, within the org's answer probe budget">Answer probes</TableHead><TableHead>Kill switches</TableHead><TableHead>Created</TableHead></TableRow></TableHeader>
                 <TableBody>
                   {orgs.map((o) => (
                     <TableRow key={o.id}>
@@ -130,6 +131,14 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                         <ActionButton size="sm" variant={o.profound ? "secondary" : "outline"} action={setFeatureAction.bind(null, o.id, "connector:profound", !o.profound)} done={o.profound ? "disabled" : "enabled"}>
                           {o.profound ? "Enabled — disable" : "Enable"}
                         </ActionButton>
+                      </TableCell>
+                      <TableCell className="whitespace-normal">
+                        <span className="inline-flex flex-wrap gap-1">
+                          <ActionButton size="sm" variant={o.answer_probes ? "secondary" : "outline"} action={setFeatureAction.bind(null, o.id, ANSWER_PROBES_FEATURE, !o.answer_probes)} done={o.answer_probes ? "disabled" : "enabled"}>
+                            {o.answer_probes ? "Enabled — disable" : "Enable"}
+                          </ActionButton>
+                          {o.answer_probes ? <ActionButton size="sm" variant="ghost" action={sampleAnswersAction.bind(null, o.id)} done="queued" title="Probe every eligible project's prompt panel now instead of on Tuesday.">Sample now</ActionButton> : null}
+                        </span>
                       </TableCell>
                       <TableCell className="whitespace-normal"><span className="inline-flex flex-wrap gap-1"><ControlButtons target={{ scope: "org", id: o.id }} control={controlFor(controls, { scope: "org", id: o.id })} /></span></TableCell>
                       <TableCell>{when(o.created_at)}</TableCell>

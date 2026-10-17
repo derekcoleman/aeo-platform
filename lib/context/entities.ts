@@ -44,6 +44,8 @@ export interface EntityMention {
   entity: EntityRow;
   alias: string;
   count: number;
+  /** Offset in `text` of the entity's earliest counted mention, by any of its aliases. */
+  firstIndex: number;
 }
 
 /**
@@ -60,17 +62,21 @@ export function findEntityMentions(index: AliasIndex, text: string): EntityMenti
   for (const [alias, entity] of aliases) {
     const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(alias).replace(/ /g, "\\s+")}(?![\\p{L}\\p{N}])`, "giu");
     let count = 0;
+    let first = Number.POSITIVE_INFINITY;
     for (const m of text.matchAll(re)) {
       const start = m.index;
       const end = start + m[0].length;
       if (taken.some(([s, e]) => start < e && end > s)) continue;
       taken.push([start, end]);
       count++;
+      first = Math.min(first, start);
     }
     if (count === 0) continue;
     const cur = out.get(entity.id);
-    if (cur) cur.count += count;
-    else out.set(entity.id, { entity, alias, count });
+    if (cur) {
+      cur.count += count;
+      cur.firstIndex = Math.min(cur.firstIndex, first);
+    } else out.set(entity.id, { entity, alias, count, firstIndex: first });
   }
   return [...out.values()].sort((a, b) => b.count - a.count);
 }

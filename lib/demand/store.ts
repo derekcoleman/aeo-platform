@@ -300,12 +300,27 @@ export interface CitationGap {
 }
 
 /**
- * Our own SERP providers. Profound-sourced rows are enrichment and are only
- * read when asked for explicitly, so every native metric computes with the
- * connector off and the UI can attribute each number to its source.
+ * Our own SERP providers: the rows measure.v_native_aio holds (with
+ * collection_method serp; a test checks the view names the same two).
+ * Profound-sourced rows are enrichment and answer probes are their own
+ * measurement; neither is in the view, so every native metric computes with
+ * the connector off and the UI can attribute each number to its source.
  */
 export const NATIVE_PROVIDERS = ["dataforseo", "serpapi"] as const;
-export type SnapshotProvider = SerpProviderName | "profound";
+
+/**
+ * Where a read model's snapshots come from. `native`: Google results from our
+ * own SERP trackers (measure.v_native_aio). `profound`: Profound's synced
+ * answers from other engines and AI Mode, read on their own and labelled as
+ * Profound's (measure.v_answer_observations, provider profound). Answer
+ * probes have read models of their own (lib/app/visibility.ts).
+ */
+export type SnapshotSource = "native" | "profound";
+
+/** The snapshot relation a read model joins for `source`, as a fragment to embed in its query. */
+export function snapshotsFrom(source: SnapshotSource, sql: postgres.Sql) {
+  return source === "profound" ? sql`(select * from measure.v_answer_observations where provider = 'profound')` : sql`measure.v_native_aio`;
+}
 
 /** A gap is judged on a snapshot at most this old; past it, the question needs measuring again before it is work. */
 export const GAP_FRESHNESS_DAYS = 45;
@@ -313,23 +328,17 @@ export const GAP_FRESHNESS_DAYS = 45;
 /**
  * The highest-value opportunity type in the product: a question where an AI
  * Overview triggers, someone else is cited, and we are not. Judged on the
- * latest snapshot per question whatever it showed: when the newest one has
- * no AI Overview, or cites us, the gap is closed, not answered by an older
- * snapshot that still had one. Snapshots older than GAP_FRESHNESS_DAYS do
- * not count.
+ * latest snapshot from our own trackers (measure.v_native_aio) per question
+ * whatever it showed: when the newest one has no AI Overview, or cites us,
+ * the gap is closed, not answered by an older snapshot that still had one.
+ * Snapshots older than GAP_FRESHNESS_DAYS do not count.
  */
-export async function citationGaps(
-  siteId: string,
-  limit = 50,
-  sql: postgres.Sql = appDb(),
-  providers: readonly SnapshotProvider[] = NATIVE_PROVIDERS,
-): Promise<CitationGap[]> {
+export async function citationGaps(siteId: string, limit = 50, sql: postgres.Sql = appDb()): Promise<CitationGap[]> {
   return sql<CitationGap[]>`
     with latest as (
       select distinct on (question_id) id, question_id, fetched_at, provider, aio_triggered
-      from measure.serp_snapshots
-      where site_id = ${siteId} and provider = any (${[...providers]}::measure.serp_provider[])
-        and fetched_at >= now() - make_interval(days => ${GAP_FRESHNESS_DAYS})
+      from measure.v_native_aio
+      where site_id = ${siteId} and fetched_at >= now() - make_interval(days => ${GAP_FRESHNESS_DAYS})
       order by question_id, fetched_at desc
     )
     select q.id as question_id, q.topic_id, q.text, q.demand_score::float as demand_score,
@@ -361,15 +370,11 @@ export interface VisibilitySummary {
 }
 
 /** Share of AI Overview citations across the latest snapshot of every tracked question. */
-export async function visibilitySummary(
-  siteId: string,
-  sql: postgres.Sql = appDb(),
-  providers: readonly SnapshotProvider[] = NATIVE_PROVIDERS,
-): Promise<VisibilitySummary> {
+export async function visibilitySummary(siteId: string, sql: postgres.Sql = appDb()): Promise<VisibilitySummary> {
   const [row] = await sql<{ questions_tracked: number; aio_triggered: number; aio_cited: number; featured_snippets_owned: number }[]>`
     with latest as (
       select distinct on (question_id) id, aio_triggered
-      from measure.serp_snapshots where site_id = ${siteId} and provider = any (${[...providers]}::measure.serp_provider[])
+      from measure.v_native_aio where site_id = ${siteId}
       order by question_id, fetched_at desc
     )
     select count(*)::int as questions_tracked,
@@ -383,8 +388,8 @@ export async function visibilitySummary(
     from latest`;
   const top = await sql<{ domain: string; citations: number }[]>`
     with latest as (
-      select distinct on (question_id) id from measure.serp_snapshots
-      where site_id = ${siteId} and provider = any (${[...providers]}::measure.serp_provider[])
+      select distinct on (question_id) id from measure.v_native_aio
+      where site_id = ${siteId}
       order by question_id, fetched_at desc
     )
     select c.domain, count(*)::int as citations

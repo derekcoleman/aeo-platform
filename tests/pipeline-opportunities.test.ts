@@ -115,7 +115,7 @@ describe("upsertOpportunities", () => {
 
   it("scanSite runs the gap query then upserts", async () => {
     const sql = fakeSql([
-      [/from measure\.serp_snapshots/, () => [{ question_id: Q1, topic_id: null, text: "a", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [], named_competitor_domains: [], named_competitors: 0 }]],
+      [/from measure\.v_native_aio/, () => [{ question_id: Q1, topic_id: null, text: "a", demand_score: 10, snapshot_id: "s", fetched_at: "", provider: "p", competitor_domains: [], named_competitor_domains: [], named_competitors: 0 }]],
       [/insert into content\.opportunities/, () => [{ inserted: true }]],
     ]);
     expect(await scanSite(SITE_ID, sql)).toEqual({ inserted: 1, updated: 0, gaps: 1 });

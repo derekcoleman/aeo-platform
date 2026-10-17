@@ -1,12 +1,14 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
-import { NATIVE_PROVIDERS, type SnapshotProvider } from "@/lib/demand/store";
+import { snapshotsFrom, type SnapshotSource } from "@/lib/demand/store";
 import { SOURCE_ROLE_LABELS, type SourceRole } from "@/lib/measure/source-roles";
 
 /**
  * Read models for the Strategy page. Native numbers come from our own SERP
- * snapshots; Profound numbers come from measure.external_metrics rows the
- * connector wrote, and are always labelled as Profound's.
+ * snapshots (measure.v_native_aio); Profound numbers come from
+ * measure.external_metrics rows the connector wrote, or from its snapshots
+ * when asked for, and are always labelled as Profound's. Answer probes are
+ * lib/app/visibility.ts's.
  */
 
 export interface PromptRow {
@@ -47,8 +49,8 @@ export async function listPrompts(siteId: string, opts: { topicId?: string | nul
            p.visibility as profound_visibility
     from measure.questions q
     left join lateral (
-      select ss.id, ss.aio_triggered from measure.serp_snapshots ss
-      where ss.question_id = q.id and ss.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) order by ss.fetched_at desc limit 1
+      select ss.id, ss.aio_triggered from measure.v_native_aio ss
+      where ss.question_id = q.id order by ss.fetched_at desc limit 1
     ) s on true
     left join profound p on p.question_id = q.id
     where q.site_id = ${siteId} and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
@@ -97,11 +99,12 @@ export async function profoundByTopic(siteId: string, sql: postgres.Sql = appDb(
   return new Map(rows.map((r) => [r.topic_id ?? "", r]));
 }
 
-/** The 30-day window and provider rule both competitor read models share. */
+/** The 30-day window and source rule both competitor read models share. */
 interface CitedOpts {
   topicId?: string | null;
   limit?: number;
-  providers?: readonly SnapshotProvider[];
+  /** Native (our trackers' AI Overviews) by default; Profound is read on its own. */
+  source?: SnapshotSource;
 }
 
 export interface NamedCompetitorRow {
@@ -123,21 +126,20 @@ export interface NamedCompetitorRow {
  * how often each was cited instead of us in the last 30 days, every one
  * listed even when it was not. Native by default: Google AI Overview
  * citations from our own trackers. Profound is asked for separately
- * (`providers: ["profound"]`), every surface counted, and shown as its own
+ * (`source: "profound"`), every surface counted, and shown as its own
  * column, never added to the native one.
  */
 export async function namedCompetitors(siteId: string, opts: CitedOpts = {}, sql: postgres.Sql = appDb()): Promise<NamedCompetitorRow[]> {
-  const providers = [...(opts.providers ?? NATIVE_PROVIDERS)];
   return sql<NamedCompetitorRow[]>`
     with cited as (
       select c.entity_id, count(*)::int as citations, count(distinct s.question_id)::int as questions,
              array_agg(distinct c.domain order by c.domain) as cited_domains,
              array_agg(distinct s.provider::text order by s.provider::text) as providers
       from measure.serp_citations c
-      join measure.serp_snapshots s on s.id = c.serp_snapshot_id
+      join ${snapshotsFrom(opts.source ?? "native", sql)} s on s.id = c.serp_snapshot_id
       join measure.questions q on q.id = s.question_id
       where c.site_id = ${siteId} and c.source_role = 'competitor' and c.entity_id is not null
-        and s.provider = any (${providers}::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')
+        and (c.surface = 'ai_overview' or s.provider = 'profound')
         and s.fetched_at >= now() - interval '30 days'
         and not q.excluded and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
       group by c.entity_id
@@ -178,16 +180,15 @@ export interface SourceRoleGroup {
  * namedCompetitors; Profound is its own list.
  */
 export async function sourcesShapingAnswers(siteId: string, opts: CitedOpts = {}, sql: postgres.Sql = appDb()): Promise<SourceRoleGroup[]> {
-  const providers = [...(opts.providers ?? NATIVE_PROVIDERS)];
   const rows = await sql<SourceDomainRow[]>`
     select c.source_role::text as role, c.domain, count(*)::int as citations, count(distinct s.question_id)::int as questions,
            array_agg(distinct s.provider::text order by s.provider::text) as providers,
            exists (select 1 from measure.site_source_overrides o where o.site_id = ${siteId} and o.domain = measure.normalize_domain(c.domain)) as overridden
     from measure.serp_citations c
-    join measure.serp_snapshots s on s.id = c.serp_snapshot_id
+    join ${snapshotsFrom(opts.source ?? "native", sql)} s on s.id = c.serp_snapshot_id
     join measure.questions q on q.id = s.question_id
     where c.site_id = ${siteId} and not c.is_owned and c.source_role not in ('owned', 'competitor')
-      and s.provider = any (${providers}::measure.serp_provider[]) and (c.surface = 'ai_overview' or s.provider = 'profound')
+      and (c.surface = 'ai_overview' or s.provider = 'profound')
       and s.fetched_at >= now() - interval '30 days'
       and not q.excluded and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)
     group by c.source_role, c.domain

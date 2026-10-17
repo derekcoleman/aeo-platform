@@ -19,6 +19,8 @@ describe("Inngest function concurrency", () => {
 
   it("registers no function above the plan's limit", () => {
     expect(functions.length).toBeGreaterThan(20);
+    const ids = functions.map((fn) => (fn as unknown as { opts: Opts }).opts.id);
+    expect(ids).toEqual(expect.arrayContaining(["answers-sample", "answers-sample-weekly"]));
     for (const fn of functions) {
       const opts = (fn as unknown as { opts: Opts }).opts;
       for (const limit of limitsOf(opts.concurrency)) expect({ id: opts.id, limit }).toEqual({ id: opts.id, limit: Math.min(limit, PLAN_CONCURRENCY) });

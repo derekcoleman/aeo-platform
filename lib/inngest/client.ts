@@ -100,6 +100,32 @@ export const serpTrackCompleted = eventType("serp/track.completed", {
   }),
 });
 
+// ── answer sampling ─────────────────────────────────────────────────────────
+
+/** Probe one site's prompt panel on every enabled answer engine (lib/answers). Sent weekly per sampled site, or by staff from /ops. */
+export const answersSampleRequested = eventType("answers/sample.requested", {
+  schema: z.object({
+    siteId: z.guid(),
+    orgId: z.guid(),
+    requestedBy: z.guid().nullable().optional(),
+  }),
+});
+
+export const answersSampleCompleted = eventType("answers/sample.completed", {
+  schema: z.object({
+    siteId: z.guid(),
+    orgId: z.guid(),
+    /** Answers recorded, of which `cached` came from the day's answer cache. */
+    probes: z.number().int(),
+    cached: z.number().int(),
+    /** Samples skipped because their probe failed. */
+    failed: z.number().int(),
+    costUsd: z.number(),
+    /** The org's answer_probe budget ran out before the panel was done. */
+    budgetStopped: z.boolean(),
+  }),
+});
+
 // ── connectors ──────────────────────────────────────────────────────────────
 
 const syncKindSchema = z.enum(["backfill", "incremental", "webhook", "upload"]);

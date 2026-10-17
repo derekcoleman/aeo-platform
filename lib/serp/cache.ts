@@ -10,7 +10,7 @@ import type { SerpProviderName, SerpQuery } from "./types";
  * the cadence decides when we pay, the cache guarantees we pay at most once.
  */
 
-export type SerpMethod = "autocomplete" | "serp";
+export type SerpMethod = "autocomplete" | "serp" | "answer";
 
 export interface SerpCache {
   get<T>(key: string): Promise<T | null>;
@@ -18,7 +18,8 @@ export interface SerpCache {
 }
 
 export interface CacheMeta {
-  provider: SerpProviderName;
+  /** A SERP vendor, or OpenRouter for an answer probe. */
+  provider: SerpProviderName | "openrouter";
   method: SerpMethod;
   query: SerpQuery;
   day: string;
@@ -32,6 +33,19 @@ export function dayOf(now: Date = new Date()): string {
 export function cacheKey(provider: SerpProviderName, method: SerpMethod, q: SerpQuery, day: string): string {
   const query = q.query.trim().toLowerCase().replace(/\s+/g, " ");
   return `${provider}|${method}|${q.locale.country.toLowerCase()}-${q.locale.language.toLowerCase()}|${q.device}|${day}|${query}`;
+}
+
+/**
+ * An answer probe's key: the engine, the model with how it searched
+ * (`openai/gpt-5-mini+web:native`), which sample and which wording of the
+ * prompt, the day and the prompt. Shared across tenants like a SERP key: an
+ * engine's answer to a prompt does not depend on who asked, and another run
+ * the same day reads it instead of paying for another. The day is the run's,
+ * and the step that paid keeps its own record apart (lib/answers/sample.ts).
+ */
+export function answerCacheKey(engine: string, model: string, sampleIndex: number, paraphraseId: string | null, q: string, day: string): string {
+  const query = q.trim().toLowerCase().replace(/\s+/g, " ");
+  return `openrouter|answer|${engine}|${model}|s${sampleIndex}|${paraphraseId ?? "-"}|${day}|${query}`;
 }
 
 export function memoryCache(): SerpCache & { size: number } {

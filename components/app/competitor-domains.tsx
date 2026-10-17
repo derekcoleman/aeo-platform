@@ -27,7 +27,7 @@ interface Props {
 export async function NamedCompetitors({ siteId, topicId, profound = false, editor = false }: Props) {
   const [native, viaProfound] = await Promise.all([
     namedCompetitors(siteId, { topicId }),
-    profound ? namedCompetitors(siteId, { topicId, providers: ["profound"] }) : Promise.resolve([] as NamedCompetitorRow[]),
+    profound ? namedCompetitors(siteId, { topicId, source: "profound" }) : Promise.resolve([] as NamedCompetitorRow[]),
   ]);
   if (native.length === 0) {
     return <p className="text-muted-foreground text-sm">No competitors named yet. Add the rivals buyers compare you with, or mark one from the sources below; their domains count as them from then on, citations already recorded included.</p>;
@@ -76,7 +76,7 @@ const ROLE_OPTIONS = OVERRIDE_SOURCE_ROLES.map((r) => ({ value: r, label: SOURCE
 export async function SourcesShapingAnswers({ siteId, topicId, profound = false, editor = false }: Props) {
   const [native, viaProfound] = await Promise.all([
     sourcesShapingAnswers(siteId, { topicId }),
-    profound ? sourcesShapingAnswers(siteId, { topicId, providers: ["profound"] }) : Promise.resolve([] as SourceRoleGroup[]),
+    profound ? sourcesShapingAnswers(siteId, { topicId, source: "profound" }) : Promise.resolve([] as SourceRoleGroup[]),
   ]);
   return (
     <>

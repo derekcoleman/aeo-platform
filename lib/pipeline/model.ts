@@ -2,7 +2,7 @@ import type { ZodType } from "zod";
 import { bareModelId, ModelRefusalError, modelFromEnv, type Completion, type Effort, type TextModel } from "@/lib/ai/model";
 import { parseScoredJson, ScoredJsonError } from "@/lib/ai/scored-json";
 import { appDb } from "@/lib/db/app";
-import { defaultSpendGovernor, usdFromEnv, type SpendGovernor } from "@/lib/ops/spend";
+import { ANSWER_PROBE_TASK_KEY, defaultSpendGovernor, usdFromEnv, type SpendGovernor } from "@/lib/ops/spend";
 import type postgres from "postgres";
 import type { ModelRun } from "./types";
 
@@ -15,9 +15,16 @@ import type { ModelRun } from "./types";
  * is a query and the per-article cap is a sum.
  */
 
-export type TaskKey = "pipeline.brief" | "pipeline.draft" | "pipeline.qa.judge" | "context.facts.extract" | "context.manifest.draft" | "site.profile.extract";
+/** Tasks the router picks a model for (AEO_MODEL_*). */
+export type RoutedTaskKey = "pipeline.brief" | "pipeline.draft" | "pipeline.qa.judge" | "context.facts.extract" | "context.manifest.draft" | "site.profile.extract";
+/**
+ * Every task a model call is ledgered under: the routed ones, and the answer
+ * probes, whose models are the engines' (lib/answers/engines.ts) and whose
+ * spend is the answer_probe budget's.
+ */
+export type TaskKey = RoutedTaskKey | typeof ANSWER_PROBE_TASK_KEY;
 
-const TASK_ENV: Record<TaskKey, string> = {
+const TASK_ENV: Record<RoutedTaskKey, string> = {
   "pipeline.brief": "AEO_MODEL_BRIEF",
   "pipeline.draft": "AEO_MODEL_DRAFT",
   "pipeline.qa.judge": "AEO_MODEL_QA_JUDGE",
@@ -28,7 +35,7 @@ const TASK_ENV: Record<TaskKey, string> = {
 
 // Extraction is a classification job at volume: small model, strict schema.
 // The manifesto is editorial: mid model, a human edits it anyway.
-const DEFAULTS: Record<TaskKey, string> = {
+const DEFAULTS: Record<RoutedTaskKey, string> = {
   "pipeline.brief": "claude-opus-5-5",
   "pipeline.draft": "claude-opus-5-5",
   "pipeline.qa.judge": "claude-sonnet-5-5",
@@ -49,7 +56,7 @@ export interface TaskSettings {
  * calls are not streamed, so draft stays at `high`, not `xhigh`: a longer
  * think risks the request timeout before a token arrives.
  */
-export const TASK_SETTINGS: Record<TaskKey, TaskSettings> = {
+export const TASK_SETTINGS: Record<RoutedTaskKey, TaskSettings> = {
   "pipeline.brief": { maxTokens: 16_000, effort: "high" },
   "pipeline.draft": { maxTokens: 20_000, effort: "high" },
   "pipeline.qa.judge": { maxTokens: 8_000, effort: "medium" },
@@ -81,11 +88,11 @@ export class ModelTruncatedError extends Error {
   }
 }
 
-export function modelIdFor(task: TaskKey, env: NodeJS.ProcessEnv = process.env): string {
+export function modelIdFor(task: RoutedTaskKey, env: NodeJS.ProcessEnv = process.env): string {
   return env[TASK_ENV[task]] ?? env.AEO_MODEL_DEFAULT ?? DEFAULTS[task];
 }
 
-export function modelFor(task: TaskKey, env: NodeJS.ProcessEnv = process.env): TextModel {
+export function modelFor(task: RoutedTaskKey, env: NodeJS.ProcessEnv = process.env): TextModel {
   return modelFromEnv(modelIdFor(task, env), env);
 }
 
@@ -241,7 +248,7 @@ function runOf(input: TaskInput, out: Completion): ModelRun {
  * settles with what it cost, and gives the hold back if the call throws.
  */
 export async function runJsonTask<T>(
-  task: TaskKey,
+  task: RoutedTaskKey,
   model: TextModel,
   input: TaskInput,
   schema: ZodType<T>,

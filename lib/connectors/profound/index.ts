@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { citationRole, contentIdForUrl, isOwnedUrl, loadSiteOwnership, type SiteOwnership } from "@/lib/demand/store";
 import { normalizeQuestion } from "@/lib/demand/question-graph";
+import { answerEngineSlug, answerSurface } from "@/lib/answers/engines";
 import { loadSourceRoleContext, type SourceRole } from "@/lib/measure/source-roles";
 import { isFeatureEnabled } from "../store";
 import { ConnectorError, FeatureDisabledError, type Connector, type SyncInput, type SyncPageInput, type SyncPageResult, type SyncResult } from "../types";
@@ -17,11 +18,14 @@ export * from "./api";
  *
  * Profound is enrichment, never a dependency: the whole connector sits behind
  * the `connector:profound` org feature flag, and native metrics read only
- * NATIVE_PROVIDERS. Their data is mapped into our schema rather than
- * mirrored: prompts → measure.questions (source 'profound'), citations →
- * measure.serp_citations under a snapshot with provider 'profound' (each
- * with its source role, so a rival and a review site are told apart here
- * too), and visibility → measure.external_metrics (surface
+ * measure.v_native_aio, which never holds a Profound row. Their data is
+ * mapped into our schema rather than mirrored: prompts → measure.questions
+ * (source 'profound'), answers → measure.serp_snapshots with provider
+ * 'profound', collection_method 'third_party' and Profound's engine (an AI
+ * Overview flag only on Google AI Overview rows), citations →
+ * measure.serp_citations on that engine's surface (ai_overview, ai_mode or
+ * llm_answer; each with its source role, so a rival and a review site are
+ * told apart here too), and visibility → measure.external_metrics (surface
  * 'profound_visibility').
  * Every derived row carries the provider so the UI can attribute it.
  */
@@ -137,10 +141,13 @@ export async function ingestProfoundRecords(
         site_id: own.siteId,
         question_id: x.qid,
         provider: "profound",
+        engine: answerEngineSlug(x.r.engine),
+        collection_method: "third_party",
         fetched_at: x.fetchedAt,
         locale: "us-en",
         device: PROFOUND_DEVICE,
-        aio_triggered: true,
+        // Only Google's AI Overview is an AI Overview; another engine's answer has no such flag.
+        aio_triggered: answerEngineSlug(x.r.engine) === "google_aio" ? true : null,
         aio_text: null,
         featured_snippet_url: null,
         organic_count: 0,
@@ -159,6 +166,7 @@ export async function ingestProfoundRecords(
     const contentIds = new Map<string, string | null>();
     const cites: { site_id: string; serp_snapshot_id: string; surface: string; url: string; domain: string; position: number; is_owned: boolean; content_id: string | null; title: null; snippet: null; source_role: SourceRole; entity_id: string | null }[] = [];
     for (const x of snaps) {
+      const surface = answerSurface(answerEngineSlug(x.r.engine));
       for (const c of x.r.citations) {
         const isOwned = isOwnedUrl(c.url, own);
         let contentId: string | null = null;
@@ -168,7 +176,7 @@ export async function ingestProfoundRecords(
           contentId = contentIds.get(c.url) ?? null;
         }
         const source = citationRole(c.url, c.domain, own, roles);
-        cites.push({ site_id: own.siteId, serp_snapshot_id: x.id, surface: "ai_overview", url: c.url, domain: c.domain, position: c.position, is_owned: isOwned, content_id: contentId, title: null, snippet: null, source_role: source.role, entity_id: source.entityId });
+        cites.push({ site_id: own.siteId, serp_snapshot_id: x.id, surface, url: c.url, domain: c.domain, position: c.position, is_owned: isOwned, content_id: contentId, title: null, snippet: null, source_role: source.role, entity_id: source.entityId });
       }
     }
     for (const batch of chunks(cites, INSERT_CHUNK * 2)) await tx`insert into measure.serp_citations ${tx(batch)}`;

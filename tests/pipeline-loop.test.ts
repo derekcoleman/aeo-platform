@@ -13,14 +13,14 @@ describe("citationStatus", () => {
     expect(sql.queries[0]!.text).toContain("order by fetched_at desc limit 1");
     // Another site's snapshot of the same question id must never answer for this one.
     expect(sql.queries[0]!.text).toContain("where question_id = $1 and site_id = $2");
-    // Only our own trackers answer: a newer Profound row (another engine) must not decide whether the page earned its citation.
-    expect(sql.queries[0]!.text).toContain("and provider = any ($3::measure.serp_provider[])");
-    expect(sql.queries[0]!.values).toEqual(["q-1", "site-1", ["dataforseo", "serpapi"]]);
+    // Only our own trackers answer: a newer Profound row or answer probe (another engine) must not decide whether the page earned its citation.
+    expect(sql.queries[0]!.text).toContain("from measure.v_native_aio where question_id = $1 and site_id = $2");
+    expect(sql.queries[0]!.values).toEqual(["q-1", "site-1"]);
   });
 
   it("reads only AI Overview citations from the latest snapshot and dedupes competitors", async () => {
     const sql = fakeSql([
-      [/from measure\.serp_snapshots/, () => [{ id: "snap-9", fetched_at: fetched, aio_triggered: true }]],
+      [/from measure\.v_native_aio/, () => [{ id: "snap-9", fetched_at: fetched, aio_triggered: true }]],
       [/from measure\.serp_citations/, () => [
         { domain: "okta.com", is_owned: false },
         { domain: "acme.com", is_owned: true },
@@ -37,7 +37,7 @@ describe("citationStatus", () => {
 
   it("reports owned:false when an AI Overview cites only competitors", async () => {
     const sql = fakeSql([
-      [/from measure\.serp_snapshots/, () => [{ id: "snap-1", fetched_at: fetched, aio_triggered: true }]],
+      [/from measure\.v_native_aio/, () => [{ id: "snap-1", fetched_at: fetched, aio_triggered: true }]],
       [/from measure\.serp_citations/, () => [{ domain: "okta.com", is_owned: false }]],
     ]);
     const status = await citationStatus("q-1", "site-1", sql);
@@ -46,7 +46,7 @@ describe("citationStatus", () => {
   });
 
   it("reports no citations at all when the AI Overview did not trigger", async () => {
-    const sql = fakeSql([[/from measure\.serp_snapshots/, () => [{ id: "snap-1", fetched_at: fetched, aio_triggered: false }]]]);
+    const sql = fakeSql([[/from measure\.v_native_aio/, () => [{ id: "snap-1", fetched_at: fetched, aio_triggered: false }]]]);
     const status = await citationStatus("q-1", "site-1", sql);
     expect(status).toMatchObject({ aioTriggered: false, owned: false, competitorDomains: [] });
   });

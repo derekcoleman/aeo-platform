@@ -2,7 +2,7 @@ import type postgres from "postgres";
 import { z } from "zod";
 import { appDb } from "@/lib/db/app";
 import { normalizeQuestion } from "@/lib/demand/question-graph";
-import { GAP_FRESHNESS_DAYS, NATIVE_PROVIDERS } from "@/lib/demand/store";
+import { GAP_FRESHNESS_DAYS } from "@/lib/demand/store";
 
 /**
  * Topics: the customer's control surface over what gets tracked and written.
@@ -222,7 +222,7 @@ export async function topicStats(siteId: string, sql: postgres.Sql = appDb()): P
   const rows = await sql<TopicStats[]>`
     with latest as (
       select distinct on (s.question_id) s.question_id, s.id, s.aio_triggered, s.fetched_at
-      from measure.serp_snapshots s where s.site_id = ${siteId} and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[])
+      from measure.v_native_aio s where s.site_id = ${siteId}
       order by s.question_id, s.fetched_at desc
     ), q as (
       select q.topic_id,

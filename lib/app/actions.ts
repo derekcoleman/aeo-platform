@@ -8,6 +8,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import type { Route } from "next";
 import { canEdit, canManage, requireStaff, requireUser } from "@/lib/auth/session";
+import { answerProbesConfigured, sitesForAnswerProbes } from "@/lib/answers/sample";
 import { setFeature } from "@/lib/connectors/store";
 import { appDb } from "@/lib/db/app";
 import {
@@ -17,6 +18,7 @@ import {
   contextSignalsScanRequested,
   inngest,
   metricsRestatementRequested,
+  answersSampleRequested,
   opportunitiesScanRequested,
   siteHealthCheckRequested,
   sitePreflightRequested,
@@ -232,6 +234,17 @@ export async function remediateFaqAction(siteId: string | null): Promise<ActionR
 export async function restateMetricsAction(siteId: string | null): Promise<ActionResult> {
   const staff = await requireStaff();
   const jobError = await queueJob(metricsRestatementRequested.create({ siteId, requestedBy: staff.id }), undefined, "metrics restatement");
+  if (jobError) return fail(jobError);
+  return { ok: true };
+}
+
+/** Sample answers now for every eligible site of the org (staff, from /ops), instead of waiting for Tuesday. */
+export async function sampleAnswersAction(orgId: string): Promise<ActionResult> {
+  const staff = await requireStaff();
+  if (!answerProbesConfigured()) return fail("No OpenRouter key is configured: answer probes go through OpenRouter only.");
+  const sites = await sitesForAnswerProbes(orgId);
+  if (sites.length === 0) return fail("Nothing to sample: answer probes are off for this organisation, or none of its active projects tracks a prompt.");
+  const jobError = await queueJob(sites.map((s) => answersSampleRequested.create({ siteId: s.site_id, orgId: s.org_id, requestedBy: staff.id })), undefined, "answer sampling");
   if (jobError) return fail(jobError);
   return { ok: true };
 }

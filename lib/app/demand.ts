@@ -1,12 +1,12 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
-import { NATIVE_PROVIDERS } from "@/lib/demand/store";
 
 /**
  * Read models for the Demand page: the question graph with each question's
- * latest native SERP snapshot, tracking tiers, and this month's SERP spend
- * against the org's budget. Profound-sourced snapshots are excluded here;
- * they are enrichment and are labelled as such where shown.
+ * latest native SERP snapshot (measure.v_native_aio), tracking tiers, and
+ * this month's SERP spend against the org's budget. Profound-sourced
+ * snapshots and answer probes are excluded here; they are labelled as theirs
+ * where shown.
  */
 
 export interface QuestionRow {
@@ -33,8 +33,8 @@ export async function listSiteQuestions(siteId: string, opts: { trackedOnly?: bo
            coalesce((select count(distinct c.domain)::int from measure.serp_citations c where c.serp_snapshot_id = s.id and c.surface = 'ai_overview' and not c.is_owned), 0) as competitor_count
     from measure.questions q
     left join lateral (
-      select ss.id, ss.fetched_at, ss.aio_triggered from measure.serp_snapshots ss
-      where ss.question_id = q.id and ss.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) order by ss.fetched_at desc limit 1
+      select ss.id, ss.fetched_at, ss.aio_triggered from measure.v_native_aio ss
+      where ss.question_id = q.id order by ss.fetched_at desc limit 1
     ) s on true
     where q.site_id = ${siteId} and (${!opts.trackedOnly}::boolean or q.is_tracked)
     order by q.is_tracked desc, q.demand_score desc, q.seen_count desc
@@ -60,8 +60,8 @@ export async function demandCounts(siteId: string, sql: postgres.Sql = appDb()):
            count(*) filter (where is_tracked and tracking_tier = 'daily')::int as daily,
            count(*) filter (where is_tracked and tracking_tier = 'weekly')::int as weekly,
            count(*) filter (where is_tracked and tracking_tier = 'monthly')::int as monthly,
-           (select count(*)::int from measure.serp_snapshots s
-             where s.site_id = ${siteId} and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and s.fetched_at >= now() - interval '7 days') as snapshots_7d
+           (select count(*)::int from measure.v_native_aio s
+             where s.site_id = ${siteId} and s.fetched_at >= now() - interval '7 days') as snapshots_7d
     from measure.questions where site_id = ${siteId}`;
   return row ?? { questions: 0, tracked: 0, daily: 0, weekly: 0, monthly: 0, snapshots_7d: 0 };
 }

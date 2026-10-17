@@ -1644,3 +1644,186 @@ begin;
 rollback;
 
 \echo 'isolation: source role assertions passed'
+
+-- ── 0023/0024: answer ledger ─────────────────────────────────────────────────
+do $$ begin
+  if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+                 where n.nspname = 'measure' and t.typname = 'citation_surface' and e.enumlabel = 'llm_answer')
+     or not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+                    where n.nspname = 'measure' and t.typname = 'citation_surface' and e.enumlabel = 'ai_mode')
+     or not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+                    where n.nspname = 'measure' and t.typname = 'serp_provider' and e.enumlabel = 'openrouter') then
+    raise exception 'FAIL answer ledger enum values missing';
+  end if;
+  if (select count(*) from information_schema.columns where table_schema = 'measure' and table_name = 'serp_snapshots'
+      and column_name in ('engine', 'model_version', 'collection_method', 'sample_index', 'paraphrase_id', 'run_id', 'answer_text', 'answer_hash', 'citations_observable')) <> 9 then
+    raise exception 'FAIL answer ledger snapshot columns missing';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_schema = 'measure' and table_name = 'serp_citations' and column_name = 'position_in_answer') then
+    raise exception 'FAIL serp_citations.position_in_answer missing';
+  end if;
+  raise notice 'ok  answer ledger enums and columns present';
+end $$;
+
+-- A native row stays a Google SERP row; Profound and probe rows are labelled
+-- by the trigger, whatever the writer sent.
+insert into measure.serp_snapshots (id, site_id, question_id, provider, fetched_at, locale, device, aio_triggered, collection_method, raw) values
+  ('f7000000-0000-0000-0000-000000000001', 'aaaaaaaa-0000-0000-0000-000000000001', 'dddddddd-0000-0000-0000-000000000001',
+   'profound', now(), 'us-en', 'desktop', true, 'serp', '{"engine": "chatgpt"}'),
+  ('f7000000-0000-0000-0000-000000000002', 'aaaaaaaa-0000-0000-0000-000000000001', 'dddddddd-0000-0000-0000-000000000001',
+   'profound', now(), 'us-en', 'desktop', true, 'serp', '{"engine": "google_aio"}');
+insert into measure.serp_snapshots (id, site_id, question_id, provider, fetched_at, locale, device, engine, model_version, run_id, answer_text, citations_observable) values
+  ('f7000000-0000-0000-0000-000000000003', 'aaaaaaaa-0000-0000-0000-000000000001', 'dddddddd-0000-0000-0000-000000000001',
+   'openrouter', now(), 'us-en', 'api', 'perplexity', 'perplexity/sonar+web:native', 'run-acme', 'Okta and Acme both do SCIM.', true),
+  ('f7000000-0000-0000-0000-000000000004', 'bbbbbbbb-0000-0000-0000-000000000002', 'dddddddd-0000-0000-0000-000000000002',
+   'openrouter', now(), 'us-en', 'api', 'perplexity', 'perplexity/sonar+web:native', 'run-globex', 'Globex is cheaper.', true);
+insert into measure.serp_citations (site_id, serp_snapshot_id, surface, url, domain, position, is_owned) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'f7000000-0000-0000-0000-000000000001', 'llm_answer', 'https://www.okta.com/scim', 'okta.com', 1, false),
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'f7000000-0000-0000-0000-000000000003', 'llm_answer', 'https://acme.com/resources/scim', 'acme.com', 1, true),
+  ('bbbbbbbb-0000-0000-0000-000000000002', 'f7000000-0000-0000-0000-000000000004', 'llm_answer', 'https://globex.com/pricing', 'globex.com', 1, true);
+-- org_id and site_id deliberately wrong: the trigger takes both from the snapshot.
+insert into measure.answer_mentions (snapshot_id, org_id, site_id, entity_id, is_brand, matched_alias, first_offset, extractor_version) values
+  ('f7000000-0000-0000-0000-000000000003', '22222222-2222-2222-2222-222222222222', 'bbbbbbbb-0000-0000-0000-000000000002',
+   'eeeeeeee-2000-0000-0000-000000000002', false, 'okta', 0, 'mentions-v0'),
+  ('f7000000-0000-0000-0000-000000000003', null, 'aaaaaaaa-0000-0000-0000-000000000001',
+   'eeeeeeee-2000-0000-0000-000000000001', true, 'acme', 9, 'mentions-v0'),
+  ('f7000000-0000-0000-0000-000000000004', null, 'bbbbbbbb-0000-0000-0000-000000000002',
+   'eeeeeeee-2000-0000-0000-000000000003', true, 'globex', 0, 'mentions-v0');
+
+begin;
+  select pg_temp.expect('a native snapshot is a google serp row',
+    (select count(*) from measure.serp_snapshots where id = 'eeeeeeee-0000-0000-0000-000000000001' and engine = 'google' and collection_method = 'serp'), 1);
+  select pg_temp.expect('a Profound row is third-party data on its engine, with no AI Overview flag',
+    (select count(*) from measure.serp_snapshots where id = 'f7000000-0000-0000-0000-000000000001'
+       and engine = 'chatgpt' and collection_method = 'third_party' and aio_triggered is null), 1);
+  select pg_temp.expect('a Profound AI Overview row keeps its flag',
+    (select count(*) from measure.serp_snapshots where id = 'f7000000-0000-0000-0000-000000000002'
+       and engine = 'google_aio' and collection_method = 'third_party' and aio_triggered), 1);
+  select pg_temp.expect('an OpenRouter row is an api probe',
+    (select count(*) from measure.serp_snapshots where provider = 'openrouter' and collection_method = 'api_probe'), 2);
+  select pg_temp.expect('a mention takes its site and org from the snapshot',
+    (select count(*) from measure.answer_mentions where snapshot_id = 'f7000000-0000-0000-0000-000000000003'
+       and site_id = 'aaaaaaaa-0000-0000-0000-000000000001' and org_id = '11111111-1111-1111-1111-111111111111'), 2);
+  select pg_temp.expect('v_native_aio holds our SERP trackers'' rows only',
+    (select count(*) from measure.v_native_aio where provider not in ('dataforseo', 'serpapi') or collection_method <> 'serp'), 0);
+  select pg_temp.expect('v_native_aio never holds a Profound or probe row',
+    (select count(*) from measure.v_native_aio where id::text like 'f7000000-%'), 0);
+  select pg_temp.expect('v_answer_observations holds the Profound and probe rows with their topic',
+    (select count(*) from measure.v_answer_observations where id::text like 'f7000000-%'
+       and (question_id <> 'dddddddd-0000-0000-0000-000000000001' or topic_id = 'eeeeeeee-0000-0000-0000-000000000001')), 4);
+  select pg_temp.expect('v_answer_observations never holds a native row',
+    (select count(*) from measure.v_answer_observations where collection_method = 'serp'), 0);
+commit;
+
+do $$ begin
+  begin
+    update measure.serp_snapshots set collection_method = 'serp' where id = 'f7000000-0000-0000-0000-000000000001';
+    raise exception 'FAIL a Profound row must not be labelled a SERP row';
+  exception when check_violation then null;
+  end;
+  begin
+    update measure.serp_snapshots set collection_method = 'third_party' where id = 'eeeeeeee-0000-0000-0000-000000000001';
+    raise exception 'FAIL a native row must not be labelled third-party';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into measure.answer_mentions (snapshot_id, entity_id, matched_alias, extractor_version)
+    values ('f7000000-0000-0000-0000-000000000003', 'eeeeeeee-2000-0000-0000-000000000003', 'globex', 'mentions-v0');
+    raise exception 'FAIL a mention must not name another org''s entity';
+  exception when check_violation then null;
+  end;
+  begin
+    update measure.answer_mentions set snapshot_id = 'f7000000-0000-0000-0000-000000000004'
+    where snapshot_id = 'f7000000-0000-0000-0000-000000000003' and entity_id = 'eeeeeeee-2000-0000-0000-000000000002';
+    raise exception 'FAIL a mention must not move to another org''s snapshot';
+  exception when check_violation then null;
+  end;
+  raise notice 'ok  method labels and mention scope cannot be forged';
+end $$;
+
+-- The backfill labels rows stored before the ledger, once.
+begin;
+  alter table measure.serp_snapshots disable trigger serp_snapshots_collection;
+  alter table measure.serp_snapshots drop constraint serp_snapshots_collection_check;
+  insert into measure.serp_snapshots (id, site_id, question_id, provider, fetched_at, locale, device, aio_triggered, raw) values
+    ('f7000000-0000-0000-0000-000000000011', 'aaaaaaaa-0000-0000-0000-000000000001', 'dddddddd-0000-0000-0000-000000000001',
+     'profound', now(), 'us-en', 'desktop', true, '{"engine": "ai_mode"}'),
+    ('f7000000-0000-0000-0000-000000000012', 'aaaaaaaa-0000-0000-0000-000000000001', 'dddddddd-0000-0000-0000-000000000001',
+     'profound', now(), 'us-en', 'desktop', true, '{"engine": "perplexity"}');
+  insert into measure.serp_citations (site_id, serp_snapshot_id, surface, url, domain, position, is_owned) values
+    ('aaaaaaaa-0000-0000-0000-000000000001', 'f7000000-0000-0000-0000-000000000011', 'ai_overview', 'https://okta.com/a', 'okta.com', 1, false),
+    ('aaaaaaaa-0000-0000-0000-000000000001', 'f7000000-0000-0000-0000-000000000012', 'ai_overview', 'https://okta.com/b', 'okta.com', 1, false);
+  alter table measure.serp_snapshots enable trigger serp_snapshots_collection;
+  select pg_temp.expect('the backfill labels each old Profound row',
+    (select snapshots from measure.backfill_answer_ledger()), 2);
+  select pg_temp.expect('backfilled rows carry their engine and method, with no AI Overview flag',
+    (select count(*) from measure.serp_snapshots where id in ('f7000000-0000-0000-0000-000000000011', 'f7000000-0000-0000-0000-000000000012')
+       and collection_method = 'third_party' and engine in ('ai_mode', 'perplexity') and aio_triggered is null), 2);
+  select pg_temp.expect('an AI Mode citation moves to the ai_mode surface',
+    (select count(*) from measure.serp_citations where serp_snapshot_id = 'f7000000-0000-0000-0000-000000000011' and surface = 'ai_mode'), 1);
+  select pg_temp.expect('another engine''s citation moves to llm_answer',
+    (select count(*) from measure.serp_citations where serp_snapshot_id = 'f7000000-0000-0000-0000-000000000012' and surface = 'llm_answer'), 1);
+  select pg_temp.expect('the backfill is idempotent',
+    (select snapshots + citations from measure.backfill_answer_ledger()), 0);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('acme member sees own answer mentions', (select count(*) from measure.answer_mentions), 2);
+  select pg_temp.expect('acme member reads own probes through the answer view',
+    (select count(*) from measure.v_answer_observations where provider = 'openrouter'), 1);
+  select pg_temp.expect('acme member reads own native rows through the native view',
+    (select count(*) from measure.v_native_aio where id = 'eeeeeeee-0000-0000-0000-000000000001'), 1);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["22222222-2222-2222-2222-222222222222"]}';
+  select pg_temp.expect('globex member sees only globex answer mentions', (select count(*) from measure.answer_mentions), 1);
+  select pg_temp.expect('globex member sees no acme rows through the answer view',
+    (select count(*) from measure.v_answer_observations where org_id = '11111111-1111-1111-1111-111111111111'), 0);
+  select pg_temp.expect('globex member sees no acme rows through the native view',
+    (select count(*) from measure.v_native_aio where org_id = '11111111-1111-1111-1111-111111111111'), 0);
+  select pg_temp.expect('globex member sees its own probe',
+    (select count(*) from measure.v_answer_observations), 1);
+rollback;
+
+begin;
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff sees every answer mention', (select count(*) from measure.answer_mentions), 3);
+rollback;
+
+begin;
+  set local role app_user;
+  do $$ begin
+    if (select count(*) from measure.answer_mentions) + (select count(*) from measure.v_answer_observations) + (select count(*) from measure.v_native_aio) <> 0 then
+      raise exception 'FAIL answer ledger readable without claims';
+    end if;
+    raise notice 'ok  absent claims see no answers through the views';
+  end $$;
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare t text;
+  declare denied boolean;
+  begin
+    foreach t in array array['measure.answer_mentions', 'measure.v_native_aio', 'measure.v_answer_observations'] loop
+      denied := false;
+      begin
+        execute format('select 1 from %s limit 1', t);
+      exception when insufficient_privilege then
+        denied := true;
+      end;
+      if not denied then
+        raise exception 'FAIL renderer must not read %', t;
+      end if;
+    end loop;
+    raise notice 'ok  renderer cannot read answer mentions or the answer views';
+  end $$;
+rollback;
+
+\echo 'isolation: answer ledger assertions passed'

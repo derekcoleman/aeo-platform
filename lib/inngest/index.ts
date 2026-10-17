@@ -7,6 +7,8 @@ export {
   demandMineCompleted,
   serpTrackRequested,
   serpTrackCompleted,
+  answersSampleRequested,
+  answersSampleCompleted,
   connectorSyncRequested,
   connectorSyncCompleted,
   connectorWebhookReceived,
@@ -37,6 +39,7 @@ export {
   opsBudgetExceeded,
 } from "./client";
 import { analyticsFunctions } from "./analytics";
+import { answersFunctions } from "./answers";
 import { auditFunction } from "./audit";
 import { connectorFunctions } from "./connectors";
 import { contextFunctions } from "./context";
@@ -51,4 +54,4 @@ import { strategyFunctions } from "./strategy";
 import { siteFunctions } from "./site";
 
 /** Every function served from /api/inngest. Add new jobs here. */
-export const functions = [auditFunction, ...demandFunctions, ...connectorFunctions, ...pipelineFunctions, ...contextFunctions, ...siteFunctions, ...analyticsFunctions, ...retentionFunctions, ...strategyFunctions, ...publishingFunctions, ...refreshFunctions, ...metricsFunctions, ...opsFunctions];
+export const functions = [auditFunction, ...demandFunctions, ...answersFunctions, ...connectorFunctions, ...pipelineFunctions, ...contextFunctions, ...siteFunctions, ...analyticsFunctions, ...retentionFunctions, ...strategyFunctions, ...publishingFunctions, ...refreshFunctions, ...metricsFunctions, ...opsFunctions];

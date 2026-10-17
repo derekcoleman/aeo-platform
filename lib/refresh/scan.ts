@@ -1,6 +1,5 @@
 import type postgres from "postgres";
 import { appDb } from "@/lib/db/app";
-import { NATIVE_PROVIDERS } from "@/lib/demand/store";
 import { upsertOpportunities, type OpportunityInput, type UpsertSummary } from "@/lib/pipeline/opportunities";
 import { candidateExclusion, isProtectedWinner, median, REFRESH_MAX_OPPORTUNITIES, REFRESH_THRESHOLD, scoreRefresh, type RefreshScore, type RefreshSignals } from "./score";
 
@@ -46,19 +45,20 @@ export interface SignalAvailability {
 export async function signalAvailability(siteId: string, sql: postgres.Sql = appDb()): Promise<SignalAvailability> {
   const [row] = await sql<SignalAvailability[]>`
     select exists (select 1 from measure.external_metrics where site_id = ${siteId} and surface = 'gsc_page_window') as gsc,
-           exists (select 1 from measure.serp_snapshots where site_id = ${siteId} and provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and fetched_at >= now() - interval '60 days') as native,
-           exists (select 1 from measure.serp_snapshots where site_id = ${siteId} and provider = 'profound' and fetched_at >= now() - interval '60 days') as profound`;
+           exists (select 1 from measure.v_native_aio where site_id = ${siteId} and fetched_at >= now() - interval '60 days') as native,
+           exists (select 1 from measure.v_answer_observations where site_id = ${siteId} and provider = 'profound' and fetched_at >= now() - interval '60 days') as profound`;
   return row ?? { gsc: false, native: false, profound: false };
 }
 
 /**
  * One row per inventory item with its signals. GSC rows are the latest
  * `gsc_page_window` per page and window; citations count distinct questions
- * in the last 30 days and the 30 before, split by provider family. Native
- * counts are Google AI Overview citations from our own trackers only (an
- * organic ranking is not a citation); Profound counts take every surface,
- * since its engines are not Google's. Both join on content.url_key so
- * scheme, www and trailing slashes do not matter.
+ * in the last 30 days and the 30 before, split by source. Native counts are
+ * Google AI Overview citations from our own trackers only
+ * (measure.v_native_aio; an organic ranking is not a citation); Profound
+ * counts take every surface, since its engines are not Google's. Answer
+ * probes count in neither. Both join on content.url_key so scheme, www and
+ * trailing slashes do not matter.
  */
 export async function loadInventorySignals(siteId: string, sql: postgres.Sql = appDb(), opts: { itemId?: string | null } = {}): Promise<InventorySignalRow[]> {
   return sql<InventorySignalRow[]>`
@@ -79,14 +79,21 @@ export async function loadInventorySignals(siteId: string, sql: postgres.Sql = a
         avg(position) filter (where win = 'current') as position
       from gsc where key is not null group by key
     ),
+    snaps as (
+      select id, question_id, fetched_at, 'native' as source from measure.v_native_aio
+      where site_id = ${siteId} and fetched_at >= now() - interval '60 days'
+      union all
+      select id, question_id, fetched_at, 'profound' from measure.v_answer_observations
+      where site_id = ${siteId} and provider = 'profound' and fetched_at >= now() - interval '60 days'
+    ),
     cites as (
       select content.url_key(c.url) as key,
-        count(distinct s.question_id) filter (where c.surface = 'ai_overview' and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and s.fetched_at >= now() - interval '30 days') as native,
-        count(distinct s.question_id) filter (where c.surface = 'ai_overview' and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[]) and s.fetched_at < now() - interval '30 days') as native_prev,
-        count(distinct s.question_id) filter (where s.provider = 'profound' and s.fetched_at >= now() - interval '30 days') as profound,
-        count(distinct s.question_id) filter (where s.provider = 'profound' and s.fetched_at < now() - interval '30 days') as profound_prev
-      from measure.serp_citations c join measure.serp_snapshots s on s.id = c.serp_snapshot_id
-      where c.site_id = ${siteId} and c.is_owned and s.fetched_at >= now() - interval '60 days'
+        count(distinct s.question_id) filter (where s.source = 'native' and c.surface = 'ai_overview' and s.fetched_at >= now() - interval '30 days') as native,
+        count(distinct s.question_id) filter (where s.source = 'native' and c.surface = 'ai_overview' and s.fetched_at < now() - interval '30 days') as native_prev,
+        count(distinct s.question_id) filter (where s.source = 'profound' and s.fetched_at >= now() - interval '30 days') as profound,
+        count(distinct s.question_id) filter (where s.source = 'profound' and s.fetched_at < now() - interval '30 days') as profound_prev
+      from measure.serp_citations c join snaps s on s.id = c.serp_snapshot_id
+      where c.site_id = ${siteId} and c.is_owned
       group by 1
     )
     select i.id, i.site_id, i.title, i.url, i.collection_name, i.content_item_id, i.last_updated, i.is_draft, i.is_archived,

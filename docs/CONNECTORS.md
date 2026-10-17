@@ -59,10 +59,14 @@ recreates it if it was disconnected.
 connection pulls the answers report for the chosen category and normalises
 it into the same shape the CSV upload uses: prompts become tracked questions
 (source `profound`), each prompt × platform × day becomes a snapshot with its
-citations (`provider = 'profound'`, `is_owned` computed against your domains),
-and the visibility score lands in `measure.external_metrics` (surface
-`profound_visibility`). Native metrics never read Profound rows; the UI labels
-Profound numbers as Profound's.
+citations (`provider = 'profound'`, `collection_method = 'third_party'`, the
+platform as `engine`, an AI Overview flag only on Google AI Overview rows,
+citations on the platform's surface: `ai_overview`, `ai_mode` or
+`llm_answer`; `is_owned` computed against your domains), and the visibility
+score lands in `measure.external_metrics` (surface `profound_visibility`).
+Native metrics read `measure.v_native_aio`, which never holds a Profound row
+(or one of our own answer probes); the UI labels Profound numbers as
+Profound's.
 
 **Refresh:** Profound citations of a CMS URL feed the refresh score
 (`docs/REFRESH.md`) alongside the native trackers, and are labelled as

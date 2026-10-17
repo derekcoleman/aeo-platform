@@ -31,6 +31,8 @@ export const METHODOLOGY_CHANGES: MethodologyChange[] = [
       "Crawler hits are rolled up over whole UTC days, and a day's count never goes down.",
       "Excluded questions, paused sites and organisations whose plan has lapsed are no longer tracked.",
       "Competitors are the rivals you name. Forums, review platforms, reference sites, publishers and other cited sites are listed as sources shaping answers, no longer as competitors, and count for less in the queue's scores.",
+      "Every answer is labelled with how it was observed and which engine gave it. Profound's ChatGPT, Perplexity, Gemini and Copilot answers are no longer marked as AI Overviews, and their citations sit on the engine's own surface (AI Overview, AI Mode, or another engine's answer). A Gemini answer synced as an AI Overview before Profound's engine names were read correctly stays one until the connector's next 90-day re-sync.",
+      "Our own answer probes (each engine's model asked through its API with web search on, via OpenRouter) are reported per engine on Strategy → Visibility, with intervals, and never added to the AI Overview or Profound numbers.",
     ],
   },
 ];

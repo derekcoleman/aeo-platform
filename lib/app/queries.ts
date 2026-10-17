@@ -102,6 +102,8 @@ export interface OpsOrgRow {
   members: number;
   sites: number;
   profound: boolean;
+  /** Native answer sampling through OpenRouter (feature answer_probes). */
+  answer_probes: boolean;
   created_at: string | Date;
 }
 
@@ -116,7 +118,8 @@ export async function opsOrganizations(scope: OpsScope = {}, sql: postgres.Sql =
     select o.id, o.name, o.slug, o.plan, o.status, o.created_at,
            (select count(*) from app.memberships m where m.org_id = o.id)::int as members,
            (select count(*) from app.sites s where s.org_id = o.id)::int as sites,
-           app.org_feature_enabled(o.id, 'connector:profound') as profound
+           app.org_feature_enabled(o.id, 'connector:profound') as profound,
+           app.org_feature_enabled(o.id, 'answer_probes') as answer_probes
     from app.organizations o
     where (${scope.orgId ?? null}::uuid is null or o.id = ${scope.orgId ?? null}::uuid)
     order by o.created_at desc`;

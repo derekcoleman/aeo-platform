@@ -1,8 +1,8 @@
 /**
  * A `fetch` stand-in keyed by URL. A route is a response spec or a function of
  * the request (so a route can answer differently per user agent or header).
- * Every call is recorded with its URL, user agent and headers, so a test can
- * assert what was probed and how.
+ * Every call is recorded with its URL, user agent, headers, method and body,
+ * so a test can assert what was probed and how.
  */
 export interface RouteSpec {
   status?: number;
@@ -14,6 +14,9 @@ export interface RecordedCall {
   url: string;
   userAgent: string | null;
   headers: Record<string, string>;
+  method: string;
+  /** The request body when it was a string (a JSON post), else null. */
+  body: string | null;
 }
 
 export type Route = RouteSpec | ((call: RecordedCall) => RouteSpec | undefined);
@@ -40,7 +43,7 @@ export function fakeFetch(routes: Record<string, Route>): FakeFetch {
     const h = new Headers(init?.headers as HeadersInit | undefined);
     const headers: Record<string, string> = {};
     h.forEach((v, k) => (headers[k.toLowerCase()] = v));
-    const call: RecordedCall = { url, userAgent: h.get("user-agent"), headers };
+    const call: RecordedCall = { url, userAgent: h.get("user-agent"), headers, method: (init?.method ?? "GET").toUpperCase(), body: typeof init?.body === "string" ? init.body : null };
     calls.push(call);
     const route = resolve(url);
     const spec = typeof route === "function" ? route(call) : route;

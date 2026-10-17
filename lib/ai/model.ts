@@ -246,7 +246,7 @@ interface OpenRouterResponse {
 }
 
 /** OpenRouter normalises `finish_reason`; the provider's own value rides in `native_finish_reason`. */
-function openRouterStopReason(finish: string | null | undefined, native: string | null | undefined): StopReason {
+export function openRouterStopReason(finish: string | null | undefined, native: string | null | undefined): StopReason {
   if (finish === "length" || native === "max_tokens") return "max_tokens";
   if (finish === "content_filter" || native === "refusal") return "refusal";
   if (finish === "stop" || native === "end_turn") return "end_turn";

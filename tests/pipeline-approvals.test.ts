@@ -109,11 +109,9 @@ describe("approvalsSlackTarget", () => {
     const target = await approvalsSlackTarget(ORG_ID, sql);
     expect(target?.channel).toBe("C-APPROVALS");
     expect(target?.conn.id).toBe("c2");
-    const outer = sql.queries.find((q) => q.text.includes("from context.context_connections"))!;
-    expect(outer.text).toContain("select * from context.context_connections");
-    const fragments = sql.queries.filter((q) => !q.text.includes("from context.context_connections")).map((q) => q.text);
-    expect(fragments).toContain("and org_id = $1");
-    expect(fragments).toContain("and provider = $1");
-    expect(fragments).toContain("and enabled and status in ('active', 'error')");
+    expect(sql.queries).toHaveLength(1);
+    const q = sql.queries[0]!;
+    expect(q.text).toContain("select * from context.context_connections where true and org_id = $1 and provider = $2 and enabled and status in ('active', 'error') order by created_at");
+    expect(q.values).toEqual([ORG_ID, "slack"]);
   });
 });

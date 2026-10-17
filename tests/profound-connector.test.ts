@@ -172,11 +172,16 @@ describe("profoundConnector", () => {
     expect(q.filter((x) => /insert into measure\.questions/.test(x.text))).toHaveLength(1);
     const snaps = q.filter((x) => /insert into measure\.serp_snapshots/.test(x.text));
     expect(snaps).toHaveLength(1);
-    const snapRows = (snaps[0]!.values[0] as Rows<{ provider: string; fetched_at: string; raw: { __json: { engine: string } } }>).__rows;
+    const snapRows = (snaps[0]!.values[0] as Rows<{ provider: string; fetched_at: string; engine: string; collection_method: string; aio_triggered: boolean | null; raw: { __json: { engine: string } } }>).__rows;
     expect(snapRows).toHaveLength(2);
     expect(snapRows.map((x) => [x.provider, x.fetched_at, x.raw.__json.engine])).toEqual([
       ["profound", "2026-08-20T00:00:00.000Z", "chatgpt"],
       ["profound", "2026-08-21T00:00:00.000Z", "perplexity"],
+    ]);
+    // Third-party answers on their own engines: not AI Overviews, never a SERP row.
+    expect(snapRows.map((x) => [x.engine, x.collection_method, x.aio_triggered])).toEqual([
+      ["chatgpt", "third_party", null],
+      ["perplexity", "third_party", null],
     ]);
     // The same rows (by content hash) are removed before the insert, so a replayed page cannot double them.
     const wipe = q.find((x) => /delete from measure\.serp_snapshots s using unnest/.test(x.text))!;
@@ -191,11 +196,11 @@ describe("profoundConnector", () => {
     const rolesAt = q.findIndex((x) => /from context\.entities/.test(x.text));
     expect(rolesAt).toBeGreaterThan(q.findIndex((x) => /from app\.sites where id/.test(x.text)));
     expect(rolesAt).toBeLessThan(q.indexOf(cites[0]!));
-    const citeRows = (cites[0]!.values[0] as Rows<{ domain: string; is_owned: boolean; serp_snapshot_id: string; source_role: string; entity_id: string | null }>).__rows;
-    expect(citeRows.map((x) => [x.domain, x.is_owned, x.source_role, x.entity_id])).toEqual([
-      ["acme.com", true, "owned", null],
-      ["rival.com", false, "competitor", RIVAL],
-      ["rival.com", false, "competitor", RIVAL],
+    const citeRows = (cites[0]!.values[0] as Rows<{ domain: string; is_owned: boolean; serp_snapshot_id: string; source_role: string; entity_id: string | null; surface: string }>).__rows;
+    expect(citeRows.map((x) => [x.domain, x.is_owned, x.source_role, x.entity_id, x.surface])).toEqual([
+      ["acme.com", true, "owned", null, "llm_answer"],
+      ["rival.com", false, "competitor", RIVAL, "llm_answer"],
+      ["rival.com", false, "competitor", RIVAL, "llm_answer"],
     ]);
     expect(new Set(citeRows.map((x) => x.serp_snapshot_id))).toEqual(new Set(snapRows.map((x) => (x as unknown as { id: string }).id)));
     // Daily metrics are recomputed from the stored snapshots of the touched prompt × engine × day groups.

@@ -2,7 +2,6 @@ import type postgres from "postgres";
 import { runPageRules, type StructureScore } from "@/lib/aeo/rules";
 import { htmlToMarkdown, pageTitle, parseHtml, type Doc } from "@/lib/audit/html";
 import { appDb } from "@/lib/db/app";
-import { NATIVE_PROVIDERS } from "@/lib/demand/store";
 import { safeFetch } from "@/lib/fetch";
 import { NON_TARGET_SOURCE_ROLES } from "@/lib/measure/source-roles";
 
@@ -106,9 +105,10 @@ export interface CitedUrl {
 }
 
 /**
- * Non-owned Google AI Overview citations from our own trackers in the window,
- * grouped by URL, most cited first. Profound rows are left out: they come from
- * other engines, and their pages are not what an AI Overview cites. So are
+ * Non-owned Google AI Overview citations from our own trackers
+ * (measure.v_native_aio) in the window, grouped by URL, most cited first.
+ * Profound rows and answer probes are left out: they come from other
+ * engines, and their pages are not what an AI Overview cites. So are
  * forums, video, social, review sites, wikis, directories and marketplaces
  * (NON_TARGET_SOURCE_ROLES): a Reddit thread or a G2 listing is cited for its
  * crowd, not its structure, and is no target for a brief. Unknown domains
@@ -121,11 +121,10 @@ export async function collectCompetitorUrls(siteId: string, opts: { topicId?: st
     select c.url, c.domain, count(*)::int as citations, max(s.fetched_at) as last_cited_at,
            (array_agg(q.topic_id order by s.fetched_at desc) filter (where q.topic_id is not null))[1] as topic_id
     from measure.serp_citations c
-    join measure.serp_snapshots s on s.id = c.serp_snapshot_id
+    join measure.v_native_aio s on s.id = c.serp_snapshot_id
     join measure.questions q on q.id = s.question_id
     where c.site_id = ${siteId} and not c.is_owned and c.surface = 'ai_overview'
       and c.source_role <> all (${[...NON_TARGET_SOURCE_ROLES]}::measure.source_role[])
-      and s.provider = any (${[...NATIVE_PROVIDERS]}::measure.serp_provider[])
       and s.fetched_at >= now() - make_interval(days => ${days})
       and not q.excluded
       and (${opts.topicId ?? null}::uuid is null or q.topic_id = ${opts.topicId ?? null}::uuid)

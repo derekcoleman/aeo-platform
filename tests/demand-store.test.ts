@@ -64,10 +64,10 @@ describe("tracking scope", () => {
     const sql = fakeSql();
     await citationGaps(SITE, 10, sql);
     const q = sql.queries[0]!;
-    expect(q.text).toContain("select distinct on (question_id) id, question_id, fetched_at, provider, aio_triggered");
-    expect(q.text).toContain("fetched_at >= now() - make_interval(days => $3)");
+    expect(q.text).toContain("select distinct on (question_id) id, question_id, fetched_at, provider, aio_triggered from measure.v_native_aio");
+    expect(q.text).toContain("where site_id = $1 and fetched_at >= now() - make_interval(days => $2)");
     expect(q.text).toContain("where l.aio_triggered is true and not q.excluded");
-    expect(q.values.slice(0, 3)).toEqual([SITE, ["dataforseo", "serpapi"], GAP_FRESHNESS_DAYS]);
+    expect(q.values.slice(0, 2)).toEqual([SITE, GAP_FRESHNESS_DAYS]);
   });
 
   it("a gap lists every cited domain and, apart, the named competitors among them", async () => {
