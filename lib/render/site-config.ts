@@ -14,6 +14,12 @@ export interface SiteRenderConfig {
   trailingSlash: "never" | "always";
   theme: SiteTheme;
   organization: { name?: string; url?: string; logo?: string };
+  /**
+   * The effective pause (the owner's flag or a staff control, see migration
+   * 0020): every page serves noindex and the listings are empty. Read on every
+   * request, never cached here, so a pause holds from the next request.
+   */
+  indexingPaused: boolean;
 }
 
 export async function getSiteRenderConfig(siteId: string): Promise<SiteRenderConfig | null> {
@@ -26,9 +32,10 @@ export async function getSiteRenderConfig(siteId: string): Promise<SiteRenderCon
       trailing_slash: "never" | "always";
       theme: SiteTheme;
       organization: SiteRenderConfig["organization"];
+      indexing_paused: boolean;
     }[]
   >`
-    select site_id, canonical_domain, path_prefix, locale, trailing_slash, theme, organization
+    select site_id, canonical_domain, path_prefix, locale, trailing_slash, theme, organization, indexing_paused
     from content.site_render_config
     where site_id = ${siteId}::uuid
     limit 1
@@ -43,5 +50,6 @@ export async function getSiteRenderConfig(siteId: string): Promise<SiteRenderCon
     trailingSlash: row.trailing_slash,
     theme: row.theme ?? { tokens: {} },
     organization: row.organization ?? {},
+    indexingPaused: row.indexing_paused === true,
   };
 }

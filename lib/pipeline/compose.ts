@@ -89,11 +89,13 @@ export function composeQaDocument(composed: Pick<Composed, "page">, site: SiteRo
     trailingSlash: site.trailingSlash,
     theme: { tokens: {} },
     organization,
+    indexingPaused: false,
   };
   const page: PublishedPage = {
     siteId: site.id,
     path: composed.page.path,
     contentItemId: null,
+    status: "live",
     html: composed.page.html,
     head: composed.page.head,
     markdown: composed.page.markdown,

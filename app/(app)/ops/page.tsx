@@ -10,6 +10,8 @@ import { TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UrlTabs } from "@/components/app/url-tabs";
 import { OPS_SECTIONS, opsHref, resolveTab, settingsHref } from "@/lib/app/nav";
 import { remediateFaqAction, restateMetricsAction, runHealthCheckAction, runPreflightAction, scanOpportunitiesAction, setFeatureAction, setSiteStatusAction } from "@/lib/app/actions";
+import { setAutonomyControlAction } from "@/lib/app/takedown-actions";
+import { controlFor, listAutonomyControls, type AutonomyControl, type ControlTarget } from "@/lib/ops/controls";
 import { opsFailedSyncs, opsLlmSpend, opsLlmSpendForSite, opsOrganizations, opsSites, type SiteSpendRow } from "@/lib/app/queries";
 import { METHODOLOGY_VERSION } from "@/lib/app/methodology";
 import { auditLog } from "@/lib/app/org";
@@ -32,14 +34,16 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const scope = site ? { siteId: site.id, orgId: site.org_id } : {};
   const sections = OPS_SECTIONS;
   const tab = resolveTab(sections, requestedTab, "sites");
-  const [orgs, sites, failed, spend, siteSpend, audit] = await Promise.all([
+  const [orgs, sites, failed, spend, siteSpend, audit, controls] = await Promise.all([
     opsOrganizations(scope),
     opsSites(scope),
     opsFailedSyncs(7, scope),
     site ? Promise.resolve([]) : opsLlmSpend(),
     site ? opsLlmSpendForSite(site.id) : Promise.resolve([] as SiteSpendRow[]),
     auditLog(site?.org_id ?? null, 200, undefined, site?.id ?? null),
+    listAutonomyControls(),
   ]);
+  const platform = controlFor(controls, { scope: "global", id: null });
   const failingSites = sites.filter((s) => s.last_health_ok === false).length;
   return (
     <AppShell user={user} active="ops" site={site} page="console" section={tab}>
@@ -64,7 +68,17 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           <TabsTrigger value="audit">Audit log</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="sites" className="pt-4">
+        <TabsContent value="sites" className="space-y-4 pt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Kill switches</CardTitle>
+              <CardDescription>Publishing holds every publish step (runs wait an hour and ask again, for up to three days). Indexing serves every page noindex and empties the sitemap, feed and llms files on the next request. Per organisation and per project below; owners can also pause their own project&apos;s indexing.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium">Whole platform</span>
+              <ControlButtons target={{ scope: "global", id: null }} control={platform} />
+            </CardContent>
+          </Card>
           <Card>
             <CardContent>
               <Table>
@@ -75,7 +89,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                       <TableCell><Link className="font-medium underline-offset-2 hover:underline" href={`/app/sites/${s.id}` as Route}>{s.name}</Link><p className="text-muted-foreground font-mono text-xs">{s.canonical_domain}{s.path_prefix} · <Link className="underline-offset-2 hover:underline" href={settingsHref(s.id, null, "theme") as Route}>theme</Link></p></TableCell>
                       <TableCell>{s.org_name}</TableCell>
                       <TableCell className="text-xs">{s.proxy_mode}</TableCell>
-                      <TableCell><SiteStatusBadge status={s.status} /></TableCell>
+                      <TableCell><SiteStatusBadge status={s.status} />{s.indexing_paused ? <p><Badge variant="warning" title="Paused by the project's owner or an admin">indexing paused</Badge></p> : null}</TableCell>
                       <TableCell><HealthBadge ok={s.last_health_ok} failures={s.health_failures} /><p className="text-muted-foreground text-xs">{when(s.last_health_at)}</p></TableCell>
                       <TableCell>{s.published}</TableCell>
                       <TableCell>{s.open_opportunities}</TableCell>
@@ -86,6 +100,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                           <ActionButton size="sm" variant="outline" action={scanOpportunitiesAction.bind(null, s.id)} done="queued">Scan</ActionButton>
                           {s.status === "active" ? <ActionButton size="sm" variant="ghost" action={setSiteStatusAction.bind(null, s.id, "paused")} done="paused">Pause</ActionButton> : null}
                           {s.status === "paused" ? <ActionButton size="sm" variant="ghost" action={setSiteStatusAction.bind(null, s.id, "active")} done="active">Resume</ActionButton> : null}
+                          <ControlButtons target={{ scope: "site", id: s.id }} control={controlFor(controls, { scope: "site", id: s.id })} />
                         </span>
                       </TableCell>
                     </TableRow>
@@ -100,7 +115,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
           <Card>
             <CardContent>
               <Table>
-                <TableHeader><TableRow><TableHead>Organisation</TableHead><TableHead>Plan</TableHead><TableHead>Members</TableHead><TableHead>Sites</TableHead><TableHead>Profound</TableHead><TableHead>Created</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead>Organisation</TableHead><TableHead>Plan</TableHead><TableHead>Members</TableHead><TableHead>Sites</TableHead><TableHead>Profound</TableHead><TableHead>Kill switches</TableHead><TableHead>Created</TableHead></TableRow></TableHeader>
                 <TableBody>
                   {orgs.map((o) => (
                     <TableRow key={o.id}>
@@ -113,6 +128,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                           {o.profound ? "Enabled — disable" : "Enable"}
                         </ActionButton>
                       </TableCell>
+                      <TableCell className="whitespace-normal"><span className="inline-flex flex-wrap gap-1"><ControlButtons target={{ scope: "org", id: o.id }} control={controlFor(controls, { scope: "org", id: o.id })} /></span></TableCell>
                       <TableCell>{when(o.created_at)}</TableCell>
                     </TableRow>
                   ))}
@@ -183,5 +199,21 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         </TabsContent>
       </UrlTabs>
     </AppShell>
+  );
+}
+
+/** Pause or resume publishing and indexing for one scope; a switch that is on shows as a warning. */
+function ControlButtons({ target, control }: { target: ControlTarget; control: AutonomyControl | null }) {
+  const publishing = control?.publishing_paused ?? false;
+  const indexing = control?.indexing_paused ?? false;
+  return (
+    <>
+      <ActionButton size="sm" variant={publishing ? "destructive" : "ghost"} action={setAutonomyControlAction.bind(null, target.scope, target.id, "publishing", !publishing)} done={publishing ? "resumed" : "held"} title={publishing ? "Publishing is held here. Click to resume." : "Hold every publish step here."}>
+        {publishing ? "Resume publishing" : "Hold publishing"}
+      </ActionButton>
+      <ActionButton size="sm" variant={indexing ? "destructive" : "ghost"} action={setAutonomyControlAction.bind(null, target.scope, target.id, "indexing", !indexing)} done={indexing ? "resumed" : "paused"} title={indexing ? "Pages here serve noindex. Click to resume indexing." : "Serve every page here noindex and empty the listings."}>
+        {indexing ? "Resume indexing" : "Pause indexing"}
+      </ActionButton>
+    </>
   );
 }

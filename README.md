@@ -88,7 +88,9 @@ expectation.
 Unit tests cover the decision logic; `scripts/verify-proxy.sh` covers the wire.
 It asserts the invariants above against a running server — including that a
 forged `x-forwarded-host` cannot move the canonical, that cookies never reach a
-handler, and that no response contains our edge hostname.
+handler, and that no response contains our edge hostname — and the takedown
+contract: a retired page answers 410, a noindex page carries `X-Robots-Tag`
+and an ETag of its own, and neither appears in the sitemap, feed or llms files.
 
 ```bash
 node tests/fixtures/site-api.mjs 9999 &   # stands in for PostgREST site lookup
@@ -111,3 +113,29 @@ curl -H 'Host: acme-8fj2.blogedge.aeo.app' \
 
 Omit `X-Forwarded-Host` and the response should be `noindex` — that is invariant
 2 working, not a bug.
+
+### Taking content down
+
+Every switch is read by the renderer on the next request (a CDN may keep its
+copy for the 5-minute `s-maxage`), and every change is audited and reported
+to the organisation's alerts channel and owners.
+
+- **One page** (Content tab, editors): *Noindex* keeps serving it with a
+  robots meta and `X-Robots-Tag`; *Retire* answers 410 Gone; *Restore* puts it
+  back. Neither state is listed in the sitemap, feed or llms files. A page
+  stays down until someone restores it: a version published meanwhile (a run
+  already in flight, or one started to rewrite it) waits behind the takedown,
+  and *Restore* serves that version. A different article published at the
+  same path goes live, since the takedown was the old article's.
+- **Roll back** republishes the version a page replaced, recomposed from
+  storage with no model call, and puts a noindex page back live. A second
+  rollback undoes the first. CMS posts roll back in the CMS.
+- Restore and Roll back copy the page's version to the auto-push Webflow
+  targets, as a publish does. Taking a page down does not remove its Webflow
+  copy; unpublish that in Webflow.
+- **A whole project** (Content tab, owners and admins): *Pause indexing*
+  serves every page noindex, empties the listings, and holds publishing.
+- **Kill switches** (`/ops`, staff): hold publishing and/or pause indexing for
+  the platform, one organisation or one project (`ops.autonomy_controls`).
+  A held publish step waits an hour and asks again, for up to three days,
+  then the run fails and says why.

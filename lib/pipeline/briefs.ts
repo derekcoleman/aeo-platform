@@ -200,7 +200,7 @@ export async function loadBriefContext(
   const pages = await sql<{ url: string; title: string }[]>`
     select coalesce(i.canonical_url, p.path) as url, coalesce(i.title, p.head->>'title', p.path) as title
     from content.published_pages p left join content.content_items i on i.id = p.content_item_id
-    where p.site_id = ${opportunity.site_id}
+    where p.site_id = ${opportunity.site_id} and p.status = 'live'
     order by p.updated_at desc limit 25`;
   const brain = await loadBriefBrain({ orgId: opportunity.org_id, siteId: opportunity.site_id }, `${opportunity.title} ${opportunity.target_query}`, sql);
   const [topic] = opportunity.topic_id

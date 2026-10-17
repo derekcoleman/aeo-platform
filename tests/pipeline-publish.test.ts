@@ -116,13 +116,53 @@ describe("publishVersion", () => {
     const result = await publishVersion({ contentItemId: "item-1", versionId: "ver-1", siteId: SITE_ID, page, now: when }, sql);
 
     expect(began).toBe(1);
-    expect(result).toEqual({ path: "/resources/sso-vs-scim", canonicalUrl: "https://acme.com/resources/sso-vs-scim", etag: page.etag });
-    const [upsert, flip] = sql.queries;
+    expect(result).toEqual({ path: "/resources/sso-vs-scim", canonicalUrl: "https://acme.com/resources/sso-vs-scim", etag: page.etag, status: "live", statusBefore: null });
+    const [lock, upsert, flip] = sql.queries;
+    expect(lock!.text).toMatch(/^select status from content\.published_pages where .* for update$/);
     expect(upsert!.text).toMatch(/^insert into content\.published_pages .* on conflict \(site_id, path\) do update/);
     expect(upsert!.values.slice(0, 4)).toEqual([SITE_ID, "/resources/sso-vs-scim", "item-1", page.html]);
     expect(upsert!.values[6]).toBe(page.etag);
+    // The row records its version; the version it replaces becomes the rollback target.
+    expect(upsert!.values[8]).toBe("ver-1");
+    expect(upsert!.text).toContain("when published_pages.version_id is distinct from excluded.version_id then published_pages.version_id");
+    expect(upsert!.text).toContain("when published_pages.content_item_id is distinct from excluded.content_item_id then null");
+    // A new page goes live; an existing one keeps a takedown unless the caller restores it or another item takes the path.
+    expect(upsert!.text).toContain("'live', $10)");
+    expect(upsert!.text).toContain("status = case when $11::boolean or published_pages.content_item_id is distinct from excluded.content_item_id then 'live' else published_pages.status end");
+    expect(upsert!.values.slice(10)).toEqual([false, false, false]);
     expect(flip!.text).toMatch(/^update content\.content_items set status = 'published'/);
     expect(flip!.values).toEqual(["SSO vs SCIM", "ver-1", "https://acme.com/resources/sso-vs-scim", when, when, when, "item-1"]);
+  });
+
+  it("reports a page that stays taken down, and one a restore put back live", async () => {
+    const page = buildPublishedPage(inputs());
+    const taken = (after: string) => fakeSql([
+      [/^select status from content\.published_pages/, () => [{ status: "retired" }]],
+      [/^insert into content\.published_pages/, () => [{ status: after }]],
+    ]);
+    expect(await publishVersion({ contentItemId: "item-1", versionId: "ver-2", siteId: SITE_ID, page, now: when }, taken("retired"))).toMatchObject({ status: "retired", statusBefore: "retired" });
+    const restore = taken("live");
+    expect(await publishVersion({ contentItemId: "item-1", versionId: "ver-1", siteId: SITE_ID, page, now: when, restore: true }, restore)).toMatchObject({ status: "live", statusBefore: "retired" });
+    expect(restore.queries[1]!.values.slice(10)).toEqual([true, true, true]);
+    // The restore's caller audits it, so publishVersion writes no audit row of its own.
+    expect(restore.queries.some((q) => /app\.audit_log/.test(q.text))).toBe(false);
+  });
+
+  it("audits a takedown lifted because another item took the path", async () => {
+    const page = buildPublishedPage(inputs());
+    const sql = fakeSql([
+      [/^select status from content\.published_pages/, () => [{ status: "retired" }]],
+      [/^insert into content\.published_pages/, () => [{ status: "live" }]],
+    ]);
+    expect(await publishVersion({ contentItemId: "item-2", versionId: "ver-9", siteId: SITE_ID, page, now: when }, sql)).toMatchObject({ status: "live", statusBefore: "retired" });
+    const audit = sql.queries.find((q) => /^insert into app\.audit_log/.test(q.text));
+    expect(audit!.text).toContain("'page.live'");
+    expect(audit!.values).toEqual([
+      "/resources/sso-vs-scim",
+      { __json: { siteId: SITE_ID, path: "/resources/sso-vs-scim", status: "retired" } },
+      { __json: { siteId: SITE_ID, path: "/resources/sso-vs-scim", status: "live", via: "takeover", contentItemId: "item-2" } },
+      SITE_ID,
+    ]);
   });
 });
 

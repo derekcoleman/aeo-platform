@@ -64,6 +64,59 @@ export async function recomposeFromVersion(input: RecomposeInput, sql: postgres.
 
 export { FAQ_HEADING };
 
+export class RollbackRefusedError extends Error {}
+
+export interface RollbackResult extends PublishResult {
+  siteId: string;
+  orgId: string;
+  contentItemId: string;
+  fromVersionId: string | null;
+  toVersionId: string;
+}
+
+/**
+ * One-click rollback: republish the version a page replaced, recomposed from
+ * storage with no model call, at the same path. The page goes live with it,
+ * even one that was noindex (an editor asked for this version back), and
+ * the version it replaces becomes the new previous one, so a second
+ * rollback undoes the first. A CMS item is refused: its copy lives in the
+ * customer's CMS, whose own history is the way back. The audit row is
+ * written once the page is live, with a page.live row as well when the
+ * rollback lifted a takedown. The caller tells the publishing targets.
+ */
+export async function rollbackPage(
+  siteId: string,
+  path: string,
+  opts: { by: string | null; reason?: string | null; now?: Date },
+  sql: postgres.Sql = appDb(),
+): Promise<RollbackResult> {
+  const now = opts.now ?? new Date();
+  const [row] = await sql<{ org_id: string; content_item_id: string | null; origin: string | null; version_id: string | null; previous_version_id: string | null }[]>`
+    select s.org_id, p.content_item_id, i.origin, p.version_id, p.previous_version_id
+    from content.published_pages p
+    join app.sites s on s.id = p.site_id
+    left join content.content_items i on i.id = p.content_item_id
+    where p.site_id = ${siteId} and p.path = ${path}`;
+  if (!row) throw new RollbackRefusedError("There is no published page at that path.");
+  if (row.origin === "cms") throw new RollbackRefusedError("This post lives in your CMS; roll it back there.");
+  if (!row.content_item_id) throw new RollbackRefusedError("This page is not linked to a content item, so there is no version history to roll back to.");
+  if (!row.previous_version_id) throw new RollbackRefusedError("There is no earlier version of this page to roll back to.");
+  const composed = await composeFromVersion({ contentItemId: row.content_item_id, versionId: row.previous_version_id, siteId, now }, sql);
+  // The site's prefix or slash policy changed since: republishing would mint a second URL.
+  if (composed.page.path !== path) throw new RollbackRefusedError(`The earlier version would publish at ${composed.page.path}, not ${path}.`);
+  const result = await publishVersion({ contentItemId: row.content_item_id, versionId: row.previous_version_id, siteId, page: composed.page, now, restore: true }, sql);
+  const reason = opts.reason?.trim().slice(0, 500) || null;
+  await sql`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, before, after)
+    values (${row.org_id}, ${opts.by}, 'page.rollback', 'page', ${path},
+            ${sql.json({ siteId, path, versionId: row.version_id } as never)}, ${sql.json({ siteId, path, versionId: row.previous_version_id, reason } as never)})`;
+  if (result.statusBefore && result.statusBefore !== "live") {
+    await sql`insert into app.audit_log (org_id, actor_user_id, action, target_type, target_id, before, after)
+      values (${row.org_id}, ${opts.by}, 'page.live', 'page', ${path},
+              ${sql.json({ siteId, path, status: result.statusBefore } as never)}, ${sql.json({ siteId, path, status: "live", reason, via: "rollback" } as never)})`;
+  }
+  return { ...result, siteId, orgId: row.org_id, contentItemId: row.content_item_id, fromVersionId: row.version_id, toVersionId: row.previous_version_id };
+}
+
 export interface FaqRemediation {
   siteId: string;
   orgId: string;

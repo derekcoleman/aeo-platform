@@ -31,7 +31,9 @@ export interface DocumentInput {
 export function renderArticleDocument({ config, host, page, slug }: DocumentInput): string {
   const head = page.head;
   const canonical = contentUrl(host, config, slug);
-  const indexable = host.indexable && !head.noindex;
+  // A page taken down (status noindex) or a site whose indexing is paused
+  // stays readable but leaves the index.
+  const indexable = host.indexable && !head.noindex && !config.indexingPaused;
   const title = head.title ?? slug;
 
   const meta: string[] = [
@@ -50,9 +52,9 @@ export function renderArticleDocument({ config, host, page, slug }: DocumentInpu
     meta.push(`<meta name="description" content="${escapeHtml(head.description)}">`);
   }
   if (!indexable) {
-    // We could not verify which public host this arrived on. Serving it
-    // indexable would publish a duplicate of the customer's content under a
-    // host they may not control.
+    // Either we could not verify which public host this arrived on (serving
+    // it indexable would publish a duplicate of the customer's content under
+    // a host they may not control), or the page or site was taken down.
     meta.push('<meta name="robots" content="noindex,nofollow">');
   }
 

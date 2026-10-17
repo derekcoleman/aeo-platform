@@ -1,5 +1,6 @@
 import { getSiteRenderConfig, type SiteRenderConfig } from "./site-config";
 import { publicHostFromHeaders } from "./context";
+import type { PublishedPage } from "./published";
 import { assertNoEdgeHostname, type PublicHostResolution } from "@/lib/tenancy";
 
 export interface RouteContext {
@@ -29,6 +30,29 @@ export const RENDER_VARY = "X-Forwarded-Host";
  * host, noindex and all.
  */
 export const NOINDEX_CACHE_CONTROL = "private, no-store";
+
+/**
+ * The validator and robots header for one representation of an article.
+ * The stored etag hashes body and head at publish time, but taking a page
+ * out of the index or pausing the site adds a robots meta without touching
+ * either, so the robots state is part of the tag: a cache answering
+ * If-None-Match from its own copy must not 304 a crawler that holds the
+ * indexable copy (or, after a restore, the noindex one). X-Robots-Tag covers
+ * the .md variant too, which has no <head> to carry a meta.
+ */
+export function articleHeaders(
+  page: Pick<PublishedPage, "etag" | "status">,
+  config: Pick<SiteRenderConfig, "indexingPaused">,
+  variant: "html" | "md",
+): Record<string, string> {
+  const noindex = page.status === "noindex" || config.indexingPaused;
+  // Publish stores its tag quoted and the seed does not; either way the header is one quoted string.
+  const tag = page.etag.replace(/^W\//, "").replace(/"/g, "");
+  return {
+    etag: `"${tag}${noindex ? "-noindex" : ""}${variant === "md" ? "-md" : ""}"`,
+    ...(noindex ? { "x-robots-tag": "noindex" } : {}),
+  };
+}
 
 export interface RenderResponseOptions {
   /** The verified-public-host verdict middleware made (RouteContext.host.indexable). */

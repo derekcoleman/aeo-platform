@@ -80,11 +80,13 @@ export interface PublishedSummary {
   path: string;
   title: string | null;
   updated_at: string | Date;
+  /** live | noindex | retired (migration 0020). */
+  status: string;
 }
 
 export async function listPublished(siteId: string, limit = 10, sql: postgres.Sql = appDb()): Promise<PublishedSummary[]> {
   return sql<PublishedSummary[]>`
-    select p.path, coalesce(i.title, p.head->>'title') as title, p.updated_at
+    select p.path, coalesce(i.title, p.head->>'title') as title, p.updated_at, p.status::text as status
     from content.published_pages p left join content.content_items i on i.id = p.content_item_id
     where p.site_id = ${siteId} order by p.updated_at desc limit ${limit}`;
 }
@@ -134,13 +136,15 @@ export interface OpsSiteRow {
   health_failures: number;
   published: number;
   open_opportunities: number;
+  /** The owner's own indexing pause; staff controls are listed separately. */
+  indexing_paused: boolean;
 }
 
 export async function opsSites(scope: OpsScope = {}, sql: postgres.Sql = appDb()): Promise<OpsSiteRow[]> {
   return sql<OpsSiteRow[]>`
     select s.id, s.org_id, o.name as org_name, s.name, s.canonical_domain, s.path_prefix, s.proxy_mode::text as proxy_mode, s.status::text as status,
-           s.last_health_ok, s.last_health_at, s.health_failures,
-           (select count(*) from content.published_pages p where p.site_id = s.id)::int as published,
+           s.last_health_ok, s.last_health_at, s.health_failures, s.indexing_paused,
+           (select count(*) from content.published_pages p where p.site_id = s.id and p.status = 'live')::int as published,
            (select count(*) from content.opportunities q where q.site_id = s.id and q.status = 'open')::int as open_opportunities
     from app.sites s join app.organizations o on o.id = s.org_id
     where (${scope.siteId ?? null}::uuid is null or s.id = ${scope.siteId ?? null}::uuid)

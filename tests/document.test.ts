@@ -16,6 +16,7 @@ const config: SiteRenderConfig = {
     footerHtml: "<footer>© Acme</footer>",
   },
   organization: { name: "Acme", url: "https://acme.com" },
+  indexingPaused: false,
 };
 
 const host: PublicHostResolution = { canonicalDomain: "acme.com", indexable: true };
@@ -24,6 +25,7 @@ const page: PublishedPage = {
   siteId: "site-1",
   path: "/resources/sso-vs-scim",
   contentItemId: "c1",
+  status: "live",
   html: "<p>Answer first.</p>",
   head: {
     title: "SSO vs SCIM",
@@ -80,6 +82,17 @@ describe("article document", () => {
       page: { ...page, head: { ...page.head, noindex: true } },
     });
     expect(html).toContain('name="robots" content="noindex,nofollow"');
+  });
+
+  it("is indexable on a verified host while the page is live and the site is not paused", () => {
+    expect(renderArticleDocument(input)).not.toContain('name="robots"');
+  });
+
+  it("marks noindex while the site's indexing is paused, even on a verified host", () => {
+    const html = renderArticleDocument({ ...input, config: { ...config, indexingPaused: true } });
+    expect(html).toContain('<meta name="robots" content="noindex,nofollow">');
+    // Still the whole article: a pause takes it out of the index, not off the site.
+    expect(html).toContain("<p>Answer first.</p>");
   });
 
   it("advertises the markdown variant", () => {

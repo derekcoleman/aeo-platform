@@ -19,10 +19,10 @@ import { loadVersionDetail, type VersionDetail } from "./content";
  */
 
 export async function loadRenderConfig(siteId: string, sql: postgres.Sql = appDb()): Promise<SiteRenderConfig | null> {
-  const [row] = await sql<{ site_id: string; canonical_domain: string; path_prefix: string; locale: string; trailing_slash: "never" | "always"; theme: SiteTheme; organization: SiteRenderConfig["organization"] }[]>`
-    select site_id, canonical_domain, path_prefix, locale, trailing_slash, theme, organization from content.site_render_config where site_id = ${siteId}`;
+  const [row] = await sql<{ site_id: string; canonical_domain: string; path_prefix: string; locale: string; trailing_slash: "never" | "always"; theme: SiteTheme; organization: SiteRenderConfig["organization"]; indexing_paused: boolean }[]>`
+    select site_id, canonical_domain, path_prefix, locale, trailing_slash, theme, organization, indexing_paused from content.site_render_config where site_id = ${siteId}`;
   if (!row) return null;
-  return { siteId: row.site_id, canonicalDomain: row.canonical_domain, pathPrefix: row.path_prefix, locale: row.locale, trailingSlash: row.trailing_slash, theme: row.theme ?? { tokens: {} }, organization: row.organization ?? {} };
+  return { siteId: row.site_id, canonicalDomain: row.canonical_domain, pathPrefix: row.path_prefix, locale: row.locale, trailingSlash: row.trailing_slash, theme: row.theme ?? { tokens: {} }, organization: row.organization ?? {}, indexingPaused: row.indexing_paused === true };
 }
 
 export async function loadSiteRouteApp(siteId: string, sql: postgres.Sql = appDb()): Promise<SiteRoute | null> {
@@ -95,6 +95,7 @@ async function documentFor(version: VersionDetail | null, siteId: string, opts: 
     siteId,
     path: built.path,
     contentItemId: version?.content_item_id ?? null,
+    status: "noindex",
     html: built.html,
     head: { ...built.head, noindex: true },
     markdown: built.markdown,

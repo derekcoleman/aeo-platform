@@ -6,8 +6,8 @@ import {
   listPublishedPagesWithMarkdown,
 } from "@/lib/render/published";
 import { renderArticleDocument, renderArticleMarkdown } from "@/lib/render/document";
-import { buildFeed, buildLlmsFullTxt, buildLlmsTxt, buildSitemap } from "@/lib/render/artifacts";
-import { RENDER_VARY, routeContext, textResponse, type RouteContext } from "@/lib/render/routes";
+import { buildFeed, buildLlmsFullTxt, buildLlmsTxt, buildSitemap, listedPages, type PageSummary } from "@/lib/render/artifacts";
+import { RENDER_VARY, articleHeaders, routeContext, textResponse, type RouteContext } from "@/lib/render/routes";
 
 /**
  * Everything on the public render path.
@@ -32,6 +32,11 @@ import { RENDER_VARY, routeContext, textResponse, type RouteContext } from "@/li
  * The x-aeo-internal-* headers read here are middleware's verdict. Middleware
  * strips any a client sent before setting them, and refuses /render/* on any
  * host that is not an edge hostname, so they cannot be forged from outside.
+ *
+ * Takedown (migration 0020) is read here on every request: a retired page
+ * answers 410, a noindex page or a paused site serves with a robots meta,
+ * X-Robots-Tag and an ETag of its own, and the sitemap, feed and llms files
+ * list live pages only — none while the site is paused.
  */
 export const dynamic = "force-dynamic";
 
@@ -91,19 +96,16 @@ async function renderArticle(
 
   const page = await getPublishedPage(siteId, publicPath);
   if (!page) return notFound();
+  if (page.status === "retired") return gone();
 
   const input = { config: ctx.config, host: ctx.host, page, slug };
   const cache = { indexable: ctx.host.indexable };
 
   if (wantsMarkdown) {
     if (!page.markdown) return notFound();
-    return textResponse(renderArticleMarkdown(input), "text/markdown; charset=utf-8", {
-      etag: `"${page.etag}-md"`,
-    }, cache);
+    return textResponse(renderArticleMarkdown(input), "text/markdown; charset=utf-8", articleHeaders(page, ctx.config, "md"), cache);
   }
-  return textResponse(renderArticleDocument(input), "text/html; charset=utf-8", {
-    etag: `"${page.etag}"`,
-  }, cache);
+  return textResponse(renderArticleDocument(input), "text/html; charset=utf-8", articleHeaders(page, ctx.config, "html"), cache);
 }
 
 async function renderArtifact(
@@ -113,10 +115,13 @@ async function renderArtifact(
   nonce: string | null = null,
 ): Promise<Response> {
   const cache = { indexable: ctx.host.indexable };
+  // A paused site lists nothing, so skip the query rather than filter its result away.
+  const listed = async <T extends PageSummary>(load: () => Promise<T[]>): Promise<T[]> =>
+    listedPages(ctx.config.indexingPaused ? [] : await load(), ctx.config);
   switch (kind) {
     case "sitemap":
       return textResponse(
-        buildSitemap(ctx.host, await listPublishedPages(siteId, 5000)),
+        buildSitemap(ctx.host, await listed(() => listPublishedPages(siteId, 5000))),
         "application/xml; charset=utf-8",
         {},
         cache,
@@ -124,7 +129,7 @@ async function renderArtifact(
 
     case "feed":
       return textResponse(
-        buildFeed(ctx.host, ctx.config, await listPublishedPages(siteId, 200)),
+        buildFeed(ctx.host, ctx.config, await listed(() => listPublishedPages(siteId, 200))),
         "application/atom+xml; charset=utf-8",
         {},
         cache,
@@ -132,7 +137,7 @@ async function renderArtifact(
 
     case "llms":
       return textResponse(
-        buildLlmsTxt(ctx.host, ctx.config, await listPublishedPages(siteId, 2000)),
+        buildLlmsTxt(ctx.host, ctx.config, await listed(() => listPublishedPages(siteId, 2000))),
         "text/plain; charset=utf-8",
         {},
         cache,
@@ -142,7 +147,7 @@ async function renderArtifact(
       const { body, truncated } = buildLlmsFullTxt(
         ctx.host,
         ctx.config,
-        await listPublishedPagesWithMarkdown(siteId, 2000),
+        await listed(() => listPublishedPagesWithMarkdown(siteId, 2000)),
       );
       // Be explicit when the corpus outgrew the cap rather than serving a
       // partial file that looks complete.
@@ -209,6 +214,24 @@ async function renderHealth(ctx: RouteContext, siteId: string, nonce: string | n
     },
     { headers: { [HEADER.site]: siteId, "cache-control": "no-store", vary: RENDER_VARY } },
   );
+}
+
+/**
+ * A retired page is gone on purpose: 410 tells crawlers and answer engines to
+ * drop it sooner than a 404 would. No passthrough marker — the customer's
+ * origin must not answer for a page that was taken down — and a short shared
+ * cache, so restoring it shows within minutes.
+ */
+function gone(): Response {
+  return new Response("This page has been removed.\n", {
+    status: 410,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "x-robots-tag": "noindex",
+      "cache-control": "public, max-age=0, s-maxage=300",
+      vary: RENDER_VARY,
+    },
+  });
 }
 
 /**

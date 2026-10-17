@@ -22,7 +22,8 @@ import { applyDecision, approvalUrl, GATE_TTL_DAYS, humanGate, type DecisionDeps
 import { citationStatus, loadPublishedAt, POST_PUBLISH_WINDOWS_DAYS, windowDate, windowsStart } from "@/lib/pipeline/loop";
 import { modelFor, ModelTruncatedError, TASK_SETTINGS } from "@/lib/pipeline/model";
 import { loadOpportunity, markOpportunity, openRefreshOpportunity, scanSite } from "@/lib/pipeline/opportunities";
-import { loadSiteOrganization, loadSiteRoute } from "@/lib/pipeline/publish";
+import { holdWhilePaused, isHeld, publishGuard } from "@/lib/pipeline/guard";
+import { isTakenDown, loadSiteOrganization, loadSiteRoute } from "@/lib/pipeline/publish";
 import { runQaGates, safeSourceFetcher } from "@/lib/pipeline/qa";
 import { recomposeFromVersion, remediateDuplicateFaq, sitesWithDuplicateFaq, type FaqRemediation } from "@/lib/pipeline/republish";
 import { importCmsItem, loadExistingContent, publishRefreshToCms } from "@/lib/refresh/publish";
@@ -351,8 +352,12 @@ export const contentPipelineFunction = inngest.createFunction(
       stage = "publish";
       // The pre-publish baseline: attribution needs a valid "before".
       if (opp.question_id) await step.sendEvent("baseline", serpTrackRequested.create({ siteId, orgId, questionIds: [opp.question_id] }));
-      const published = await step.run("publish", async () => {
+      // The kill switch is read inside the step that writes, and a held step
+      // comes back as { held } to sleep and ask again (lib/pipeline/guard.ts).
+      const outcome = await holdWhilePaused(step, (n) => step.run(n === 0 ? "publish" : `publish:${n}`, async () => {
         const sql = appDb();
+        const verdict = await publishGuard(siteId, sql);
+        if (!verdict.ok) return { held: verdict.reason };
         const now = new Date();
         if (item.origin === "cms") {
           // Back to the CMS, same item, same slug. The proxy never serves this one.
@@ -364,8 +369,13 @@ export const contentPipelineFunction = inngest.createFunction(
         const result = await recomposeFromVersion({ contentItemId: item.id, versionId: finalVersionId, siteId, now }, sql);
         await markOpportunity(opportunityId, "published", sql);
         return { ...result, cms: false, publishedAt: now.toISOString() };
-      });
-      if (published.canonicalUrl) await step.sendEvent("published", contentPublished.create({ contentItemId: item.id, versionId: finalVersionId, siteId, orgId, path: published.path, canonicalUrl: published.canonicalUrl }));
+      }));
+      if (isHeld(outcome)) return await fail(`publishing paused: ${outcome.held}`);
+      const published = outcome;
+      // This item's page, taken down, stays down whatever this run published (publishVersion):
+      // the version waits behind the takedown, and Restore is what copies it to the targets.
+      const takenDown = "status" in published && published.status !== "live";
+      if (published.canonicalUrl && !takenDown) await step.sendEvent("published", contentPublished.create({ contentItemId: item.id, versionId: finalVersionId, siteId, orgId, path: published.path, canonicalUrl: published.canonicalUrl }));
 
       // ── post-publish loop ─────────────────────────────────────────────
       if (!opp.question_id) return { ok: true as const, contentItemId: item.id, versionId: finalVersionId, path: published.path, windows: [] };
@@ -381,8 +391,9 @@ export const contentPipelineFunction = inngest.createFunction(
         const status = await step.run(`window:${days}d:check`, () => citationStatus(questionId, siteId));
         windows.push({ days, owned: status?.owned ?? null });
         if (status && !status.owned) {
-          await step.run(`window:${days}d:refresh`, () =>
-            openRefreshOpportunity({
+          // A page taken out of the index since is not queued for a refresh: a rewrite of it is someone's call.
+          await step.run(`window:${days}d:refresh`, async () =>
+            (await isTakenDown(item.id)) ? { inserted: 0, updated: 0 } : openRefreshOpportunity({
               siteId,
               contentItemId: item.id,
               questionId,

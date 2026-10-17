@@ -216,6 +216,16 @@ describe("pushItemToTarget", () => {
     expect(r.skipped).toMatch(/refreshed in place/);
     expect(wf.calls.filter((c) => c.method === "POST" || c.method === "PATCH")).toHaveLength(0);
   });
+  it("never copies a page taken down on the customer's domain, even when forced", async () => {
+    for (const page_status of ["noindex", "retired"] as const) {
+      const wf = fakeWebflow();
+      const { ctx, secrets } = ctxWith(wf.fetchImpl, [], "pipeline", { ...article, page_status });
+      await secrets.put("vault:conn1", "tok");
+      const r = await pushItemToTarget("ci1", target, ctx, { force: true });
+      expect(r).toEqual({ ok: false, skipped: `the page is ${page_status}; restore it to push it again` });
+      expect(wf.calls.filter((c) => c.method === "POST" || c.method === "PATCH")).toHaveLength(0);
+    }
+  });
   it("records a failure row when Webflow rejects the item", async () => {
     const failing = (async () => new Response(JSON.stringify({ message: "Validation Error", code: "validation_error", details: [{ param: "fieldData.name" }] }), { status: 400 })) as typeof fetch;
     const { ctx, sql, secrets } = ctxWith(failing);

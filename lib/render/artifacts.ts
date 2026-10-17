@@ -1,12 +1,24 @@
 import type { PublicHostResolution } from "@/lib/tenancy";
 import { absoluteUrl } from "@/lib/tenancy";
-import type { PageHead } from "./published";
+import type { PageHead, PageStatus } from "./published";
 import type { SiteRenderConfig } from "./site-config";
 
 export interface PageSummary {
   path: string;
   head: PageHead;
   updatedAt: Date;
+  status?: PageStatus;
+}
+
+/**
+ * What the sitemap, feed and llms files may list: live pages, and none at all
+ * while the site's indexing is paused. The listing queries already ask for
+ * live rows; this is the rule in one place, on the exact input the builders
+ * get, so a widened query cannot put a taken-down page back in a sitemap.
+ */
+export function listedPages<T extends PageSummary>(pages: T[], config: Pick<SiteRenderConfig, "indexingPaused">): T[] {
+  if (config.indexingPaused) return [];
+  return pages.filter((p) => (p.status ?? "live") === "live" && !p.head.noindex);
 }
 
 const xmlEscape = (s: string) =>

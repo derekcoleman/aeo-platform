@@ -83,6 +83,23 @@ describe("runHealthCheck", () => {
     expect(r.checks.find((c) => c.key === "csp_inline_style")!.detail.directive).toBe("style-src self");
   });
 
+  it("lets a paused site's article be noindex, but still fails an install that stopped verifying its host", async () => {
+    const paused = (indexable: boolean) => ({
+      ...good(),
+      "https://acme.com/resources/aeo-health?nonce=n0nce": healthRoute({ indexable }),
+      [ARTICLE]: article({ body: `<html><head><link rel="canonical" href="${ARTICLE}"><meta name="robots" content="noindex,nofollow"></head><body></body></html>` }),
+    });
+    const opts = { allowPrivate: true, articlePath: "/resources/sso-vs-scim", expectIndexable: true, expectArticleIndexable: false, nonce };
+    const ok = await runHealthCheck(site, { ...opts, fetchImpl: fakeFetch(paused(true)).fetchImpl });
+    expect(ok.failed).toEqual([]);
+    expect(ok.checks.map((c) => c.key)).not.toContain("not_noindex");
+    const broken = await runHealthCheck(site, { ...opts, fetchImpl: fakeFetch(paused(false)).fetchImpl });
+    expect(broken.failed).toEqual(["indexable"]);
+    // Without the split the article check follows expectIndexable, as before.
+    const unpaused = await runHealthCheck(site, { ...opts, expectArticleIndexable: undefined, fetchImpl: fakeFetch(paused(true)).fetchImpl });
+    expect(unpaused.failed).toEqual(["not_noindex"]);
+  });
+
   it("catches an edge-hostname leak, a wrong canonical, a set-cookie, and a missing sitemap line", async () => {
     const routes = {
       ...good(),

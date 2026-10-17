@@ -275,7 +275,7 @@ export default async function SitePage({ params, searchParams }: { params: Promi
             <CardHeader><CardTitle>Published</CardTitle></CardHeader>
             <CardContent>
               {published.length === 0 ? <p className="text-muted-foreground text-sm">Nothing published yet.</p> : (
-                <ul className="grid gap-1 text-sm">{published.map((p) => <li key={p.path} className="flex justify-between gap-4"><a className="truncate underline-offset-2 hover:underline" href={`https://${site.canonical_domain}${p.path}`} target="_blank" rel="noreferrer">{p.title ?? p.path}</a><span className="text-muted-foreground shrink-0 text-xs">{when(p.updated_at)}</span></li>)}</ul>
+                <ul className="grid gap-1 text-sm">{published.map((p) => <li key={p.path} className="flex justify-between gap-4"><a className="truncate underline-offset-2 hover:underline" href={`https://${site.canonical_domain}${p.path}`} target="_blank" rel="noreferrer">{p.title ?? p.path}</a><span className="text-muted-foreground shrink-0 text-xs">{p.status !== "live" ? `${p.status} · ` : ""}{when(p.updated_at)}</span></li>)}</ul>
               )}
             </CardContent>
           </Card>

@@ -6,8 +6,8 @@
 #   npm run build && npx next start -p 3401 &
 #   ./scripts/verify-proxy.sh http://localhost:3401
 #
-# Requires the seed fixtures (see supabase/tests/isolation.sql) and a page at
-# {prefix}/sso-vs-scim.
+# Requires the seed fixtures (supabase/seed.sql): a page at {prefix}/sso-vs-scim,
+# and the taken-down pages {prefix}/noindex-example and {prefix}/retired-example.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -17,6 +17,8 @@ PUBLIC_HOST="${3:-acme.com}"
 PREFIX="${4:-/resources}"
 SLUG="${5:-sso-vs-scim}"
 SITE_ID="${6:-aaaaaaaa-0000-0000-0000-000000000001}"
+NOINDEX_SLUG="${7:-noindex-example}"
+RETIRED_SLUG="${8:-retired-example}"
 
 E=(-H "Host: $EDGE_HOST")
 F=(-H "X-Forwarded-Host: $PUBLIC_HOST")
@@ -81,6 +83,32 @@ check "we never set a cookie on their domain" 0 \
 echo "invariant 5 — article pages ship zero client JavaScript"
 check "no scripts other than ld+json" 0 \
   "$(body "$PREFIX/$SLUG" "${E[@]}" "${F[@]}" | grep -o '<script[^>]*>' | grep -vc 'ld+json')"
+
+echo "takedown — status is read on every request"
+check "a retired page is 410" 410 "$(code "$PREFIX/$RETIRED_SLUG" "${E[@]}" "${F[@]}")"
+check "a retired .md is 410" 410 "$(code "$PREFIX/$RETIRED_SLUG.md" "${E[@]}" "${F[@]}")"
+check "a retired page carries no passthrough marker" 0 \
+  "$(curl -s -D- -o /dev/null "$BASE$PREFIX/$RETIRED_SLUG" "${E[@]}" "${F[@]}" | grep -ci 'x-aeo-passthrough')"
+check "a noindex page still serves" 200 "$(code "$PREFIX/$NOINDEX_SLUG" "${E[@]}" "${F[@]}")"
+check "a noindex page sends X-Robots-Tag on a verified host" "x-robots-tag: noindex" \
+  "$(curl -s -D- -o /dev/null "$BASE$PREFIX/$NOINDEX_SLUG" "${E[@]}" "${F[@]}" | grep -i '^x-robots-tag' | tr -d '\r' | tr 'A-Z' 'a-z')"
+check "a noindex page is noindex on a verified host" "noindex,nofollow" \
+  "$(body "$PREFIX/$NOINDEX_SLUG" "${E[@]}" "${F[@]}" | grep -o 'noindex,nofollow' | head -1)"
+check "a noindex .md sends X-Robots-Tag" 1 \
+  "$(curl -s -D- -o /dev/null "$BASE$PREFIX/$NOINDEX_SLUG.md" "${E[@]}" "${F[@]}" | grep -ci '^x-robots-tag: noindex')"
+check "a live page sends no X-Robots-Tag" 0 \
+  "$(curl -s -D- -o /dev/null "$BASE$PREFIX/$SLUG" "${E[@]}" "${F[@]}" | grep -ci '^x-robots-tag')"
+# The stored etag predates the takedown; a cache must not 304 the indexable copy against it.
+check "a noindex page has an ETag of its own" 1 \
+  "$(curl -s -D- -o /dev/null "$BASE$PREFIX/$NOINDEX_SLUG" "${E[@]}" "${F[@]}" | grep -ci '^etag: "[^"]*-noindex"')"
+check "a live page's ETag is not a noindex one" 0 \
+  "$(curl -s -D- -o /dev/null "$BASE$PREFIX/$SLUG" "${E[@]}" "${F[@]}" | grep -ci '^etag: "[^"]*-noindex')"
+for p in "$PREFIX/sitemap.xml" "$PREFIX/feed.xml" "$PREFIX/llms.txt" "/llms-full.txt"; do
+  check "$p lists neither taken-down page" 0 \
+    "$(body "$p" "${E[@]}" "${F[@]}" | grep -c -e "$NOINDEX_SLUG" -e "$RETIRED_SLUG")"
+done
+check "the sitemap still lists the live page" 1 \
+  "$(body "$PREFIX/sitemap.xml" "${E[@]}" "${F[@]}" | grep -c "$PREFIX/$SLUG<")"
 
 echo "proxy failure modes"
 check "hop limit exceeded is 508" 508 "$(code "$PREFIX/x" "${E[@]}" -H 'X-AEO-Hops: 9')"

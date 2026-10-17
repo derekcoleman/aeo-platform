@@ -1149,3 +1149,107 @@ begin;
 rollback;
 
 \echo 'isolation: measurement integrity assertions passed'
+
+-- ── 0020: takedown and kill switch ───────────────────────────────────────────
+do $$ begin
+  if (select count(*) from information_schema.columns where table_schema = 'content' and table_name = 'published_pages' and column_name in ('status', 'version_id', 'previous_version_id', 'status_changed_at', 'status_reason')) <> 5 then
+    raise exception 'FAIL published_pages takedown columns missing';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_schema = 'app' and table_name = 'sites' and column_name = 'indexing_paused') then
+    raise exception 'FAIL sites.indexing_paused missing';
+  end if;
+end $$;
+
+-- The renderer reads a page's status and the site's pause with the grants it already had.
+begin;
+  update content.published_pages set status = 'noindex' where site_id = 'aaaaaaaa-0000-0000-0000-000000000001' and path = '/resources/hello';
+  set local role renderer;
+  select pg_temp.expect('renderer reads published_pages.status',
+    (select count(*) from content.published_pages where status = 'noindex'), 1);
+  select pg_temp.expect('renderer reads site_render_config.indexing_paused',
+    (select count(*) from content.site_render_config where not indexing_paused), 2);
+rollback;
+
+-- The owner's flag and every control scope reach the renderer's copy.
+begin;
+  update app.sites set indexing_paused = true where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  select pg_temp.expect('site flag pauses its own render config',
+    (select count(*) from content.site_render_config where indexing_paused), 1);
+  update app.sites set indexing_paused = false where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+  select pg_temp.expect('lifting the site flag clears it',
+    (select count(*) from content.site_render_config where indexing_paused), 0);
+
+  insert into ops.autonomy_controls (scope, org_id, indexing_paused) values ('org', '22222222-2222-2222-2222-222222222222', true);
+  select pg_temp.expect('org control pauses that org''s sites only',
+    (select count(*) from content.site_render_config where indexing_paused and site_id = 'bbbbbbbb-0000-0000-0000-000000000002'), 1);
+  select pg_temp.expect('org control leaves other orgs indexed',
+    (select count(*) from content.site_render_config where indexing_paused and site_id = 'aaaaaaaa-0000-0000-0000-000000000001'), 0);
+
+  -- org_id deliberately omitted: the trigger takes it from the site.
+  insert into ops.autonomy_controls (scope, site_id, indexing_paused, publishing_paused) values ('site', 'aaaaaaaa-0000-0000-0000-000000000001', true, true);
+  select pg_temp.expect('site control carries its site''s org',
+    (select count(*) from ops.autonomy_controls where scope = 'site' and org_id = '11111111-1111-1111-1111-111111111111'), 1);
+  select pg_temp.expect('site control pauses its site',
+    (select count(*) from content.site_render_config where indexing_paused), 2);
+
+  delete from ops.autonomy_controls where scope = 'site';
+  update ops.autonomy_controls set indexing_paused = false where scope = 'org';
+  select pg_temp.expect('lifted controls clear the pause',
+    (select count(*) from content.site_render_config where indexing_paused), 0);
+
+  insert into ops.autonomy_controls (scope, indexing_paused) values ('global', true);
+  select pg_temp.expect('global control pauses every site',
+    (select count(*) from content.site_render_config where indexing_paused), 2);
+rollback;
+
+do $$ begin
+  begin
+    insert into ops.autonomy_controls (scope, org_id) values ('global', '11111111-1111-1111-1111-111111111111');
+    raise exception 'FAIL a global control must not name an org';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into ops.autonomy_controls (scope) values ('org');
+    raise exception 'FAIL an org control must name its org';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into ops.autonomy_controls (scope, publishing_paused) values ('global', true), ('global', false);
+    raise exception 'FAIL a second global control must be rejected';
+  exception when unique_violation then null;
+  end;
+  raise notice 'ok  control scopes are well formed and one per scope';
+end $$;
+
+begin;
+  insert into ops.autonomy_controls (scope, org_id, publishing_paused, reason) values ('org', '11111111-1111-1111-1111-111111111111', true, 'billing dispute');
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":["11111111-1111-1111-1111-111111111111"]}';
+  select pg_temp.expect('member cannot read the kill switches, even their own org''s', (select count(*) from ops.autonomy_controls), 0);
+rollback;
+
+begin;
+  insert into ops.autonomy_controls (scope, org_id, publishing_paused) values ('org', '11111111-1111-1111-1111-111111111111', true);
+  set local role app_user;
+  set local request.jwt.claims = '{"org_ids":[],"is_staff":true}';
+  select pg_temp.expect('staff reads the kill switches', (select count(*) from ops.autonomy_controls), 1);
+rollback;
+
+begin;
+  set local role renderer;
+  do $$
+  declare denied boolean := false;
+  begin
+    begin
+      perform 1 from ops.autonomy_controls;
+    exception when insufficient_privilege then
+      denied := true;
+    end;
+    if not denied then
+      raise exception 'FAIL renderer must not read ops.autonomy_controls';
+    end if;
+    raise notice 'ok  renderer cannot read ops.autonomy_controls';
+  end $$;
+rollback;
+
+\echo 'isolation: takedown and kill switch assertions passed'

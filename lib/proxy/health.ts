@@ -38,8 +38,14 @@ export interface HealthOptions {
   timeoutMs?: number;
   /** A published article path (public, e.g. /resources/sso-vs-scim) to assert on; null skips the article checks. */
   articlePath?: string | null;
-  /** Whether pages should currently be indexable (site active). Verification of a not-yet-active site passes false. */
+  /** Whether the install should verify the forwarded host (site active). Verification of a not-yet-active site passes false. */
   expectIndexable?: boolean;
+  /**
+   * Whether the article should carry no robots noindex. Defaults to
+   * expectIndexable; a site whose indexing is paused (migration 0020) serves
+   * noindex on purpose, while its install must still verify the host.
+   */
+  expectArticleIndexable?: boolean;
   nonce?: () => string;
 }
 
@@ -154,7 +160,7 @@ export async function runHealthCheck(site: HealthSite, opts: HealthOptions = {})
         push("canonical", canonical === url, "fail", { expected: url, got: canonical });
         const robots = robotsMetaOf(body);
         const noindex = /noindex/i.test(robots ?? "");
-        if (opts.expectIndexable) push("not_noindex", !noindex, "fail", { robots });
+        if (opts.expectArticleIndexable ?? opts.expectIndexable) push("not_noindex", !noindex, "fail", { robots });
         const setCookie = art.res.headers.get("set-cookie");
         push("no_set_cookie", !setCookie, "fail", { setCookie: setCookie ? "present" : null });
         const cc = art.res.headers.get("cache-control") ?? "";
